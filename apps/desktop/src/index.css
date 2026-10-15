@@ -1,0 +1,242 @@
+@import "tailwindcss";
+
+/* Theme colors are plain CSS variables set from the active `Theme` (lib/theme.ts).
+   Defaults are the built-in "midnight" theme so the first paint is already right. */
+:root {
+  --bg: #000000;
+  --surface: #0b0b0b;
+  --hover: #161616;
+  --line: #1f1f1f;
+  --fg: #ffffff;
+  --muted: #8c8c8c;
+  --accent: #4f8cff;
+  --on-accent: #ffffff;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --button: #121212;
+  --button-fg: #ffffff;
+  --radius: 10px;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-*: initial;
+  --color-black: #000000;
+  --color-white: #ffffff;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-hover: var(--hover);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-button: var(--button);
+  --color-button-fg: var(--button-fg);
+
+  --radius-ui: var(--radius);
+  --radius-ui-sm: calc(var(--radius) * 0.6);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.4;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+
+  input,
+  textarea,
+  [data-selectable] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  :focus {
+    outline: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline-offset: -1px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  ::placeholder {
+    color: var(--muted);
+    opacity: 0.8;
+  }
+
+  input[type="range"] {
+    accent-color: var(--accent);
+  }
+
+  input[type="checkbox"] {
+    accent-color: var(--accent);
+  }
+
+  input[type="color"] {
+    -webkit-appearance: none;
+    appearance: none;
+    padding: 0;
+    border: 1px solid var(--line);
+    background: transparent;
+  }
+  input[type="color"]::-webkit-color-swatch-wrapper {
+    padding: 0;
+  }
+  input[type="color"]::-webkit-color-swatch {
+    border: none;
+    border-radius: inherit;
+  }
+  input[type="color"]::-moz-color-swatch {
+    border: none;
+    border-radius: inherit;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
+  dialog {
+    margin: auto;
+    color: var(--fg);
+  }
+  dialog::backdrop {
+    background: rgb(0 0 0 / 0.6);
+  }
+
+  details > summary {
+    list-style: none;
+  }
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
+}
+
+/* Primitive defaults live in the components layer, so utilities passed through
+   `className` (w-44, h-7, bg-transparent...) always override them. */
+@layer components {
+  .field {
+    height: 2rem;
+    width: 100%;
+    min-width: 0;
+    border-radius: calc(var(--radius) * 0.6);
+    border: 1px solid var(--line);
+    background: var(--bg);
+    padding-inline: 0.5rem;
+    color: var(--fg);
+  }
+  .field:disabled {
+    opacity: 0.5;
+  }
+  select.field {
+    padding-right: 1.5rem;
+  }
+  textarea.field {
+    height: auto;
+    padding-block: 0.375rem;
+    resize: vertical;
+  }
+
+  .btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    height: 2rem;
+    padding-inline: 0.75rem;
+    border-radius: calc(var(--radius) * 0.6);
+    font-weight: 500;
+    white-space: nowrap;
+    justify-self: start;
+  }
+  .btn:disabled {
+    pointer-events: none;
+    opacity: 0.4;
+  }
+  .btn-sm {
+    height: 1.75rem;
+    padding-inline: 0.5rem;
+    font-size: 12px;
+  }
+  .btn-default,
+  .btn-danger {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--fg);
+  }
+  .btn-danger {
+    color: var(--danger);
+  }
+  .btn-default:hover,
+  .btn-danger:hover,
+  .btn-ghost:hover {
+    background: var(--hover);
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .btn-destructive {
+    background: var(--danger);
+    color: #fff;
+  }
+  .btn-primary:hover,
+  .btn-destructive:hover {
+    filter: brightness(1.1);
+  }
+  .btn-ghost {
+    color: var(--fg);
+  }
+
+  .icon-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: calc(var(--radius) * 0.6);
+    color: var(--fg);
+  }
+  .icon-btn:hover,
+  .icon-btn[aria-pressed="true"] {
+    background: var(--hover);
+  }
+  .icon-btn:disabled {
+    pointer-events: none;
+    opacity: 0.3;
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "omnipanel",
+  "private": true,
+  "version": "1.0.0",
+  "license": "MIT",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "gen:types": "node scripts/gen-types.mjs",
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "build:deck": "pnpm --filter @omni/deck build",
+    "build:ui": "pnpm --filter @omni/desktop build",
+    "dev": "pnpm --filter @omni/desktop tauri dev",
+    "build": "pnpm --filter @omni/desktop tauri build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "cargo test --workspace && pnpm -r test"
+  }
+}

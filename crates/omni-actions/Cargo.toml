@@ -1,0 +1,34 @@
+[package]
+name = "omni-actions"
+description = "Executors for OmniPanel actions and app integrations (OBS, Home Assistant)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-audio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+enigo = "0.6.1"
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+sha2 = "0.11"
+base64 = "0.23"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Power",
+  "Win32_System_Shutdown",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }

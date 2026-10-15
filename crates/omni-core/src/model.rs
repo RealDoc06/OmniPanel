@@ -1,0 +1,559 @@
+//! Persisted configuration: settings, profiles (deck layouts), paired devices,
+//! user themes and user voice presets.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use crate::action::{Action, VolumeTarget};
+
+pub const CONFIG_SCHEMA: u32 = 1;
+pub const MAX_GRID: u8 = 12;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Config {
+    pub schema: u32,
+    pub settings: Settings,
+    pub profiles: Vec<Profile>,
+    pub devices: Vec<Device>,
+    /// User themes. Built-in themes live in [`crate::defaults::builtin_themes`].
+    pub themes: Vec<Theme>,
+    /// User voice presets. Built-ins live in [`crate::defaults::builtin_voice_presets`].
+    pub voice_presets: Vec<VoicePreset>,
+    /// Per-app volumes to restore at startup (see `omni_audio::AudioController::restore_app_levels`).
+    pub app_levels: Vec<crate::AppLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Settings {
+    /// Name shown on decks. Empty means "use the machine hostname".
+    pub host_name: String,
+    /// Port of the deck server (HTTP + WebSocket).
+    pub port: u16,
+    pub launch_at_login: bool,
+    /// Start in the tray without opening the window.
+    pub start_hidden: bool,
+    /// Theme of the desktop app.
+    pub theme_id: String,
+    /// Profile assigned to newly paired devices.
+    pub default_profile_id: Option<String>,
+    pub usb: UsbSettings,
+    pub ai: AiSettings,
+    pub obs: ObsSettings,
+    pub home_assistant: HomeAssistantSettings,
+    pub voice: VoiceSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct UsbSettings {
+    /// Forward the deck server to Android devices over USB (`adb reverse`).
+    pub enabled: bool,
+    /// Custom adb binary. `None` searches PATH and the usual SDK locations.
+    pub adb_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum AiProvider {
+    Openai,
+    Anthropic,
+    Ollama,
+    Openrouter,
+    /// Any OpenAI-compatible endpoint (LM Studio, vLLM, LocalAI, ...).
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct AiSettings {
+    pub provider: AiProvider,
+    pub model: String,
+    /// Override of the provider endpoint. Required for `custom`.
+    pub base_url: Option<String>,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct ObsSettings {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct HomeAssistantSettings {
+    pub enabled: bool,
+    /// e.g. `http://homeassistant.local:8123`
+    pub url: String,
+    /// Long-lived access token.
+    pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct VoiceSettings {
+    pub enabled: bool,
+    pub preset_id: String,
+    /// Input device id. `None` = system default microphone.
+    pub input_device: Option<String>,
+    /// Where processed audio goes, normally a virtual cable
+    /// (BlackHole, VB-CABLE, or the OmniPanel virtual mic on Linux).
+    pub output_device: Option<String>,
+    /// Also play the processed voice on `monitor_device` (headphones).
+    pub monitor: bool,
+    pub monitor_device: Option<String>,
+    pub input_gain_db: f32,
+    pub output_gain_db: f32,
+    pub noise_gate: bool,
+    pub gate_threshold_db: f32,
+}
+
+/// A deck layout. Devices pick one profile each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub rows: u8,
+    pub cols: u8,
+    /// Deck theme. `None` follows the desktop theme.
+    pub theme_id: Option<String>,
+    pub pages: Vec<Page>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Page {
+    pub id: String,
+    pub name: String,
+    pub controls: Vec<Control>,
+}
+
+/// A button or slider placed on the grid. `x`/`y` are 0-based cells,
+/// `w`/`h` the span in cells.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Control {
+    pub id: String,
+    pub x: u8,
+    pub y: u8,
+    #[serde(default = "one")]
+    pub w: u8,
+    #[serde(default = "one")]
+    pub h: u8,
+    #[serde(default)]
+    pub style: Style,
+    pub kind: ControlKind,
+    /// Global shortcut that triggers this control, e.g. `"CmdOrCtrl+Alt+1"`.
+    #[serde(default)]
+    pub hotkey: Option<String>,
+}
+
+fn one() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[ts(export)]
+pub enum ControlKind {
+    Button {
+        #[serde(default)]
+        action: Option<Action>,
+    },
+    Slider {
+        target: VolumeTarget,
+        #[serde(default = "yes")]
+        vertical: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Style {
+    pub label: String,
+    pub icon: Option<Icon>,
+    /// Background color `#rrggbb`. `None` uses the theme button color.
+    pub bg: Option<String>,
+    /// Text / icon color. `None` uses the theme button text color.
+    pub fg: Option<String>,
+    /// Overrides used while the control is active (toggled on, muted, recording...).
+    pub active_bg: Option<String>,
+    pub active_label: Option<String>,
+    pub active_icon: Option<Icon>,
+    pub label_position: LabelPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[ts(export)]
+pub enum Icon {
+    /// A Lucide icon name, e.g. `"mic-off"`.
+    Builtin {
+        name: String,
+    },
+    Emoji {
+        value: String,
+    },
+    /// An image imported into the app data folder.
+    Image {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum LabelPosition {
+    #[default]
+    Bottom,
+    Top,
+    Center,
+    Hidden,
+}
+
+/// A paired deck (phone, tablet, browser).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    /// SHA-256 (hex) of the device token. The token itself only lives on the device.
+    pub token_hash: String,
+    /// Profile shown on this device. `None` uses the default profile.
+    pub profile_id: Option<String>,
+    /// Short platform description derived from the user agent.
+    pub platform: String,
+    /// Unix milliseconds.
+    #[ts(type = "number")]
+    pub paired_at: u64,
+    #[ts(type = "number")]
+    pub last_seen: u64,
+    pub deck: DeckSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct DeckSettings {
+    /// Vibrate on press (Android).
+    pub haptics: bool,
+    /// Try to keep the screen on.
+    pub keep_awake: bool,
+    /// Dim overlay 0.0 - 0.8, handy on OLED/AMOLED screens at night.
+    pub dim: f32,
+    /// Show the page / connection bar.
+    pub show_status_bar: bool,
+    /// Transpose the grid when the screen orientation doesn't match it
+    /// (a 5x3 profile becomes 3x5 on a portrait phone).
+    pub auto_rotate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Theme {
+    pub id: String,
+    pub name: String,
+    pub colors: ThemeColors,
+    /// Corner radius in px for buttons and panels.
+    pub radius: u8,
+}
+
+/// Every color is `#rrggbb`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ThemeColors {
+    pub background: String,
+    pub surface: String,
+    pub surface_hover: String,
+    pub border: String,
+    pub text: String,
+    pub text_muted: String,
+    pub accent: String,
+    pub accent_text: String,
+    pub success: String,
+    pub warning: String,
+    pub danger: String,
+    /// Default deck button background / foreground.
+    pub button: String,
+    pub button_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct VoicePreset {
+    pub id: String,
+    pub name: String,
+    /// Processed in order.
+    pub effects: Vec<Effect>,
+}
+
+/// One stage of the voice effect chain. Mix values are 0.0 (dry) - 1.0 (wet).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[ts(export)]
+pub enum Effect {
+    /// Pitch shift in semitones (-12 .. 12).
+    Pitch {
+        semitones: f32,
+    },
+    /// Robotic voice: fixed-pitch resynthesis around `frequency` Hz.
+    Robot {
+        frequency: f32,
+        mix: f32,
+    },
+    RingMod {
+        frequency: f32,
+        mix: f32,
+    },
+    Echo {
+        delay_ms: f32,
+        feedback: f32,
+        mix: f32,
+    },
+    Reverb {
+        room_size: f32,
+        damping: f32,
+        mix: f32,
+    },
+    Distortion {
+        drive: f32,
+        mix: f32,
+    },
+    Filter {
+        kind: FilterKind,
+        frequency: f32,
+        q: f32,
+    },
+    Chorus {
+        rate_hz: f32,
+        depth_ms: f32,
+        mix: f32,
+    },
+    Flanger {
+        rate_hz: f32,
+        depth_ms: f32,
+        feedback: f32,
+        mix: f32,
+    },
+    Tremolo {
+        rate_hz: f32,
+        depth: f32,
+    },
+    Bitcrush {
+        bits: u8,
+        downsample: u8,
+    },
+    Gain {
+        db: f32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum FilterKind {
+    Lowpass,
+    Highpass,
+    Bandpass,
+}
+
+impl Config {
+    pub fn profile(&self, id: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+
+    pub fn device(&self, id: &str) -> Option<&Device> {
+        self.devices.iter().find(|d| d.id == id)
+    }
+
+    /// Profile for a device: its own, then the default profile, then the first one.
+    pub fn profile_for_device(&self, device: &Device) -> Option<&Profile> {
+        device
+            .profile_id
+            .as_deref()
+            .and_then(|id| self.profile(id))
+            .or_else(|| self.settings.default_profile_id.as_deref().and_then(|id| self.profile(id)))
+            .or_else(|| self.profiles.first())
+    }
+
+    /// Repair anything a hand-edited or older config could break:
+    /// grid bounds, controls outside the grid, empty profiles.
+    pub fn normalize(&mut self) {
+        self.schema = CONFIG_SCHEMA;
+        if self.profiles.is_empty() {
+            self.profiles.push(crate::defaults::default_profile());
+        }
+        for profile in &mut self.profiles {
+            profile.normalize();
+        }
+        let has_default =
+            self.settings.default_profile_id.as_deref().is_some_and(|id| self.profiles.iter().any(|p| p.id == id));
+        if !has_default {
+            self.settings.default_profile_id = self.profiles.first().map(|p| p.id.clone());
+        }
+        for device in &mut self.devices {
+            device.deck.dim = device.deck.dim.clamp(0.0, 0.8);
+        }
+    }
+}
+
+impl Profile {
+    pub fn page(&self, id: &str) -> Option<&Page> {
+        self.pages.iter().find(|p| p.id == id)
+    }
+
+    pub fn normalize(&mut self) {
+        self.rows = self.rows.clamp(1, MAX_GRID);
+        self.cols = self.cols.clamp(1, MAX_GRID);
+        if self.pages.is_empty() {
+            self.pages.push(Page { id: crate::new_id(), name: "Page 1".into(), controls: vec![] });
+        }
+        let (rows, cols) = (self.rows, self.cols);
+        for page in &mut self.pages {
+            page.controls.retain(|c| c.x < cols && c.y < rows);
+            for c in &mut page.controls {
+                c.w = c.w.clamp(1, cols - c.x);
+                c.h = c.h.clamp(1, rows - c.y);
+            }
+        }
+    }
+
+    /// Every control of every page.
+    pub fn controls(&self) -> impl Iterator<Item = &Control> {
+        self.pages.iter().flat_map(|p| p.controls.iter())
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let profile = crate::defaults::default_profile();
+        Self {
+            schema: CONFIG_SCHEMA,
+            settings: Settings { default_profile_id: Some(profile.id.clone()), ..Settings::default() },
+            profiles: vec![profile],
+            devices: vec![],
+            themes: vec![],
+            voice_presets: vec![],
+            app_levels: vec![],
+        }
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            host_name: String::new(),
+            port: 7710,
+            launch_at_login: false,
+            start_hidden: false,
+            theme_id: "midnight".into(),
+            default_profile_id: None,
+            usb: UsbSettings::default(),
+            ai: AiSettings::default(),
+            obs: ObsSettings::default(),
+            home_assistant: HomeAssistantSettings::default(),
+            voice: VoiceSettings::default(),
+        }
+    }
+}
+
+impl Default for UsbSettings {
+    fn default() -> Self {
+        Self { enabled: true, adb_path: None }
+    }
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self { provider: AiProvider::Openai, model: "gpt-6-luna".into(), base_url: None, api_key: String::new() }
+    }
+}
+
+impl Default for ObsSettings {
+    fn default() -> Self {
+        Self { enabled: false, host: "127.0.0.1".into(), port: 4455, password: String::new() }
+    }
+}
+
+impl Default for HomeAssistantSettings {
+    fn default() -> Self {
+        Self { enabled: false, url: "http://homeassistant.local:8123".into(), token: String::new() }
+    }
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset_id: "robot".into(),
+            input_device: None,
+            output_device: None,
+            monitor: false,
+            monitor_device: None,
+            input_gain_db: 0.0,
+            output_gain_db: 0.0,
+            noise_gate: true,
+            gate_threshold_db: -50.0,
+        }
+    }
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self { id: crate::new_id(), name: "Profile".into(), rows: 3, cols: 5, theme_id: None, pages: vec![] }
+    }
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self { id: crate::new_id(), name: "Page".into(), controls: vec![] }
+    }
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Self {
+            id: crate::new_id(),
+            name: "Deck".into(),
+            token_hash: String::new(),
+            profile_id: None,
+            platform: String::new(),
+            paired_at: 0,
+            last_seen: 0,
+            deck: DeckSettings::default(),
+        }
+    }
+}
+
+impl Default for DeckSettings {
+    fn default() -> Self {
+        Self { haptics: true, keep_awake: true, dim: 0.0, show_status_bar: true, auto_rotate: true }
+    }
+}

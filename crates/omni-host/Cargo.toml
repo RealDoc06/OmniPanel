@@ -1,0 +1,35 @@
+[package]
+name = "omni-host"
+description = "OmniPanel engine: config, deck server, pairing, dispatcher, feedback, USB bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-audio.workspace = true
+omni-voice.workspace = true
+omni-actions.workspace = true
+omni-ai.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rust-embed = "8"
+mime_guess = "2"
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.23"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+if-addrs = "0.15"
+gethostname = "1"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.30"
+tokio = { workspace = true, features = ["signal"] }

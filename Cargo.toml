@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/omni-core",
+  "crates/omni-audio",
+  "crates/omni-voice",
+  "crates/omni-actions",
+  "crates/omni-ai",
+  "crates/omni-host",
+  "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/RealDoc06/OmniPanel"
+
+[workspace.dependencies]
+omni-core = { path = "crates/omni-core" }
+omni-audio = { path = "crates/omni-audio" }
+omni-voice = { path = "crates/omni-voice" }
+omni-actions = { path = "crates/omni-actions" }
+omni-ai = { path = "crates/omni-ai" }
+omni-host = { path = "crates/omni-host" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "net", "io-util"] }
+tracing = "0.1"
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+schemars = "1"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream", "http2", "charset", "system-proxy"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

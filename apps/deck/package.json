@@ -1,0 +1,23 @@
+{
+  "name": "@omni/deck",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Deck web client served by the OmniPanel host. Runs on old phones/tablets (ES5 output).",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "mock": "node dev/mock-host.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node build.mjs && es-check es5 'dist/**/*.js'"
+  },
+  "devDependencies": {
+    "@omni/protocol": "workspace:*",
+    "@swc/core": "^1.16.18",
+    "es-check": "^9.8.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "ws": "^8.22.0"
+  }
+}

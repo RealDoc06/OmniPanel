@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>OmniPanel uses the microphone for the voice changer.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>OmniPanel needs this to change the volume of individual apps.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>OmniPanel runs the AppleScript actions you configure.</string>
+</dict>
+</plist>

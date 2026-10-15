@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OmniPanel",
+  "version": "1.0.0",
+  "identifier": "dev.omnipanel.desktop",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist",
+    "beforeDevCommand": "pnpm --dir ../deck build && pnpm dev",
+    "beforeBuildCommand": "pnpm --dir ../deck build && pnpm build"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "publisher": "OmniPanel",
+    "copyright": "MIT License",
+    "shortDescription": "Turn any phone or tablet into a Stream Deck",
+    "longDescription": "OmniPanel is a free, open-source Stream Deck alternative. Pair old phones and tablets over Wi-Fi or USB and use them as control decks: app volume, voice effects, OBS, Home Assistant, scripts, hotkeys and AI-generated actions.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "entitlements": "Entitlements.plist"
+    },
+    "linux": {
+      "deb": { "depends": ["pulseaudio-utils"] }
+    }
+  }
+}
