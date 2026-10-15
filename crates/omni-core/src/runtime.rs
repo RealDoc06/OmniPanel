@@ -16,6 +16,8 @@ pub struct AppState {
     pub builtin_themes: Vec<Theme>,
     pub builtin_voice_presets: Vec<VoicePreset>,
     pub info: AppInfo,
+    /// Recent activity, including startup warnings before the UI subscribed.
+    pub logs: Vec<LogEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

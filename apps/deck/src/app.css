@@ -44,6 +44,21 @@ input {
   user-select: text;
 }
 
+/* Focus rings only while the keyboard is in use: main.ts sets .kbd on <html> (no :focus-visible on old WebViews).
+   Inset by default (chrome, keypad, sheet rows); grid cells get an outer ring that stays readable on any button color. */
+[tabindex]:focus {
+  outline: none;
+}
+
+.kbd [tabindex]:focus {
+  outline: 2px solid #4f8cff;
+  outline-offset: -2px;
+}
+
+.kbd .btn:focus, .kbd .slider:focus {
+  outline-offset: 2px;
+}
+
 #app {
   position: fixed;
   left: 0;
@@ -93,6 +108,21 @@ input {
   top: 28px;
   -webkit-transition: opacity 0.15s;
   transition: opacity 0.15s;
+}
+
+/* Shown instead of the grid when the page has no controls. */
+.empty {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  padding: 0 24px;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: center;
+  -webkit-transform: translateY(-50%);
+  transform: translateY(-50%);
 }
 
 .btn, .slider {
@@ -317,6 +347,13 @@ svg {
 
 .pair {
   background: #000;
+}
+
+/* Screens too short for the keypad plus the code (pair.ts sets .scroll only then). */
+.pair.scroll {
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .pair-logo {
@@ -583,6 +620,14 @@ svg {
   font-weight: 500;
   line-height: 18px;
   opacity: 0.6;
+}
+
+.sheet-version {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  opacity: 0.4;
 }
 
 /* ---- toasts + dim ---- */

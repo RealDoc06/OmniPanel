@@ -6,7 +6,17 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const MAIN: &str = "main";
 
+/// Show the main window, creating it when needed. Runs on the main thread
+/// (inline when already there), so callers on other threads (single-instance
+/// relaunch) and the tray / Reopen can't both pass the check and create two.
 pub fn show(app: &AppHandle) {
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || show_now(&handle)) {
+        tracing::error!("can't open the window: {e}");
+    }
+}
+
+fn show_now(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN) {
         let _ = window.unminimize();
         let _ = window.show();

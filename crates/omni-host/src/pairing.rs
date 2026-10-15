@@ -2,7 +2,9 @@
 //!
 //! The desktop shows a 6-digit code; a deck that sends it gets a random token.
 //! Only the token's SHA-256 is stored. A code dies after 10 minutes, after a
-//! successful pairing, or after too many wrong guesses.
+//! successful pairing, or after too many wrong guesses. Too many wrong
+//! guesses also lock pairing for every connection for a while, so opening
+//! many sockets doesn't multiply the guess rate.
 
 use base64::Engine;
 use omni_core::{PairingInfo, now_ms};
@@ -11,19 +13,29 @@ use sha2::{Digest, Sha256};
 
 const CODE_TTL_MS: u64 = 10 * 60 * 1000;
 const MAX_FAILURES: u32 = 5;
+/// How long every pairing attempt is refused after `MAX_FAILURES` wrong codes.
+pub const LOCKOUT_MS: u64 = 30_000;
 
 #[derive(Default)]
 pub struct Pairing {
     active: Option<PairingInfo>,
+    /// The last code ran out (it wasn't stopped or used).
+    expired: bool,
     failures: u32,
+    /// `now_ms()` until which every attempt is refused.
+    locked_until: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verify {
     Ok,
     Wrong,
-    /// Too many failures: a new code was generated.
+    /// Too many failures: a new code was generated and pairing is locked.
     Rotated,
+    /// Locked after too many failures, try again later.
+    Locked,
+    /// The code ran out; the desktop offers a new one.
+    Expired,
     Inactive,
 }
 
@@ -32,30 +44,42 @@ impl Pairing {
         let code = format!("{:06}", rand::rng().random_range(0..1_000_000));
         let info = PairingInfo { code, expires_at: now_ms() + CODE_TTL_MS };
         self.active = Some(info.clone());
+        self.expired = false;
         self.failures = 0;
+        self.locked_until = 0;
         info
     }
 
     pub fn stop(&mut self) {
         self.active = None;
+        self.expired = false;
     }
 
     pub fn current(&mut self) -> Option<PairingInfo> {
         if self.active.as_ref().is_some_and(|p| p.expires_at <= now_ms()) {
             self.active = None;
+            self.expired = true;
         }
         self.active.clone()
     }
 
     pub fn verify(&mut self, code: &str) -> Verify {
-        let Some(active) = self.current() else { return Verify::Inactive };
+        let Some(active) = self.current() else {
+            return if self.expired { Verify::Expired } else { Verify::Inactive };
+        };
+        if now_ms() < self.locked_until {
+            return Verify::Locked;
+        }
         if constant_time_eq(active.code.as_bytes(), code.trim().as_bytes()) {
             self.active = None;
             return Verify::Ok;
         }
         self.failures += 1;
         if self.failures >= MAX_FAILURES {
-            self.start();
+            // Fresh code, same deadline: guessing can't keep pairing open.
+            let next = PairingInfo { expires_at: active.expires_at, ..self.start() };
+            self.active = Some(next);
+            self.locked_until = now_ms() + LOCKOUT_MS;
             return Verify::Rotated;
         }
         Verify::Wrong
@@ -114,16 +138,35 @@ mod tests {
         assert_eq!(p.verify(&info.code), Verify::Ok);
         // a code works once
         assert_eq!(p.verify(&info.code), Verify::Inactive);
+        // a code that ran out is told apart from pairing being off
+        p.start();
+        p.active.as_mut().unwrap().expires_at = now_ms();
+        assert_eq!(p.verify(wrong), Verify::Expired);
+        p.stop();
+        assert_eq!(p.verify(wrong), Verify::Inactive);
     }
 
     #[test]
-    fn brute_force_rotates_code() {
+    fn brute_force_rotates_code_and_locks_every_connection() {
         let mut p = Pairing::default();
-        let first = p.start().code;
-        let wrong = if first == "999999" { "888888" } else { "999999" };
+        let first = p.start();
+        let wrong = if first.code == "999999" { "888888" } else { "999999" };
         let results: Vec<_> = (0..MAX_FAILURES).map(|_| p.verify(wrong)).collect();
         assert_eq!(results.last(), Some(&Verify::Rotated));
-        assert!(p.current().is_some());
+        let rotated = p.current().unwrap();
+        assert_eq!(rotated.expires_at, first.expires_at, "guessing must not extend pairing");
+        // Locked for everyone, even with the right code.
+        assert_eq!(p.verify(&rotated.code), Verify::Locked);
+        p.locked_until = now_ms();
+        assert_eq!(p.verify(&rotated.code), Verify::Ok);
+
+        // "Pair a device" again lifts the lock right away.
+        p.start();
+        for _ in 0..MAX_FAILURES {
+            p.verify(wrong);
+        }
+        let fresh = p.start();
+        assert_eq!(p.verify(&fresh.code), Verify::Ok);
     }
 
     #[test]

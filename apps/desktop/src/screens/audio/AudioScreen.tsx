@@ -1,22 +1,24 @@
-// Mixer (master, mic, per-app) and the voice changer.
+// Volume screen: computer sound, microphone and per-app mixer.
 import type { AppAudio, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
 import { useRef, useState } from "react";
 import { I } from "../../components/Icon";
-import { IconButton, Notice, ScreenHeader, Section } from "../../components/ui";
+import { Button, IconButton, Notice, ScreenHeader } from "../../components/ui";
 import type { IconName } from "../../lib/icons";
 import { api } from "../../lib/backend";
 import { usePolling, useThrottled } from "../../lib/hooks";
+import { run, useIsMac } from "../../lib/store";
 import { toastError } from "../../lib/toast";
 import { cx, errorMessage } from "../../lib/util";
-import { VoiceChanger } from "./VoiceChanger";
+
+/** macOS privacy pane for "Screen & System Audio Recording", which per-app volume needs. */
+const AUDIO_PERMISSION_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
 export function AudioScreen() {
   return (
     <>
-      <ScreenHeader title="Audio" />
-      <div className="flex-1 overflow-y-auto">
+      <ScreenHeader title="Volume" />
+      <div className="flex-1 overflow-y-auto px-6 py-4">
         <Mixer />
-        <VoiceChanger />
       </div>
     </>
   );
@@ -40,6 +42,7 @@ function Mixer() {
   const [mixer, setMixer] = useState<MixerState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const touchedAt = useRef(0);
+  const mac = useIsMac();
 
   usePolling(async () => {
     try {
@@ -74,32 +77,40 @@ function Mixer() {
       icon={icon}
       state={state}
       playing={app?.playing}
+      disabled={target.type === "app" && !mixer?.capabilities.perAppVolume}
       onVolume={(v) => setVolume(target, v)}
       onMute={(m) => setMuted(target, m)}
     />
   );
 
   return (
-    <Section title="Mixer">
+    <>
       {error && <Notice tone="error">{error}</Notice>}
       {mixer && (
         <div className="flex flex-col">
-          {mixer.master && row({ type: "master" }, "System output", "volume-2", mixer.master)}
+          {mixer.master && row({ type: "master" }, "Computer sound", "volume-2", mixer.master)}
           {mixer.mic && row({ type: "mic" }, "Microphone", "mic", mixer.mic)}
-          <div className="mt-3 mb-1 text-xs font-semibold text-muted">Apps</div>
-          {mixer.capabilities.note && (
-            <div className="mb-2">
-              <Notice tone={mixer.capabilities.perAppVolume ? "info" : "warn"}>{mixer.capabilities.note}</Notice>
+          <div className="my-2 border-t border-line" />
+          {!mixer.capabilities.perAppVolume && (
+            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Notice tone="warn">
+                {mac ? "Allow OmniPanel to control app volume." : (mixer.capabilities.note ?? "App volume controls are unavailable.")}
+              </Notice>
+              {mac && (
+                <Button size="sm" onClick={() => void run(api.runAction({ type: "open", target: AUDIO_PERMISSION_PANE }))}>
+                  Open System Settings
+                </Button>
+              )}
             </div>
           )}
           {mixer.apps.length === 0 ? (
-            <p className="py-2 text-muted">No app is playing audio.</p>
+            <p className="py-2">Apps show up here while they play sound.</p>
           ) : (
             mixer.apps.map((app) => row({ type: "app", app: app.id }, app.name, "app-window", app, app))
           )}
         </div>
       )}
-    </Section>
+    </>
   );
 }
 
@@ -108,6 +119,7 @@ function MixerRow({
   icon,
   state,
   playing,
+  disabled = false,
   onVolume,
   onMute,
 }: {
@@ -115,24 +127,30 @@ function MixerRow({
   icon: IconName;
   state: VolumeState;
   playing?: boolean;
+  disabled?: boolean;
   onVolume: (value: number) => void;
   onMute: (muted: boolean) => void;
 }) {
   return (
-    <div className="flex h-10 items-center gap-3">
+    <div
+      className={cx("flex h-10 items-center gap-3", disabled && "opacity-40")}
+      title={disabled ? "App sliders and mute controls are unavailable until app volume control is allowed." : undefined}
+    >
       <I name={icon} className="size-4 text-muted" />
-      <span className="flex w-44 min-w-0 items-center gap-1.5 truncate">
-        {name}
-        {playing && <span title="Playing" className="size-1.5 shrink-0 rounded-full bg-success" />}
+      <span className="flex w-44 min-w-0 items-baseline gap-2">
+        <span className="truncate">{name}</span>
+        {playing && <span className="shrink-0 text-xs text-muted">playing</span>}
       </span>
       <IconButton
-        icon={state.muted ? "volume-x" : "volume-2"}
+        icon={icon === "mic" ? (state.muted ? "mic-off" : "mic") : (state.muted ? "volume-x" : "volume-2")}
         label={state.muted ? `Unmute ${name}` : `Mute ${name}`}
         tone={state.muted ? "danger" : "default"}
+        disabled={disabled}
         onClick={() => onMute(!state.muted)}
       />
       <input
         type="range"
+        disabled={disabled}
         aria-label={`${name} volume`}
         min={0}
         max={1}

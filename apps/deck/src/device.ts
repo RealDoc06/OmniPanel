@@ -42,8 +42,20 @@ export function clientInfo(): ClientInfo {
   };
 }
 
+/** iPhone, iPod or iPad (iPadOS 13+ Safari reports a Mac but has a touch screen). */
 export function isIos(): boolean {
-  return /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const ua = navigator.userAgent;
+  return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+}
+
+/** Major iOS version from the user agent ("OS 9_3"); 0 when unknown (iPadOS 13+ hides it). */
+export function iosVersion(): number {
+  const match = /OS (\d+)_/.exec(navigator.userAgent);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+export function isAndroid(): boolean {
+  return /Android/.test(navigator.userAgent);
 }
 
 /** True when launched from the iOS home screen (no browser chrome). */

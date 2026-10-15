@@ -29,6 +29,7 @@ import type { Api } from "./api";
 import type { Backend } from "./backend";
 import { emptyStyle } from "./controls";
 import { MIDNIGHT } from "./theme";
+import { rebase } from "./saver";
 import { newId } from "./util";
 
 type Colors = [string, string, string, string, string, string, string, string, string, string, string, string, string];
@@ -71,7 +72,6 @@ const builtinVoicePresets: VoicePreset[] = [
   preset("radio", "Radio", [
     { type: "filter", kind: "bandpass", frequency: 1500, q: 0.9 },
     { type: "distortion", drive: 0.25, mix: 0.6 },
-    { type: "gain", db: 3 },
   ]),
   preset("telephone", "Telephone", [{ type: "filter", kind: "bandpass", frequency: 1700, q: 1.4 }, { type: "bitcrush", bits: 8, downsample: 2 }]),
   preset("echo", "Echo", [{ type: "echo", delayMs: 280, feedback: 0.45, mix: 0.4 }]),
@@ -107,7 +107,12 @@ function button(x: number, y: number, label: string, icon: string, action: Actio
   };
 }
 
-const toggleStyle = (activeIcon: string): Partial<Style> => ({ activeIcon: builtin(activeIcon), activeBg: "#b91c1c" });
+/** Shows `activeLabel` and `activeIcon` on red while active (omni_core `toggle_button`). */
+const toggleStyle = (activeLabel: string, activeIcon: string): Partial<Style> => ({
+  activeLabel,
+  activeIcon: builtin(activeIcon),
+  activeBg: "#b91c1c",
+});
 
 // Same layout as omni_core::defaults::default_profile.
 function defaultProfile(): Profile {
@@ -124,17 +129,23 @@ function defaultProfile(): Profile {
         id: newId(),
         name: "Main",
         controls: [
-          button(0, 0, "Play", "play", media("playPause")),
+          button(0, 0, "Play / pause", "play", media("playPause")),
           button(1, 0, "Previous", "skip-back", media("previous")),
           button(2, 0, "Next", "skip-forward", media("next")),
-          button(3, 0, "Mic", "mic", { type: "volume", target: { type: "mic" }, op: { type: "toggleMute" } }, toggleStyle("mic-off")),
-          button(0, 1, "Sound", "volume-2", master({ type: "toggleMute" }), toggleStyle("volume-x")),
-          button(1, 1, "Voice FX", "audio-waveform", { type: "voice", op: { type: "toggle" } }, { activeLabel: "FX On" }),
-          button(2, 1, "Next Voice", "shuffle", { type: "voice", op: { type: "cycle", presetIds: [] } }),
-          button(3, 1, "Lock", "lock", { type: "system", command: "lock" }),
-          button(0, 2, "Vol -", "volume-1", master({ type: "step", delta: -0.05 })),
-          button(1, 2, "Vol +", "volume-2", master({ type: "step", delta: 0.05 })),
-          button(2, 2, "Display Off", "monitor-off", { type: "system", command: "displaySleep" }),
+          button(3, 0, "Open browser", "globe", { type: "open", target: "https://www.google.com" }),
+          button(0, 1, "Volume down", "volume-1", master({ type: "step", delta: -0.05 })),
+          button(1, 1, "Volume up", "volume-2", master({ type: "step", delta: 0.05 })),
+          button(2, 1, "Mute sound", "volume-off", master({ type: "toggleMute" }), toggleStyle("Sound muted", "volume-x")),
+          button(
+            3,
+            1,
+            "Mute mic",
+            "mic",
+            { type: "volume", target: { type: "mic" }, op: { type: "toggleMute" } },
+            toggleStyle("Mic muted", "mic-off"),
+          ),
+          button(0, 2, "Voice effects", "audio-waveform", { type: "voice", op: { type: "toggle" } }, { activeLabel: "Effects on" }),
+          button(1, 2, "Next voice", "shuffle", { type: "voice", op: { type: "cycle", presetIds: [] } }),
           button(3, 2, "More", "chevron-right", { type: "navigate", to: { type: "nextPage" } }),
           {
             id: newId(),
@@ -178,7 +189,7 @@ function streamingProfile(): Profile {
           button(0, 1, "Go live", "radio", obs({ type: "toggleStream" }), { activeBg: "#dc2626", activeLabel: "LIVE" }),
           button(1, 1, "Mute mic", "mic-off", obs({ type: "toggleMute", input: "Mic/Aux" })),
           button(2, 1, "Clip it", "scissors", obs({ type: "saveReplay" })),
-          button(3, 1, "Discord", "volume-x", { type: "volume", target: { type: "app", app: "com.hnc.Discord" }, op: { type: "toggleMute" } }),
+          button(3, 1, "Discord", "volume-x", { type: "volume", target: { type: "app", app: "Discord" }, op: { type: "toggleMute" } }),
           {
             ...button(0, 2, "Desk lamp", "lamp-desk", { type: "homeAssistant", op: { type: "toggle", entityId: "light.desk" } }),
             w: 2,
@@ -237,7 +248,7 @@ function initialConfig(): Config {
       defaultProfileId: main.id,
       usb: { enabled: true, adbPath: null },
       ai: { provider: "openai", model: "gpt-6-luna", baseUrl: null, apiKey: "" },
-      obs: { enabled: true, host: "127.0.0.1", port: 4455, password: "" },
+      obs: { enabled: false, host: "127.0.0.1", port: 4455, password: "" },
       homeAssistant: { enabled: false, url: "http://homeassistant.local:8123", token: "" },
       voice: {
         enabled: false,
@@ -319,10 +330,10 @@ function runtime(): RuntimeState {
       error: null,
     },
     obs: settings.obs.enabled
-      ? { state: "connected", message: "OBS 31.1.2, obs-websocket 5.6" }
+      ? unavailableObs() ? { state: "error", message: "Couldn't connect to OBS. Check the address and port, and make sure OBS is running." } : { state: "connected", message: "OBS 31.1.2, obs-websocket 5.6" }
       : { state: "disabled", message: null },
     homeAssistant: settings.homeAssistant.enabled
-      ? settings.homeAssistant.token
+      ? unavailableUrl(settings.homeAssistant.url) ? { state: "error", message: "Couldn't connect to Home Assistant. Check the address and make sure it is running." } : settings.homeAssistant.token
         ? { state: "connected", message: "Home Assistant 2026.9" }
         : { state: "error", message: "401 Unauthorized: check the access token" }
       : { state: "disabled", message: null },
@@ -408,7 +419,7 @@ function fakeGenerate(prompt: string): GeneratedControl {
     return {
       label: "Mute Discord",
       icon: "volume-x",
-      action: { type: "volume", target: { type: "app", app: "com.hnc.Discord" }, op: { type: "toggleMute" } },
+      action: { type: "volume", target: { type: "app", app: "Discord" }, op: { type: "toggleMute" } },
       explanation: "Toggles mute on Discord's audio output.",
     };
   }
@@ -467,6 +478,20 @@ function fakeGenerate(prompt: string): GeneratedControl {
   };
 }
 
+/** Deterministic refused-connection fixtures; no network or real credentials are used. */
+function unavailableUrl(address: string | null): boolean {
+  if (!address) return false;
+  try {
+    return new URL(address.includes("://") ? address : `http://${address}`).port === "9";
+  } catch {
+    return false;
+  }
+}
+const unavailableObs = () => config.settings.obs.port === 9 || unavailableUrl(config.settings.obs.host);
+const checkAiConnection = () => {
+  if (unavailableUrl(config.settings.ai.baseUrl)) throw "request failed: error sending request";
+};
+
 const aiReady = () => {
   const ai = config.settings.ai;
   return ai.apiKey.trim() !== "" || ai.provider === "ollama" || ai.provider === "custom";
@@ -476,6 +501,7 @@ const api: Api = {
   getState: (): Promise<AppState> =>
     reply({
       config,
+      logs: [],
       runtime: runtime(),
       builtinThemes,
       builtinVoicePresets,
@@ -490,7 +516,13 @@ const api: Api = {
   setSettings: async (settings) => {
     const portChanged = settings.port !== config.settings.port;
     mutate((c) => ({ ...c, settings: structuredClone(settings) }));
-    if (portChanged) log("info", `Deck server restarted on port ${settings.port}`);
+    if (portChanged) log("info", `Ready for devices on port ${settings.port}`);
+    return reply(undefined);
+  },
+  patchSettings: async (patch) => {
+    const port = config.settings.port;
+    mutate((c) => ({ ...c, settings: rebase(c.settings, patch) }));
+    if (port !== config.settings.port) log("info", `Ready for devices on port ${config.settings.port}`);
     return reply(undefined);
   },
   saveProfile: async (profile) => {
@@ -578,7 +610,7 @@ const api: Api = {
       pairing = null;
       mutate((c) => ({ ...c, devices: [...c.devices, device] }));
       emit({ type: "paired", device });
-      log("info", `Paired ${device.name}`);
+      log("info", `Connected ${device.name}`);
     }, 20000);
     return reply(info);
   },
@@ -594,10 +626,11 @@ const api: Api = {
     await reply(undefined, 150);
     switch (action.type) {
       case "obs":
-        if (!config.settings.obs.enabled) throw "OBS is not connected";
+        if (!config.settings.obs.enabled || unavailableObs()) throw "OBS is not connected";
         break;
       case "homeAssistant":
-        if (!config.settings.homeAssistant.enabled) throw "Home Assistant is not configured";
+        if (!config.settings.homeAssistant.enabled) throw "Home Assistant is not connected";
+    if (unavailableUrl(config.settings.homeAssistant.url)) throw "error sending request";
         break;
       case "runScript":
         return { message: action.showOutput ? "Already up to date." : null };
@@ -657,7 +690,7 @@ const api: Api = {
   },
 
   obsInventory: async () => {
-    if (!config.settings.obs.enabled) throw "OBS is not connected";
+    if (!config.settings.obs.enabled || unavailableObs()) throw "OBS is not connected";
     return reply({
       scenes: ["Starting Soon", "Main", "BRB", "Ending"],
       inputs: ["Mic/Aux", "Desktop Audio", "Webcam", "Music"],
@@ -670,7 +703,8 @@ const api: Api = {
     });
   },
   haEntities: async () => {
-    if (!config.settings.homeAssistant.enabled) throw "Home Assistant is not configured";
+    if (!config.settings.homeAssistant.enabled) throw "Home Assistant is not connected";
+    if (unavailableUrl(config.settings.homeAssistant.url)) throw "error sending request";
     return reply([
       { entityId: "light.desk", name: "Desk lamp", state: "on" },
       { entityId: "light.living_room", name: "Living room", state: "off" },
@@ -682,11 +716,13 @@ const api: Api = {
 
   aiGenerate: async (request) => {
     await reply(undefined, 900);
+    checkAiConnection();
     if (!aiReady()) throw "AI is not configured: add an API key in Settings";
     const base = fakeGenerate(request.prompt);
     return request.history.length ? { ...base, explanation: `${base.explanation} Refined: ${request.prompt}` } : base;
   },
-  aiModels: () => {
+  aiModels: async () => {
+    checkAiConnection();
     const models: Record<string, string[]> = {
       openai: ["gpt-6-luna", "gpt-6", "gpt-6-mini"],
       anthropic: ["claude-sonnet", "claude-haiku", "claude-opus"],
@@ -698,6 +734,7 @@ const api: Api = {
   },
   aiTest: async () => {
     await reply(undefined, 600);
+    checkAiConnection();
     if (!aiReady()) throw "Missing API key";
     return `Connected. ${config.settings.ai.model} answered in 412 ms.`;
   },
@@ -739,6 +776,6 @@ export const backend: Backend = {
 
 // A few log lines so the log view isn't empty.
 setTimeout(() => {
-  log("info", "Deck server listening on 0.0.0.0:7710");
-  log("warn", "Global shortcut CmdOrCtrl+Alt+1 is already registered by another app");
+  log("info", "Ready for devices on port 7710");
+  log("warn", `The keyboard shortcut ${os === "macos" ? "Cmd" : "Ctrl"}+Alt+1 for "Play / pause" is used by another app. Choose a different one.`);
 }, 300);

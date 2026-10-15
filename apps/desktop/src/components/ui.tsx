@@ -18,7 +18,7 @@ const BUTTON_VARIANTS = {
 
 const BUTTON_SIZES = { sm: "btn-sm", md: "" };
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+interface ButtonProps extends ComponentProps<"button"> {
   variant?: keyof typeof BUTTON_VARIANTS;
   size?: keyof typeof BUTTON_SIZES;
   icon?: IconName;
@@ -341,7 +341,8 @@ export function Range({
   );
 }
 
-/** Color swatch + hex input. `null` means "theme default", shown with `fallback`. */
+/** Color swatch + hex input. `null` means "theme default": the swatch shows `fallback` and the
+ * hex field is empty with a "Default" placeholder. Only complete hex colors are committed. */
 export function ColorField({
   value,
   fallback,
@@ -356,8 +357,8 @@ export function ColorField({
   resettable?: boolean;
 }) {
   const shown = value ?? fallback;
-  const [draft, setDraft] = useState(shown);
-  useEffect(() => setDraft(shown), [shown]);
+  const [draft, setDraft] = useState(value ?? "");
+  useEffect(() => setDraft(value ?? ""), [value]);
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <input
@@ -371,16 +372,20 @@ export function ColorField({
         type="text"
         aria-label={`${label} hex`}
         spellCheck={false}
-        value={value === null ? "" : draft}
-        placeholder={value === null ? "Theme" : undefined}
+        value={draft}
+        placeholder="Default"
         onChange={(e) => {
           setDraft(e.target.value);
           if (isHexColor(e.target.value)) onChange(e.target.value.toLowerCase());
         }}
-        onBlur={() => setDraft(shown)}
+        onBlur={() => setDraft(value ?? "")}
         className={cx(inputClass, "h-7 w-[84px] font-mono text-xs")}
       />
-      {resettable && value !== null && <IconButton icon="rotate-ccw" label={`Reset ${label.toLowerCase()}`} onClick={() => onChange(null)} />}
+      {resettable && value !== null && (
+        <Button size="sm" variant="ghost" aria-label={`Reset ${label.toLowerCase()}`} onClick={() => onChange(null)}>
+          Reset
+        </Button>
+      )}
     </div>
   );
 }
@@ -438,7 +443,7 @@ export function Field({
   compact?: boolean;
 }) {
   return (
-    <div className={cx("grid items-start gap-x-3 py-1", compact ? "grid-cols-[88px_minmax(0,1fr)]" : "grid-cols-[200px_minmax(0,1fr)]")}>
+    <div className={cx("grid items-start gap-x-3 py-1", compact ? "grid-cols-[88px_minmax(0,1fr)] @max-[320px]:grid-cols-1" : "grid-cols-[200px_minmax(0,1fr)]")}>
       <label htmlFor={htmlFor} className="flex min-h-8 items-center leading-tight text-fg">
         {label}
       </label>
@@ -491,21 +496,44 @@ export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-line px-1 font-sans text-[11px] text-muted">{children}</kbd>;
 }
 
-/** Inline notice (errors, hints). */
+/** Inline notice (errors, hints): icon plus tone-colored text, no box. */
 export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "error"; children: ReactNode }) {
   return (
     <div
       role={tone === "error" ? "alert" : undefined}
-      className={cx(
-        "flex gap-2 rounded-ui-sm border px-3 py-2 text-[12.5px]",
-        tone === "error" ? "border-danger/50 text-danger" : tone === "warn" ? "border-warning/50 text-warning" : "border-line text-fg",
-      )}
+      className={cx("flex gap-2 text-[12.5px]", tone === "error" ? "text-danger" : tone === "warn" ? "text-warning" : "text-fg")}
     >
       <I name={tone === "info" ? "info" : "triangle-alert"} className="mt-px size-4 shrink-0" />
       <div className="min-w-0 flex-1" data-selectable>
         {children}
       </div>
     </div>
+  );
+}
+
+/** Collapsible block on a native <details>: chevron and label above a hairline, no box.
+ * `aside` sits right-aligned on the label row. Uncontrolled; `defaultOpen` only sets the first state. */
+export function Disclosure({
+  label,
+  defaultOpen = false,
+  aside,
+  children,
+}: {
+  label: string;
+  defaultOpen?: boolean;
+  aside?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <details open={defaultOpen} className="border-t border-line">
+      <summary className="flex min-h-8 items-center gap-1.5 hover:bg-hover">
+        {/* Rotates only for its own <details>, so nested disclosures don't follow an open parent. */}
+        <I name="chevron-right" className="size-3.5 shrink-0 text-muted [[open]>summary>&]:rotate-90" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {aside && <span className="shrink-0 text-xs text-muted">{aside}</span>}
+      </summary>
+      <div className="pb-2">{children}</div>
+    </details>
   );
 }
 

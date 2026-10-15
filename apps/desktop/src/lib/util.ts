@@ -55,4 +55,3 @@ export function relativeTime(ms: number, now = Date.now()): string {
 
 export const isMacPlatform = () => /mac/i.test(navigator.platform || navigator.userAgent);
 
-export const nonNull = <T>(value: T | null | undefined): value is T => value != null;

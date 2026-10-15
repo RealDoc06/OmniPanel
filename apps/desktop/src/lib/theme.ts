@@ -29,18 +29,18 @@ export const MIDNIGHT: Theme = {
 /** Labels for the theme editor, one per color. */
 export const COLOR_LABELS: Record<keyof ThemeColors, string> = {
   background: "Background",
-  surface: "Surface",
-  surfaceHover: "Hover",
-  border: "Border",
+  surface: "Panels",
+  surfaceHover: "Highlight",
+  border: "Lines",
   text: "Text",
-  textMuted: "Muted text",
+  textMuted: "Secondary text",
   accent: "Accent",
   accentText: "Text on accent",
   success: "Success",
   warning: "Warning",
-  danger: "Danger",
-  button: "Deck button",
-  buttonText: "Deck button text",
+  danger: "Error",
+  button: "Device button",
+  buttonText: "Device button text",
 };
 
 /** Inline style that scopes a theme to an element (deck previews, theme editor). */

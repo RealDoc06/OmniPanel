@@ -1,5 +1,5 @@
 //! Child process helpers: PATH lookup, detached spawning and bounded capture
-//! with a timeout that kills the whole process tree.
+//! that kills the whole process tree on timeout or cancellation.
 
 use std::ffi::OsString;
 use std::io;
@@ -137,25 +137,29 @@ pub(crate) struct Captured {
 }
 
 /// Run to completion, capturing output. After `limit` the process tree is
-/// killed and [`ActionError::Timeout`] returned.
+/// killed and [`ActionError::Timeout`] returned. Dropping the future (task
+/// aborted, runtime shut down) kills the tree too.
 pub(crate) async fn capture(cmd: &mut Command, limit: Duration) -> Result<Captured> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     isolate(cmd);
     let mut child = cmd.spawn().map_err(|e| spawn_error(&program_name(cmd), &e))?;
-    let pid = child.id();
+    // Declared after `child`, so it is dropped first: the leader is not reaped yet
+    // and its pid cannot have been reused.
+    let mut tree = ProcessTree::new(&child);
     let (stdout, stdout_done) = collect(child.stdout.take());
     let (stderr, stderr_done) = collect(child.stderr.take());
 
     let status = match timeout(limit, child.wait()).await {
         Ok(status) => status.map_err(|e| ActionError::Failed(format!("can't wait for {}: {e}", program_name(cmd))))?,
         Err(_) => {
-            if let Some(pid) = pid {
-                kill_tree(pid).await;
-            }
+            drop(tree);
+            // Covers a tree that could not be tracked (Windows job not assigned).
+            let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(ActionError::Timeout(u32::try_from(limit.as_secs()).unwrap_or(u32::MAX)));
         }
     };
+    tree.release();
     // A background child can keep the pipes open for good. Its output is then
     // discarded (not left unread, which would kill it with SIGPIPE) and not waited for.
     let _ = timeout(PIPE_GRACE, async {
@@ -190,20 +194,78 @@ fn collect(reader: Option<impl AsyncRead + Unpin + Send + 'static>) -> (Arc<Mute
     (buf, task)
 }
 
-/// Kill a child started through [`capture`] and everything it spawned.
-async fn kill_tree(pid: u32) {
-    #[cfg(unix)]
-    if let Ok(pid) = i32::try_from(pid) {
-        // The child leads its own process group (see `isolate`).
-        // SAFETY: plain syscall; a negative pid addresses the group.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
+/// A [`capture`] child and everything it starts, killed when dropped unless
+/// [`ProcessTree::release`]d. Unix: the child's own process group (see `isolate`).
+#[cfg(unix)]
+struct ProcessTree(Option<i32>);
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn new(child: &tokio::process::Child) -> Self {
+        Self(child.id().and_then(|pid| i32::try_from(pid).ok()))
     }
-    #[cfg(windows)]
-    {
-        let mut taskkill = Command::new("taskkill");
-        taskkill.args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null());
-        taskkill.creation_flags(NO_WINDOW);
-        let _ = taskkill.status().await;
+
+    /// The child exited on its own: leave what it started in the background running.
+    fn release(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take() {
+            // SAFETY: plain syscall; a negative pid addresses the group.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+    }
+}
+
+/// A [`capture`] child and everything it starts, killed when dropped unless
+/// [`ProcessTree::release`]d. Windows: a job object, which also holds the
+/// processes the child starts.
+#[cfg(windows)]
+struct ProcessTree {
+    job: windows_sys::Win32::Foundation::HANDLE,
+    kill: bool,
+}
+
+// SAFETY: a job handle is a kernel handle, usable from any thread.
+#[cfg(windows)]
+unsafe impl Send for ProcessTree {}
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn new(child: &tokio::process::Child) -> Self {
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: plain calls; a null job (creation failed) is never used.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        let kill = !job.is_null()
+            && child.raw_handle().is_some_and(|process| unsafe { AssignProcessToJobObject(job, process) } != 0);
+        Self { job, kill }
+    }
+
+    /// The child exited on its own: leave what it started in the background running.
+    fn release(&mut self) {
+        self.kill = false;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        if self.job.is_null() {
+            return;
+        }
+        // SAFETY: `job` is our own open handle, closed exactly once here.
+        unsafe {
+            if self.kill {
+                TerminateJobObject(self.job, 1);
+            }
+            CloseHandle(self.job);
+        }
     }
 }
 
@@ -232,6 +294,22 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(900));
         tokio::time::sleep(Duration::from_millis(1400)).await;
         assert!(!marker.exists(), "background child survived the timeout");
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_capture_kills_the_process_tree() {
+        let marker = std::env::temp_dir().join(format!("omni-actions-cancel-{}", omni_core::new_id()));
+        let script = format!("(sleep 1; touch {}) & wait", marker.display());
+        let capture = tokio::spawn(async move {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", &script]);
+            capture(&mut cmd, Duration::from_secs(30)).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        capture.abort();
+        assert!(capture.await.is_err_and(|e| e.is_cancelled()));
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        assert!(!marker.exists(), "background child survived the cancelled capture");
     }
 
     #[tokio::test]

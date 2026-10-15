@@ -64,6 +64,22 @@ impl FromStr for Hotkey {
 }
 
 impl Hotkey {
+    /// Replace a character key by the key that types it on the current layout,
+    /// adding the modifiers it needs (`Cmd+@` is `Cmd+Shift+2` on a US layout).
+    /// enigo would click the key without them, so `Cmd+@` would arrive as `Cmd+2`.
+    #[cfg(any(target_os = "macos", windows, test))]
+    fn on_layout(mut self, find: impl FnOnce(char) -> Option<(u16, Vec<Key>)>) -> std::result::Result<Self, String> {
+        let Key::Unicode(c) = self.key else { return Ok(self) };
+        let (code, needed) = find(c).ok_or_else(|| format!("\"{c}\" is not on the current keyboard layout"))?;
+        self.key = Key::Other(code.into());
+        for modifier in needed {
+            if !self.modifiers.contains(&modifier) {
+                self.modifiers.push(modifier);
+            }
+        }
+        Ok(self)
+    }
+
     /// Hold the modifiers, click the key, release the modifiers in reverse.
     /// Modifiers are released even when the click fails.
     fn press(&self, keyboard: &mut impl Keyboard) -> InputResult<()> {
@@ -252,13 +268,154 @@ pub(crate) fn tap(key: Key) -> Result<()> {
 /// Press an accelerator such as `Ctrl+Shift+M`.
 pub(crate) async fn press(accelerator: &str) -> Result<()> {
     let hotkey: Hotkey = accelerator.parse().map_err(ActionError::Invalid)?;
-    blocking(move || with_enigo(|enigo| hotkey.press(enigo))).await
+    blocking(move || {
+        // X11 maps characters to keys itself.
+        #[cfg(any(target_os = "macos", windows))]
+        let hotkey = hotkey.on_layout(layout::find).map_err(ActionError::Invalid)?;
+        with_enigo(|enigo| hotkey.press(enigo))
+    })
+    .await
 }
 
 /// Type text as if entered on the keyboard.
 pub(crate) async fn type_text(text: &str) -> Result<()> {
     let text = text.to_owned();
     blocking(move || with_enigo(|enigo| enigo.text(&text))).await
+}
+
+/// Character to key lookup in the current macOS keyboard layout.
+#[cfg(target_os = "macos")]
+mod layout {
+    use std::ffi::c_void;
+    use std::sync::{Mutex, PoisonError};
+
+    use enigo::Key;
+
+    type CFTypeRef = *const c_void;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        static kTISPropertyUnicodeKeyLayoutData: CFTypeRef;
+        fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+        fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> CFTypeRef;
+        fn TISGetInputSourceProperty(source: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+        fn LMGetKbdType() -> u8;
+        fn UCKeyTranslate(
+            layout: *const u8,
+            key_code: u16,
+            key_action: u16,
+            modifier_state: u32,
+            keyboard_type: u32,
+            options: u32,
+            dead_key_state: *mut u32,
+            max_length: usize,
+            length: *mut usize,
+            chars: *mut u16,
+        ) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8;
+        fn CFRelease(object: CFTypeRef);
+    }
+
+    const KEY_ACTION_DISPLAY: u16 = 3;
+    const NO_DEAD_KEYS: u32 = 1;
+
+    /// Modifier states to try, fewest first: `UCKeyTranslate` bits and the keys to hold.
+    const LEVELS: [(u32, &[Key]); 4] =
+        [(0, &[]), (0x02, &[Key::Shift]), (0x08, &[Key::Alt]), (0x0A, &[Key::Alt, Key::Shift])];
+
+    /// Key code and modifiers that type `c`. Falls back to the ASCII layout
+    /// (`Cmd+C` while a Cyrillic layout is active presses the C key).
+    pub(super) fn find(c: char) -> Option<(u16, Vec<Key>)> {
+        // Text Input Sources are not documented as thread-safe, and presses run on
+        // any blocking thread (enigo's own lookups were serialized by its lock).
+        static LOOKUP: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = LOOKUP.lock().unwrap_or_else(PoisonError::into_inner);
+        let sources: [unsafe extern "C" fn() -> CFTypeRef; 2] =
+            [TISCopyCurrentKeyboardLayoutInputSource, TISCopyCurrentASCIICapableKeyboardLayoutInputSource];
+        sources.into_iter().find_map(|copy| {
+            // SAFETY: a "Copy" function: we own the source and release it below.
+            let source = unsafe { copy() };
+            if source.is_null() {
+                return None;
+            }
+            // SAFETY: a "Get" function: the data lives as long as `source`.
+            let data = unsafe { TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) };
+            let found = if data.is_null() {
+                None
+            } else {
+                // SAFETY: `data` is a CFData holding the layout ('uchr') bytes.
+                let layout = unsafe { CFDataGetBytePtr(data) };
+                search(c, |code, state| typed(layout, code, state))
+            };
+            // SAFETY: balances the Copy above; `layout` is not used afterwards.
+            unsafe { CFRelease(source) };
+            found
+        })
+    }
+
+    /// The lowest key code typing `c` with the fewest modifiers, so the main
+    /// keys win over the keypad.
+    pub(super) fn search(c: char, typed: impl Fn(u16, u32) -> Option<char>) -> Option<(u16, Vec<Key>)> {
+        LEVELS.iter().find_map(|&(state, keys)| {
+            (0..128).find(|&code| typed(code, state) == Some(c)).map(|code| (code, keys.to_vec()))
+        })
+    }
+
+    /// The character a key types with `state` held.
+    fn typed(layout: *const u8, code: u16, state: u32) -> Option<char> {
+        let (mut dead_keys, mut length, mut chars) = (0u32, 0usize, [0u16; 4]);
+        // SAFETY: `layout` is valid 'uchr' data; the out pointers are live locals
+        // and `chars` holds the given length.
+        let status = unsafe {
+            UCKeyTranslate(
+                layout,
+                code,
+                KEY_ACTION_DISPLAY,
+                state,
+                u32::from(LMGetKbdType()),
+                NO_DEAD_KEYS,
+                &mut dead_keys,
+                chars.len(),
+                &mut length,
+                chars.as_mut_ptr(),
+            )
+        };
+        let mut decoded = char::decode_utf16(chars.get(..length)?.iter().copied());
+        match (status, decoded.next(), decoded.next()) {
+            (0, Some(Ok(c)), None) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+/// Character to virtual key lookup in the foreground window's Windows keyboard layout.
+#[cfg(windows)]
+mod layout {
+    use enigo::Key;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanExW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    /// Virtual key and modifiers that type `c`.
+    pub(super) fn find(c: char) -> Option<(u16, Vec<Key>)> {
+        let mut units = [0u16; 2];
+        let &mut [unit] = c.encode_utf16(&mut units) else { return None };
+        // SAFETY: plain calls; a missing foreground window means this thread's layout.
+        let scan = unsafe {
+            let thread = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+            VkKeyScanExW(unit, GetKeyboardLayout(thread))
+        };
+        // -1: no key types `c`. Low byte: virtual key, high byte: Shift / Ctrl / Alt bits.
+        if scan == -1 {
+            return None;
+        }
+        let [vk, state] = scan.to_le_bytes();
+        let needed = [(1, Key::Shift), (2, Key::Control), (4, Key::Alt)];
+        Some((vk.into(), needed.into_iter().filter(|(bit, _)| state & bit != 0).map(|(_, key)| key).collect()))
+    }
 }
 
 #[cfg(test)]
@@ -421,6 +578,37 @@ mod tests {
                 (Key::Control, Direction::Release),
             ]
         );
+    }
+
+    #[test]
+    fn characters_get_the_key_and_modifiers_of_the_layout() {
+        // `@` is Shift+2 (key code 19) on a US Mac.
+        let us = |c| (c == '@').then(|| (19, vec![Key::Shift]));
+        assert_eq!(parse("Cmd+@").on_layout(us), Ok(hotkey(&[Key::Meta, Key::Shift], Key::Other(19))));
+        assert_eq!(parse("Cmd+Shift+@").on_layout(us), Ok(hotkey(&[Key::Meta, Key::Shift], Key::Other(19))));
+        assert_eq!(parse("Cmd+F5").on_layout(us), Ok(hotkey(&[Key::Meta], Key::F5)));
+        assert!(parse("Cmd+é").on_layout(us).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_layout_lookup_prefers_plain_main_keys() {
+        // US layout excerpt: 18 types 1 / !, 19 types 2 / @, 83 is keypad 1.
+        let us = |code, state| match (code, state) {
+            (18, 0) | (83, 0) => Some('1'),
+            (18, 0x02) => Some('!'),
+            (19, 0) => Some('2'),
+            (19, 0x02) => Some('@'),
+            _ => None,
+        };
+        assert_eq!(layout::search('1', us), Some((18, vec![])));
+        assert_eq!(layout::search('@', us), Some((19, vec![Key::Shift])));
+        assert_eq!(layout::search('x', us), None);
+        // The real layout answers without posting events or needing permissions.
+        let (a, plain) = layout::find('a').unwrap();
+        assert!(plain.is_empty());
+        assert_eq!(layout::find('A'), Some((a, vec![Key::Shift])));
+        assert_eq!(layout::find('\u{1F600}'), None);
     }
 
     #[test]

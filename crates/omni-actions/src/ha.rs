@@ -6,14 +6,19 @@ use std::time::Duration;
 use omni_core::{ActionOutcome, ConnState, ConnectionStatus, HaEntity, HaOp, HomeAssistantSettings};
 use reqwest::{Client, Method, Response, StatusCode, Url};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
-use crate::http::request_error;
+use crate::http::{preview, request_error};
 use crate::{ActionError, Result};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Largest answer read; the entity list of a big installation stays well below it.
+const MAX_BODY: usize = 16 << 20;
+/// Status and error when the URL answers, but not like Home Assistant.
+const NOT_HOME_ASSISTANT: &str = "not a Home Assistant URL (another website or a login page answered)";
 /// Delay between connection checks while Home Assistant is unreachable.
 const RETRY_MIN: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(60);
@@ -134,8 +139,7 @@ impl HaClient {
             friendly_name: Option<Value>,
         }
 
-        let response = self.send(Method::GET, "api/states", None).await?;
-        let raw: Vec<Raw> = response.json().await.map_err(request_error)?;
+        let raw: Vec<Raw> = self.send(Method::GET, "api/states", None).await?;
         let mut entities: Vec<HaEntity> = raw
             .into_iter()
             .map(|r| {
@@ -171,12 +175,16 @@ impl HaClient {
         if ![domain, service].iter().all(|part| is_identifier(part)) {
             return Err(ActionError::Invalid(format!("\"{domain}.{service}\" is not a service name")));
         }
-        self.send(Method::POST, &format!("api/services/{domain}/{service}"), Some(data)).await?;
+        // Home Assistant answers with the changed states (JSON); a login page means nothing happened.
+        self.send::<Value>(Method::POST, &format!("api/services/{domain}/{service}"), Some(data)).await?;
         Ok(ActionOutcome { message: None })
     }
 
-    /// Authenticated request; non-2xx answers become errors and the status follows the outcome.
-    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Response> {
+    /// Authenticated request returning the JSON answer. Non-2xx answers become
+    /// errors, and so do successful answers that are not the expected JSON (a
+    /// login page, another website). The status follows definite outcomes: an
+    /// expected answer, a rejected token, an unreachable or non-HA server.
+    async fn send<T: DeserializeOwned>(&self, method: Method, path: &str, body: Option<Value>) -> Result<T> {
         let endpoint = {
             let config = self.config.lock().unwrap_or_else(PoisonError::into_inner);
             match (&config.endpoint, &config.settings) {
@@ -194,7 +202,7 @@ impl HaClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = match request.send().await {
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
                 let error = request_error(error);
@@ -208,19 +216,40 @@ impl HaClient {
             set_status(&self.status, ConnState::Error, Some("invalid token".into()));
             return Err(ActionError::Failed("Home Assistant rejected the access token".into()));
         }
-        set_status(&self.status, ConnState::Connected, None);
-        if status.is_success() {
-            return Ok(response);
+        if !status.is_success() {
+            // Any web server can answer 404 or 500, so the status stays as it is.
+            // Proxies and debug pages can echo the request, token included.
+            let detail = preview(&mut response, &endpoint.token).await;
+            return Err(ActionError::Failed(if detail.is_empty() {
+                format!("Home Assistant returned {status}")
+            } else {
+                format!("Home Assistant returned {status}: {detail}")
+            }));
         }
-        let detail = response.text().await.unwrap_or_default();
-        let detail = detail.trim();
-        let detail: String = detail.chars().take(200).collect();
-        Err(ActionError::Failed(if detail.is_empty() {
-            format!("Home Assistant returned {status}")
-        } else {
-            format!("Home Assistant returned {status}: {detail}")
-        }))
+        match read_json(response).await? {
+            Some(answer) => {
+                set_status(&self.status, ConnState::Connected, None);
+                Ok(answer)
+            }
+            None => {
+                set_status(&self.status, ConnState::Error, Some(NOT_HOME_ASSISTANT.into()));
+                Err(ActionError::Failed(NOT_HOME_ASSISTANT.into()))
+            }
+        }
     }
+}
+
+/// The JSON answer, read up to [`MAX_BODY`] bytes. `None` when the body is not
+/// JSON of the expected shape, i.e. not from Home Assistant.
+async fn read_json<T: DeserializeOwned>(mut response: Response) -> Result<Option<T>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+        if body.len() + chunk.len() > MAX_BODY {
+            return Err(ActionError::Failed(format!("Home Assistant's answer is larger than {} MiB", MAX_BODY >> 20)));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&body).ok())
 }
 
 fn is_rejected(status: StatusCode) -> bool {
@@ -241,14 +270,21 @@ fn set_status(status: &watch::Sender<ConnectionStatus>, state: ConnState, messag
     });
 }
 
-/// `GET /api/` until Home Assistant answers definitively (connected or
-/// token rejected); retries while it is unreachable.
+/// `GET /api/` until Home Assistant answers definitively (connected, token
+/// rejected or not Home Assistant); retries while it is unreachable.
 async fn check_until_settled(http: Client, endpoint: Endpoint, status: Arc<watch::Sender<ConnectionStatus>>) {
     let mut delay = RETRY_MIN;
     loop {
         let result = http.get(endpoint.url("api/")).bearer_auth(&endpoint.token).timeout(REQUEST_TIMEOUT).send().await;
         match result {
-            Ok(response) if response.status().is_success() => return set_status(&status, ConnState::Connected, None),
+            Ok(response) if response.status().is_success() => match read_json::<Value>(response).await {
+                // `{"message": "API running."}`
+                Ok(Some(answer)) if answer["message"].is_string() => {
+                    return set_status(&status, ConnState::Connected, None);
+                }
+                Ok(_) => return set_status(&status, ConnState::Error, Some(NOT_HOME_ASSISTANT.into())),
+                Err(error) => set_status(&status, ConnState::Error, Some(format!("unreachable: {error}"))),
+            },
             Ok(response) if is_rejected(response.status()) => {
                 return set_status(&status, ConnState::Error, Some("invalid token".into()));
             }
@@ -398,6 +434,38 @@ mod tests {
             json!({"entity_id": "light.desk", "brightness": 128})
         );
         assert_eq!(calls[2].body, "{}");
+    }
+
+    #[tokio::test]
+    async fn other_websites_are_not_home_assistant() {
+        let server = MockHttp::start(|_| (200, "<html>Please log in</html>".into())).await;
+        let client = HaClient::new(Client::new());
+        client.configure(&settings(server.url(), TOKEN));
+        let status = settle(&client, ConnState::Error).await;
+        assert_eq!(status.message.as_deref(), Some(NOT_HOME_ASSISTANT));
+        // Nothing was switched, so the action must fail.
+        let toggle = client.run(&HaOp::Toggle { entity_id: "light.desk".into() }).await;
+        assert!(matches!(toggle, Err(ActionError::Failed(m)) if m == NOT_HOME_ASSISTANT));
+        assert!(client.entities().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn answers_are_bounded_and_errors_never_show_the_token() {
+        let server = MockHttp::start(|request| match request.path.as_str() {
+            "/api/" => (200, r#"{"message":"API running."}"#.into()),
+            "/api/states" => (200, format!("[{}]", " ".repeat(MAX_BODY))),
+            // A proxy debug page echoing the request.
+            _ => (500, format!("debug: Authorization: Bearer {TOKEN} {}", "x".repeat(10_000))),
+        })
+        .await;
+        let client = HaClient::new(Client::new());
+        client.configure(&settings(server.url(), TOKEN));
+        settle(&client, ConnState::Connected).await;
+
+        let error = client.run(&HaOp::Toggle { entity_id: "light.desk".into() }).await.unwrap_err().to_string();
+        assert!(error.starts_with("Home Assistant returned 500") && error.len() < 300, "{error}");
+        assert!(error.contains("[redacted]") && !error.contains(TOKEN), "{error}");
+        assert!(matches!(client.entities().await, Err(ActionError::Failed(m)) if m.contains("larger than")));
     }
 
     #[tokio::test]

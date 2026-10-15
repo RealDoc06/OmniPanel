@@ -1,4 +1,5 @@
-// Left navigation. Arrow keys move between items, Cmd/Ctrl+1..6 jump directly (App.tsx).
+// Left navigation. Arrow keys move between items, Cmd/Ctrl+1..5 jump directly (App.tsx).
+// The footer shows who is connected and, when there are unread warnings or errors, a link to the Activity log.
 import type { KeyboardEvent } from "react";
 import type { IconName } from "../lib/icons";
 import { navigate, useApp, type Screen } from "../lib/store";
@@ -7,21 +8,20 @@ import { I } from "./Icon";
 import { StatusDot } from "./ui";
 
 export const SCREENS: { screen: Screen; label: string; icon: IconName }[] = [
-  { screen: "decks", label: "Decks", icon: "tablet-smartphone" },
-  { screen: "profiles", label: "Profiles", icon: "layout-grid" },
-  { screen: "audio", label: "Audio", icon: "sliders-horizontal" },
-  { screen: "integrations", label: "Integrations", icon: "plug" },
+  { screen: "decks", label: "Devices", icon: "tablet-smartphone" },
+  { screen: "profiles", label: "Buttons", icon: "layout-grid" },
+  { screen: "audio", label: "Volume", icon: "sliders-horizontal" },
+  { screen: "voice", label: "Voice changer", icon: "audio-waveform" },
   { screen: "settings", label: "Settings", icon: "settings" },
-  { screen: "log", label: "Log", icon: "scroll-text" },
 ];
 
 const MOD = /mac/i.test(navigator.platform) ? "⌘" : "Ctrl+";
 
 export function Sidebar() {
-  const current = useApp((s) => s.screen);
-  const unread = useApp((s) => s.unreadErrors);
-  const online = useApp((s) => new Set(s.runtime.sessions.map((x) => x.deviceId)).size);
-  const server = useApp((s) => s.runtime.server);
+  const screen = useApp((s) => s.screen);
+  // The Activity log is reached from Settings, so Settings stays highlighted there.
+  const current = screen === "log" ? "settings" : screen;
+  const problems = useApp((s) => s.unreadErrors);
 
   const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -39,7 +39,7 @@ export function Sidebar() {
       </div>
       <ul className="flex flex-1 flex-col gap-px px-2">
         {SCREENS.map((item, i) => (
-          <li key={item.screen} className={cx(item.screen === "log" && "mt-auto")}>
+          <li key={item.screen}>
             <button
               type="button"
               data-nav
@@ -52,26 +52,52 @@ export function Sidebar() {
               )}
             >
               <I name={item.icon} className="size-4" />
-              <span className="flex-1">{item.label}</span>
-              {item.screen === "log" && unread > 0 && (
-                <span className="min-w-5 rounded-full bg-danger px-1.5 text-center text-[11px] font-semibold text-white">
-                  {unread}
-                </span>
-              )}
+              <span className="flex-1 truncate">{item.label}</span>
             </button>
           </li>
         ))}
       </ul>
-      <button
-        type="button"
-        onClick={() => navigate("decks")}
-        className="m-2 flex items-center gap-2 rounded-ui-sm px-2.5 py-2 text-left text-xs text-muted hover:bg-hover"
-      >
-        <StatusDot tone={server.error ? "error" : server.running ? (online ? "ok" : "off") : "warn"} />
-        <span className="truncate">
-          {server.error ? "Deck server error" : server.running ? `${online} deck${online === 1 ? "" : "s"} online` : "Server starting"}
-        </span>
-      </button>
+      <div className="m-2 flex flex-col text-xs">
+        <ConnectionStatus />
+        {problems > 0 && (
+          <button
+            type="button"
+            onClick={() => navigate("log")}
+            className="rounded-ui-sm px-2.5 py-1.5 text-left text-danger hover:bg-hover"
+          >
+            {problems} {problems === 1 ? "problem" : "problems"}
+          </button>
+        )}
+      </div>
     </nav>
+  );
+}
+
+/** Footer line 1: whether devices can connect, and who is connected. Opens Devices. */
+function ConnectionStatus() {
+  const server = useApp((s) => s.runtime.server);
+  const sessions = useApp((s) => s.runtime.sessions);
+  const devices = useApp((s) => s.config.devices);
+  // A device can have several sessions (two tabs); count devices, not sessions.
+  const online = new Set(sessions.map((x) => x.deviceId));
+  const only = online.size === 1 ? devices.find((d) => online.has(d.id)) : undefined;
+  const text = server.error
+    ? "Devices can't connect"
+    : !server.running
+      ? "Starting…"
+      : online.size === 0
+        ? "No device connected"
+        : online.size === 1
+          ? `${only?.name || "Device"} connected`
+          : `${online.size} devices connected`;
+  return (
+    <button
+      type="button"
+      onClick={() => navigate("decks")}
+      className="flex items-center gap-2 rounded-ui-sm px-2.5 py-1.5 text-left text-muted hover:bg-hover"
+    >
+      <StatusDot tone={server.error ? "error" : !server.running ? "warn" : online.size ? "ok" : "off"} />
+      <span className="truncate">{text}</span>
+    </button>
   );
 }

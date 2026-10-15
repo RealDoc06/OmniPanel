@@ -113,19 +113,21 @@ impl ObsClient {
         self.shared.state.subscribe()
     }
 
-    /// Send one obs-websocket request and wait for its answer.
+    /// Send one obs-websocket request and wait for its answer. Queueing counts
+    /// against [`REQUEST_TIMEOUT`] too: a stuck connection can keep the queue full.
     pub(crate) async fn request(&self, kind: &str, data: Value) -> Result<Value> {
         let link = self.shared.link.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let link = link.ok_or(ActionError::NotConnected("OBS"))?;
         let (reply, answer) = oneshot::channel();
         let call = Call { id: self.shared.next_request_id(), kind: kind.to_owned(), data, reply };
-        link.send(call).await.map_err(|_| ActionError::NotConnected("OBS"))?;
-        match tokio::time::timeout(REQUEST_TIMEOUT, answer).await {
-            Ok(Ok(result)) => result,
-            // The session ended before OBS answered.
-            Ok(Err(_)) => Err(ActionError::NotConnected("OBS")),
-            Err(_) => Err(ActionError::Timeout(REQUEST_TIMEOUT.as_secs() as u32)),
-        }
+        let exchange = async {
+            link.send(call).await.map_err(|_| ActionError::NotConnected("OBS"))?;
+            // A dropped reply means the session ended before OBS answered.
+            answer.await.map_err(|_| ActionError::NotConnected("OBS"))?
+        };
+        tokio::time::timeout(REQUEST_TIMEOUT, exchange)
+            .await
+            .unwrap_or_else(|_| Err(ActionError::Timeout(REQUEST_TIMEOUT.as_secs() as u32)))
     }
 }
 

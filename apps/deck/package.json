@@ -10,7 +10,7 @@
     "mock": "node dev/mock-host.mjs",
     "icons": "node tools/make-icons.mjs",
     "typecheck": "tsc --noEmit -p .",
-    "test": "node build.mjs && es-check es5 'dist/**/*.js'"
+    "test": "node build.mjs && es-check es5 \"dist/**/*.js\""
   },
   "devDependencies": {
     "@omni/protocol": "workspace:*",

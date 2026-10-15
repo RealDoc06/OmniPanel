@@ -2,6 +2,8 @@
 // crates/omni-core/src/api.rs, so names and arguments are checked against
 // Rust); this file pins each request's result type. `send` is the transport:
 // Tauri's `host` command in the app, HTTP for the dev bridge (lib/bridge.ts).
+import type { SaveOptions, SettingsPatch } from "./saver";
+
 import type {
   Action,
   ActionOutcome,
@@ -24,24 +26,28 @@ import type {
   VolumeTarget,
 } from "@omni/protocol";
 
-export type Send = (request: HostRequest) => Promise<unknown>;
+export type Send = (request: HostRequest, options?: SaveOptions) => Promise<unknown>;
 
 export const makeApi = (send: Send, quit: () => Promise<void>) => {
-  const call = <T>(request: HostRequest) => send(request) as Promise<T>;
+  const client = crypto.randomUUID();
+  const call = <T>(request: HostRequest, options?: SaveOptions) =>
+    send(options ? { cmd: "commit", args: { client, revision: options.revision, request } } : request, options) as Promise<T>;
   return {
     // State & config. Every mutation persists and pushes a `config` host event.
     getState: () => call<AppState>({ cmd: "getState" }),
     setSettings: (settings: Settings) => call<void>({ cmd: "setSettings", args: { settings } }),
-    saveProfile: (profile: Profile) => call<void>({ cmd: "saveProfile", args: { profile } }),
+    patchSettings: (patch: SettingsPatch, options?: SaveOptions) =>
+      call<void>({ cmd: "patchSettings", args: { patch: { ...patch.fields, ...patch.sections } } }, options),
+    saveProfile: (profile: Profile, options?: SaveOptions) => call<void>({ cmd: "saveProfile", args: { profile } }, options),
     deleteProfile: (id: string) => call<void>({ cmd: "deleteProfile", args: { id } }),
     exportProfile: (id: string, path: string) => call<void>({ cmd: "exportProfile", args: { id, path } }),
     importProfile: (path: string) => call<Profile>({ cmd: "importProfile", args: { path } }),
-    updateDevice: (id: string, name: string, profileId: string | null, deck: DeckSettings) =>
-      call<void>({ cmd: "updateDevice", args: { id, name, profileId, deck } }),
+    updateDevice: (id: string, name: string, profileId: string | null, deck: DeckSettings, options?: SaveOptions) =>
+      call<void>({ cmd: "updateDevice", args: { id, name, profileId, deck } }, options),
     unpairDevice: (id: string) => call<void>({ cmd: "unpairDevice", args: { id } }),
-    saveTheme: (theme: Theme) => call<void>({ cmd: "saveTheme", args: { theme } }),
+    saveTheme: (theme: Theme, options?: SaveOptions) => call<void>({ cmd: "saveTheme", args: { theme } }, options),
     deleteTheme: (id: string) => call<void>({ cmd: "deleteTheme", args: { id } }),
-    saveVoicePreset: (preset: VoicePreset) => call<void>({ cmd: "saveVoicePreset", args: { preset } }),
+    saveVoicePreset: (preset: VoicePreset, options?: SaveOptions) => call<void>({ cmd: "saveVoicePreset", args: { preset } }, options),
     deleteVoicePreset: (id: string) => call<void>({ cmd: "deleteVoicePreset", args: { id } }),
 
     // Pairing

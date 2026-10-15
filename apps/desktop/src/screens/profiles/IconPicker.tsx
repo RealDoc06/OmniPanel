@@ -1,10 +1,11 @@
-// Icon picker: Lucide search (name + tags, paginated), emoji, or an imported image.
+// Icon picker: common icons first, then Lucide search (name + tags, paginated),
+// emoji, or an imported image.
 import type { Icon } from "@omni/protocol";
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ControlIcon, Svg } from "../../components/Icon";
 import { Button, Modal, Segmented, TextInput } from "../../components/ui";
 import { api, dialog } from "../../lib/backend";
-import { iconMarkup, loadIconIndex, searchIcons, type IconEntry } from "../../lib/icons";
+import { iconMarkup, loadIconIndex, searchIcons, type IconEntry, type IconName } from "../../lib/icons";
 import { toastError } from "../../lib/toast";
 import { cx } from "../../lib/util";
 
@@ -14,6 +15,16 @@ const PAGE = 96;
 const COLS = 8;
 
 const EMOJI = "🎤 🔇 🔊 🔉 🎧 🎵 🎶 ⏯️ ⏭️ ⏮️ ⏹️ ⏺️ 📷 🎥 🎬 📺 🎮 🕹️ 💡 🏠 🔒 🔓 💻 🖥️ ⌨️ 🖱️ 📁 📝 ✉️ 💬 📞 🔔 🔕 ⭐ ❤️ 👍 👋 😀 😂 😎 🤖 👻 💀 🔥 ✅ ❌ ⚠️ ⏰ ☕ 🍕 🌙 ☀️ ⚡ 🚀 🎉 🛠️ 🧪 📈 🗑️ 🎙️".split(" ");
+
+/** Shown before any search, so the full list of 2000+ icons is opt-in. */
+const COMMON_ICONS: readonly IconName[] = [
+  "mic", "mic-off", "volume-2", "volume-x", "play", "pause", "skip-forward", "skip-back",
+  "music", "headphones", "video", "camera", "radio", "monitor", "monitor-off", "lock",
+  "power", "house", "lamp-desk", "lightbulb", "keyboard", "globe", "folder", "file",
+  "message-circle", "phone", "gamepad-2", "sparkles", "star", "heart", "coffee", "timer",
+  "chevron-left", "chevron-right", "arrow-up", "arrow-down", "scissors", "clapperboard", "circle", "square",
+  "zap", "bell", "settings", "trash-2", "plus", "check", "x", "smile",
+];
 
 const ARROW_STEP: Record<string, number | undefined> = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: COLS, ArrowUp: -COLS };
 
@@ -29,12 +40,12 @@ export function IconPicker({ value, onPick, onClose }: { value: Icon | null; onP
           options={[
             { value: "icon", label: "Icons", icon: "shapes" },
             { value: "emoji", label: "Emoji", icon: "smile" },
-            { value: "image", label: "Image", icon: "image" },
+            { value: "image", label: "Your image", icon: "image" },
           ]}
         />
         {value && (
           <Button size="sm" variant="ghost" className="ml-auto" onClick={() => onPick(null)}>
-            Remove icon
+            No icon
           </Button>
         )}
       </div>
@@ -49,6 +60,7 @@ function IconSearch({ selected, onPick }: { selected: string | null; onPick: (ic
   const [entries, setEntries] = useState<IconEntry[] | null>(null);
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(PAGE);
+  const [showAll, setShowAll] = useState(false);
   const deferred = useDeferredValue(query);
   const gridRef = useRef<HTMLDivElement>(null);
 
@@ -56,7 +68,8 @@ function IconSearch({ selected, onPick }: { selected: string | null; onPick: (ic
     void loadIconIndex().then(setEntries);
   }, []);
 
-  const results = useMemo(() => (entries ? searchIcons(entries, deferred) : []), [entries, deferred]);
+  const common = !deferred.trim() && !showAll;
+  const results = useMemo(() => (common ? COMMON_ICONS : entries ? searchIcons(entries, deferred) : []), [common, entries, deferred]);
   const shown = results.slice(0, limit);
   const pick = (name: string) => onPick({ type: "builtin", name });
 
@@ -80,7 +93,7 @@ function IconSearch({ selected, onPick }: { selected: string | null; onPick: (ic
           data-autofocus
           type="search"
           aria-label="Search icons"
-          placeholder={entries ? `Search ${entries.length} icons` : "Loading icons…"}
+          placeholder={entries ? "Search icons, like music or light" : "Loading icons…"}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);
@@ -91,7 +104,7 @@ function IconSearch({ selected, onPick }: { selected: string | null; onPick: (ic
               e.preventDefault();
               focusCell(0);
             }
-            if (e.key === "Enter" && shown[0]) pick(shown[0]);
+            if (e.key === "Enter" && query.trim() && shown[0]) pick(shown[0]);
           }}
         />
       </div>
@@ -115,7 +128,16 @@ function IconSearch({ selected, onPick }: { selected: string | null; onPick: (ic
           </button>
         ))}
       </div>
-      {entries && results.length === 0 && <p className="px-4 pb-6 text-center text-muted">No icon matches "{query}".</p>}
+      {entries && !common && results.length === 0 && (
+        <p className="px-4 pb-6 text-center">No icon for "{query}". Try a simpler word, or use Emoji or Your image.</p>
+      )}
+      {common && (
+        <div className="flex justify-center px-4 pb-4">
+          <Button size="sm" onClick={() => setShowAll(true)}>
+            Show all icons
+          </Button>
+        </div>
+      )}
       {results.length > limit && (
         <div className="flex items-center justify-center gap-3 px-4 pb-4 text-xs text-muted">
           {shown.length} of {results.length}

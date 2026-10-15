@@ -1,4 +1,4 @@
-// Toasts: top-center, auto-hide, colored by level. Not interactive.
+// Toasts: top-center, auto-hide, colored by level. Not interactive; screen readers announce them.
 
 import type { ThemeColors, ToastLevel } from "@omni/protocol";
 import { readableOn } from "./color";
@@ -14,6 +14,8 @@ export interface Toasts {
 
 export function createToasts(parent: HTMLElement): Toasts {
   const host = el("div", "toasts", parent);
+  host.setAttribute("role", "status");
+  host.setAttribute("aria-live", "polite");
   const live: HTMLElement[] = [];
 
   function dismiss(node: HTMLElement): void {

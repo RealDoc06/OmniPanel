@@ -4,9 +4,10 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use omni_core::{ClientInfo, DeckToHost, Device, HostEvent, HostToDeck, LogLevel, now_ms};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::Host;
 use crate::pairing::{self, Verify};
@@ -15,37 +16,34 @@ use crate::sessions::{DeckTx, Outbound, send};
 /// Decks ping every 20 s; silence longer than this means the socket is dead
 /// (phone went to sleep, Wi-Fi dropped).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(75);
+/// A deck that doesn't take a frame for this long stopped reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Minimum time between pairing attempts on one connection.
 const PAIR_COOLDOWN: Duration = Duration::from_secs(1);
 
-pub async fn run(host: Host, socket: WebSocket, addr: SocketAddr) {
-    let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
-    let writer = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            let sent = match frame {
-                Outbound::Text(text) => sink.send(Message::Text(text.as_ref().into())).await,
-                Outbound::Close => {
-                    let _ = sink.send(Message::Close(None)).await;
-                    break;
-                }
-            };
-            if sent.is_err() {
-                break;
-            }
-        }
-    });
+/// Serve one deck until it disconnects, stops reading (write timeout or a
+/// full outbound queue) or its server stops (`stop`'s sender is dropped).
+pub async fn run(host: Host, socket: WebSocket, addr: SocketAddr, mut stop: watch::Receiver<()>) {
+    let (sink, mut stream) = socket.split();
+    let (tx, rx) = DeckTx::new();
+    let mut writer = tokio::spawn(write(sink, rx));
 
     let mut conn = Connection { host: host.clone(), tx, addr, session: None, client: None, last_pair: None };
-    while let Ok(Some(Ok(message))) = tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await {
+    loop {
+        let message = tokio::select! {
+            message = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => message,
+            _ = &mut writer => break,
+            () = conn.tx.overflowed() => break,
+            _ = stop.changed() => break,
+        };
         match message {
-            Message::Text(text) => {
+            Ok(Some(Ok(Message::Text(text)))) => {
                 if let Ok(message) = serde_json::from_str::<DeckToHost>(&text) {
                     conn.handle(message);
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
+            Ok(Some(Ok(_))) => {}
         }
     }
     if let Some(id) = conn.session {
@@ -53,6 +51,20 @@ pub async fn run(host: Host, socket: WebSocket, addr: SocketAddr) {
     }
     drop(conn);
     writer.abort();
+}
+
+/// Sends queued frames until `Close`, a failed write or a deck that stops reading.
+async fn write(mut sink: SplitSink<WebSocket, Message>, mut rx: mpsc::Receiver<Outbound>) {
+    while let Some(frame) = rx.recv().await {
+        let (message, last) = match frame {
+            Outbound::Text(text) => (Message::Text(text.as_ref().into()), false),
+            Outbound::Close => (Message::Close(None), true),
+        };
+        let sent = tokio::time::timeout(WRITE_TIMEOUT, sink.send(message)).await;
+        if last || !matches!(sent, Ok(Ok(()))) {
+            break;
+        }
+    }
 }
 
 struct Connection {
@@ -91,7 +103,7 @@ impl Connection {
                     .session
                     .and_then(|id| self.host.sessions.lock().unwrap().by_id.get(&id).map(|s| s.device_id.clone()));
                 if let Some(device) = device {
-                    self.host.log(LogLevel::Info, "A deck unpaired itself");
+                    self.host.log(LogLevel::Info, "A device disconnected and forgot this computer");
                     let _ = self.host.unpair_device(&device);
                 }
             }
@@ -134,13 +146,19 @@ impl Connection {
         let verdict = self.host.pairing.lock().unwrap().verify(code);
         match verdict {
             Verify::Ok => {}
-            Verify::Wrong => return self.pair_error("Wrong code. Check the code shown in OmniPanel."),
+            Verify::Wrong => return self.pair_error("Wrong code. Check the code on your computer."),
             Verify::Rotated => {
+                // The desktop shows the new code from the runtime state.
                 self.host.emit_runtime();
-                return self.pair_error("Too many wrong codes. A new code is shown in OmniPanel.");
+                return self.pair_error(&format!(
+                    "Too many wrong codes. Wait {} seconds, then enter the new code shown on your computer.",
+                    pairing::LOCKOUT_MS / 1000
+                ));
             }
+            Verify::Locked => return self.pair_error("Too many wrong codes. Wait a moment and try again."),
+            Verify::Expired => return self.pair_error("Code expired. Enter the new code shown on your computer."),
             Verify::Inactive => {
-                return self.pair_error("Pairing is off. Click \"Pair a device\" in OmniPanel on your computer.");
+                return self.pair_error("Pairing is off. Click \"Connect a device\" in OmniPanel on your computer.");
             }
         }
         let client = self.client.clone().unwrap_or_default();
@@ -160,7 +178,7 @@ impl Connection {
         if let Err(e) = saved {
             return self.pair_error(&format!("Couldn't save the device: {e}"));
         }
-        self.host.log(LogLevel::Info, format!("Paired {} ({})", device.name, device.platform));
+        self.host.log(LogLevel::Info, format!("Connected {} ({})", device.name, device.platform));
         let _ = self.host.events.send(HostEvent::Paired { device: device.clone() });
         send(&self.tx, &HostToDeck::PairResult { ok: true, token: Some(token), error: None });
         self.session = Some(self.host.register_session(&device.id, self.tx.clone(), self.addr, &client));

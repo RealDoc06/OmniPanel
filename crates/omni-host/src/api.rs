@@ -11,6 +11,8 @@ impl Host {
     pub async fn handle(&self, request: HostRequest) -> Result<Value> {
         use HostRequest as R;
         match request {
+            R::Commit { client, revision, request } => self.commit(client, revision, *request),
+            R::PatchSettings { patch } => json(self.patch_settings(patch)?),
             R::GetState => json(self.state()),
             R::SetSettings { settings } => json(self.set_settings(settings)?),
             R::SaveProfile { profile } => json(self.save_profile(profile)?),
@@ -45,6 +47,34 @@ impl Host {
             R::AiTest => json(self.ai_test().await?),
             R::OpenDataDir => json(open_in_file_manager(self.data_dir())?),
         }
+    }
+
+    /// Serialize per-client saves through their synchronous commit, rejecting stale snapshots.
+    fn commit(&self, client: String, revision: u64, request: HostRequest) -> Result<Value> {
+        use HostRequest as R;
+        let key = match &request {
+            R::PatchSettings { .. } => "settings".to_string(),
+            R::SaveProfile { profile } => format!("profile:{}", profile.id),
+            R::SaveTheme { theme } => format!("theme:{}", theme.id),
+            R::SaveVoicePreset { preset } => format!("voice:{}", preset.id),
+            R::UpdateDevice { id, .. } => format!("device:{id}"),
+            _ => anyhow::bail!("only settings, layouts, themes, voice presets and devices can be saved this way"),
+        };
+        let mut revisions = self.save_revisions.lock().unwrap();
+        let last = revisions.entry((client, key)).or_default();
+        if revision <= *last {
+            return Ok(Value::Null);
+        }
+        match request {
+            R::PatchSettings { patch } => self.patch_settings(patch)?,
+            R::SaveProfile { profile } => self.save_profile(profile)?,
+            R::SaveTheme { theme } => self.save_theme(theme)?,
+            R::SaveVoicePreset { preset } => self.save_voice_preset(preset)?,
+            R::UpdateDevice { id, name, profile_id, deck } => self.update_device(&id, name, profile_id, deck)?,
+            _ => unreachable!("checked above"),
+        }
+        *last = revision;
+        Ok(Value::Null)
     }
 }
 

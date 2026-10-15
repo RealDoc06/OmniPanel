@@ -178,7 +178,7 @@ fn preset_swap_mid_stream_is_click_free() {
         let input = sine(200.0, 0.4, 2.0);
         let mut p = Processor::new(SR, Chain::new(&effects(from), SR));
         let mut out = input.clone();
-        let swap_at = SR as usize;
+        let swap_at = 187 * 256; // ~1 s, on a block boundary
         for (i, block) in out.chunks_mut(256).enumerate() {
             if i * 256 == swap_at {
                 p.set_chain(Box::new(Chain::new(&effects(to), SR)));
@@ -192,6 +192,21 @@ fn preset_swap_mid_stream_is_click_free() {
         let during = max_step(&out[swap_at - 16..swap_at + settle]);
         assert!(during <= 1.25 * before.max(after) + 1e-3, "{from} -> {to}: step {during} vs {before} / {after}");
     }
+}
+
+#[test]
+fn preset_swap_before_history_is_full() {
+    // The replay window starts "below" index 0 of the history ring (which happens
+    // whenever the write position is < the replay length), here before it filled once.
+    let mut p = Processor::new(SR, Chain::new(&[], SR));
+    let mut out = sine(200.0, 0.4, 0.5);
+    let (first, rest) = out.split_at_mut(256);
+    p.process(first);
+    p.set_chain(Box::new(Chain::new(&[Effect::Echo { delay_ms: 50.0, feedback: 0.3, mix: 0.5 }], SR)));
+    for block in rest.chunks_mut(256) {
+        p.process(block);
+    }
+    assert!(out.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
 }
 
 #[test]

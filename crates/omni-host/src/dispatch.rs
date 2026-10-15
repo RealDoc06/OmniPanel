@@ -76,6 +76,20 @@ impl Host {
         })
     }
 
+    /// Run a control's action from a deck press or hotkey. Runs of a control
+    /// with a toggle wait for each other, so a double press runs `on` then
+    /// `off` instead of `on` twice (the state flips only after a branch ran).
+    async fn run_control(&self, origin: Origin<'_>, control_id: &str, action: &Action) -> crate::Result<ActionOutcome> {
+        let mut has_toggle = false;
+        action.walk(&mut |a| has_toggle |= matches!(a, Action::Toggle { .. }));
+        if !has_toggle {
+            return self.execute(origin, control_id, action).await;
+        }
+        let turn = self.control_locks.lock().unwrap().entry(control_id.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
+        self.execute(origin, control_id, action).await
+    }
+
     /// A deck pressed `control_id` on its current page.
     pub(crate) async fn press(&self, session: u64, control_id: &str) {
         let found = {
@@ -91,7 +105,7 @@ impl Host {
             })
         };
         let Some((label, action)) = found else { return };
-        let result = self.execute(Origin::Deck(session), control_id, &action).await;
+        let result = self.run_control(Origin::Deck(session), control_id, &action).await;
         self.report(Some(session), &label, result);
         self.feedback.notify_one();
     }
@@ -154,7 +168,7 @@ impl Host {
                 .collect()
         };
         for (profile_id, control_id, label, action) in &bound {
-            let result = self.execute(Origin::Hotkey { profile_id }, control_id, action).await;
+            let result = self.run_control(Origin::Hotkey { profile_id }, control_id, action).await;
             self.report(None, label, result);
         }
         self.feedback.notify_one();
@@ -188,8 +202,27 @@ pub async fn slider_worker(host: Host, mut rx: mpsc::UnboundedReceiver<(VolumeTa
         }
         for (target, value) in latest {
             if let Err(e) = host.set_volume(target, value).await {
-                host.log(LogLevel::Warn, format!("Slider: {e:#}"));
+                host.log(LogLevel::Warn, format!("Couldn't change the volume: {e:#}"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::start_host;
+
+    #[tokio::test]
+    async fn overlapping_toggle_presses_flip_twice() {
+        let host = start_host().await;
+        let slow_on = Action::Multi { steps: vec![Action::Delay { ms: 50 }], delay_ms: 0 };
+        let toggle = Action::Toggle { on: Box::new(slow_on), off: Box::new(Action::Delay { ms: 0 }) };
+        let press = || host.run_control(Origin::Ui, "c1", &toggle);
+        let (first, second) = tokio::join!(press(), press());
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(host.toggles.lock().unwrap().get("c1"), Some(&false));
+        host.shutdown().await;
     }
 }

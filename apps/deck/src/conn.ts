@@ -1,5 +1,5 @@
 // WebSocket connection to the host: hello handshake, reconnect with backoff,
-// keep-alive pings and dead-socket detection.
+// keep-alive pings and dead-socket detection (stuck connects and silent open sockets).
 
 import type { DeckToHost, HostToDeck } from "@omni/protocol";
 import { isPageHidden, onVisibilityChange } from "./dom";
@@ -8,10 +8,14 @@ export type ConnStatus = "connecting" | "online" | "offline";
 
 const BACKOFF_START_MS = 500;
 const BACKOFF_MAX_MS = 8000;
+/** Briefly opening sockets must not reset reconnect backoff. */
+const STABLE_CONNECTION_MS = 5000;
 const PING_EVERY_MS = 20000;
 /** No message for this long while "open" means the socket is dead (sleeping phone, Wi-Fi switch). */
 const SILENCE_LIMIT_MS = 50000;
 const PROBE_TIMEOUT_MS = 4000;
+/** A socket still connecting after this long is stuck (black-holed upgrade, Wi-Fi gone): retry. */
+const CONNECT_TIMEOUT_MS = 10000;
 
 export interface Connection {
   /** Sends a message; false if the socket isn't open. */
@@ -22,7 +26,7 @@ export interface Connection {
 }
 
 export interface ConnHandlers {
-  /** `failures` counts consecutive failed attempts since the last time the socket was open. */
+  /** `failures` counts consecutive failed attempts since the last stable connection. */
   onStatus(status: ConnStatus, failures: number): void;
   /** `raw` is the original JSON text (lets callers skip re-rendering identical layouts). */
   onMessage(msg: HostToDeck, raw: string): void;
@@ -39,6 +43,8 @@ export function connect(handlers: ConnHandlers, hello: () => DeckToHost): Connec
   let failures = 0;
   let backoff = BACKOFF_START_MS;
   let retryTimer = 0;
+  let connectTimer = 0;
+  let stableTimer = 0;
   let lastRx = Date.now();
 
   function setStatus(next: ConnStatus): void {
@@ -67,6 +73,8 @@ export function connect(handlers: ConnHandlers, hello: () => DeckToHost): Connec
   }
 
   function lost(): void {
+    window.clearTimeout(connectTimer);
+    window.clearTimeout(stableTimer);
     if (ws) abandon(ws);
     ws = null;
     failures++;
@@ -75,6 +83,8 @@ export function connect(handlers: ConnHandlers, hello: () => DeckToHost): Connec
   }
 
   function open(): void {
+    window.clearTimeout(connectTimer);
+    window.clearTimeout(stableTimer);
     if (ws) abandon(ws);
     setStatus(failures === 0 ? "connecting" : "offline");
     let socket: WebSocket;
@@ -85,10 +95,17 @@ export function connect(handlers: ConnHandlers, hello: () => DeckToHost): Connec
       return;
     }
     ws = socket;
+    connectTimer = window.setTimeout(function () {
+      if (ws === socket && socket.readyState === 0) lost();
+    }, CONNECT_TIMEOUT_MS);
     socket.onopen = function () {
+      window.clearTimeout(connectTimer);
       lastRx = Date.now();
-      failures = 0;
-      backoff = BACKOFF_START_MS;
+      stableTimer = window.setTimeout(function () {
+        if (ws !== socket || socket.readyState !== 1) return;
+        failures = 0;
+        backoff = BACKOFF_START_MS;
+      }, STABLE_CONNECTION_MS);
       send(hello());
       setStatus("online");
     };

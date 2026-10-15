@@ -19,6 +19,8 @@ use crate::audio::InputSide;
 use crate::{Result, VoiceError};
 
 const FRAGMENT_SECS: f32 = 0.005;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CREATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct Capture {
     stream: pulseaudio::RecordStream,
@@ -50,7 +52,9 @@ impl Capture {
             let samples = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
             side.process_mono(bytes.len() / 4, samples);
         };
-        let stream = block_on(client.create_record_stream(params, callback)).map_err(|e| pulse_error(e, source))?;
+        let creator = client.clone();
+        let stream = with_timeout(CREATE_TIMEOUT, move || block_on(creator.create_record_stream(params, callback)))?
+            .map_err(|e| pulse_error(e, source))?;
         Ok(Self { stream, _client: client })
     }
 }
@@ -63,16 +67,22 @@ impl Drop for Capture {
     }
 }
 
-/// The handshake blocks without a timeout, so run it on a helper thread.
 fn connect() -> Result<pulseaudio::Client> {
+    with_timeout(CONNECT_TIMEOUT, || pulseaudio::Client::from_env(c"OmniPanel"))?.map_err(|e| pulse_error(e, "server"))
+}
+
+/// Run `job` on a helper thread and wait at most `timeout`: the pulseaudio crate
+/// waits for the server without one. A job that never returns leaks its thread;
+/// one that returns late drops its result (a late stream is deleted on drop).
+fn with_timeout<T: Send + 'static>(timeout: Duration, job: impl FnOnce() -> T + Send + 'static) -> Result<T> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(pulseaudio::Client::from_env(c"OmniPanel"));
-    });
-    match rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(result) => result.map_err(|e| pulse_error(e, "server")),
-        Err(_) => Err(VoiceError::Backend("PulseAudio did not respond".into())),
-    }
+    std::thread::Builder::new()
+        .name("omni-voice-pulse".into())
+        .spawn(move || {
+            let _ = tx.send(job());
+        })
+        .map_err(|e| VoiceError::Backend(format!("cannot start PulseAudio helper thread: {e}")))?;
+    rx.recv_timeout(timeout).map_err(|_| VoiceError::Backend("PulseAudio did not respond".into()))
 }
 
 fn pulse_error(err: pulseaudio::ClientError, what: &str) -> VoiceError {

@@ -253,7 +253,7 @@ function onMessage(session, msg) {
         send(session, { t: "pairResult", ok: true, token, error: null });
         admit(session, msg.name);
       } else {
-        send(session, { t: "pairResult", ok: false, token: null, error: "Wrong code. Check the code shown in the desktop app." });
+        send(session, { t: "pairResult", ok: false, token: null, error: "Wrong code. Check the code on your computer." });
       }
       return;
     }

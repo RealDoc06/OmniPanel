@@ -277,7 +277,8 @@ impl Processor {
             let n = (self.prime_len - done).min(BLOCK);
             for (i, s) in self.scratch[..n].iter_mut().enumerate() {
                 let k = done + i;
-                *s = self.history[(start + k) & mask] * (k as f32 / ramp as f32).min(1.0);
+                // `start` wraps below zero whenever the write position is below `prime_len`.
+                *s = self.history[start.wrapping_add(k) & mask] * (k as f32 / ramp as f32).min(1.0);
             }
             next.process(&mut self.scratch[..n]);
             done += n;

@@ -1,18 +1,22 @@
-// Typed editor for every `Action` variant. Nested actions (multi steps, toggle
-// branches) reuse <ActionEditor /> recursively.
-import type { Action, HaOp, JsonValue, NavTarget, ObsOp, VoiceOp, VolumeOp } from "@omni/protocol";
-import { useId, useState, type ReactNode } from "react";
+// "What it does": the inspector section that shows a control's action as a plain
+// summary with [Change] (opens the ActionPicker), and the typed form for every
+// `Action` variant. Nested actions (steps, alternating presses) reuse <ActionEditor />
+// with a "Does" select; the top level is chosen through the picker instead.
+import type { Action, Control, HaOp, JsonValue, NavTarget, ObsOp, VoiceOp, VolumeOp } from "@omni/protocol";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { HotkeyInput } from "../../components/HotkeyInput";
 import { I } from "../../components/Icon";
-import { ObsInputField, VolumeTargetPicker } from "../../components/VolumeTargetPicker";
+import { VolumeTargetPicker } from "../../components/VolumeTargetPicker";
 import {
   Button,
   ComboInput,
+  Disclosure,
   EnumSelect,
   Field,
   IconButton,
   NumberField,
   Range,
+  Segmented,
   Select,
   Switch,
   TextArea,
@@ -20,6 +24,7 @@ import {
   inputClass,
 } from "../../components/ui";
 import {
+  ACTION_GROUPS,
   ACTION_META,
   ACTION_TYPES,
   HTTP_METHODS,
@@ -34,55 +39,139 @@ import {
   describeAction,
   isActionType,
   type ActionOf,
+  type NameLookup,
 } from "../../lib/actions";
 import { api, dialog } from "../../lib/backend";
 import { useResource } from "../../lib/hooks";
-import { useApp, useProfiles, useVoicePresets } from "../../lib/store";
-import { moveItem } from "../../lib/util";
+import { applyAutoLabel, applyPick, type PickResult } from "../../lib/recipes";
+import { navigate, useApp, useProfiles, useSettings, useVoicePresets } from "../../lib/store";
+import { cx, moveItem, newId } from "../../lib/util";
+import { ActionPicker } from "./ActionPicker";
 import { useCurrent } from "./editor";
+
+/** Names for ids in action summaries (pages of the open layout, layouts, voices). */
+export function useActionNames(): NameLookup {
+  const pages = useCurrent()?.profile.pages ?? [];
+  const profiles = useProfiles();
+  const presets = useVoicePresets();
+  return {
+    page: (id) => {
+      const page = pages.find((p) => p.id === id);
+      return page && (page.name || "Untitled page");
+    },
+    profile: (id) => profiles.find((p) => p.id === id)?.name,
+    preset: (id) => presets.find((p) => p.id === id)?.name,
+  };
+}
+
+/**
+ * The whole "What it does" section of the inspector: summary row with [Change],
+ * the picker, and the form (or the slider fields). Picks follow the auto-label rule
+ * (`applyPick`): a label the user typed is kept.
+ */
+export function WhatItDoes({ control, onChange }: { control: Control; onChange: (next: Pick<Control, "kind" | "style">) => void }) {
+  const [picking, setPicking] = useState(false);
+  const { kind, style } = control;
+  const action = kind.type === "button" ? kind.action : null;
+  const ha = action?.type === "homeAssistant";
+  const entities = useResource(() => (ha ? api.haEntities() : Promise.resolve([])), [ha]);
+  const apps = useResource(() => action?.type === "openApp" ? api.installedApps() : Promise.resolve([]), [action?.type === "openApp"]);
+  const names: NameLookup = { ...useActionNames(), entity: (id) => entities.data?.find((e) => e.entityId === id)?.name };
+  const changeKind = (next: Control["kind"]) => onChange({
+    kind: next,
+    style: applyAutoLabel(style, kind, next, { ...names, app: (launch) => apps.data?.find((app) => app.launch === launch)?.name }),
+  });
+
+  const pick = (result: PickResult) => {
+    setPicking(false);
+    // A button turned into a slider keeps its shape: tall means vertical.
+    const next = result.kind.type === "slider" ? { ...result.kind, vertical: control.h >= control.w } : result.kind;
+    onChange({ kind: next, style: applyPick(style, result, kind, { ...names, app: (launch) => apps.data?.find((app) => app.launch === launch)?.name }) });
+  };
+
+  return (
+    <section className="border-b border-line">
+      <h3 className="flex h-9 items-center px-4 font-semibold">What it does</h3>
+      {picking ? (
+        <ActionPicker current={control} onPick={pick} onCancel={() => setPicking(false)} />
+      ) : (
+        <div className="flex flex-col gap-0.5 px-4 pb-3">
+          {kind.type === "button" && !kind.action ? (
+            <div className="flex items-center gap-2">
+              <span>Does nothing yet.</span>
+              <Button size="sm" variant="primary" className="ml-auto" onClick={() => setPicking(true)}>
+                Choose what it does
+              </Button>
+            </div>
+          ) : (
+            <div className="flex min-h-8 items-center gap-2">
+              <I name={kind.type === "slider" ? "sliders-vertical" : kind.action ? ACTION_META[kind.action.type].icon : "square"} className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{kind.type === "slider" ? "Volume slider" : describeAction(kind.action, names)}</span>
+              <Button size="sm" onClick={() => setPicking(true)}>
+                Change
+              </Button>
+            </div>
+          )}
+          {kind.type === "slider" ? (
+            <>
+              <Field label="Sound" compact>
+                <VolumeTargetPicker value={kind.target} onChange={(target) => changeKind({ ...kind, target })} />
+              </Field>
+              <Field label="Direction" compact>
+                <Segmented
+                  label="Direction"
+                  value={kind.vertical ? "vertical" : "horizontal"}
+                  onChange={(v) => onChange({ kind: { ...kind, vertical: v === "vertical" }, style })}
+                  options={[
+                    { value: "vertical", label: "Vertical" },
+                    { value: "horizontal", label: "Horizontal" },
+                  ]}
+                />
+              </Field>
+            </>
+          ) : (
+            kind.action && <ActionEditor action={kind.action} onChange={(next) => changeKind({ type: "button", action: next })} />
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
 
 type FormProps<T extends Action["type"]> = { action: ActionOf<T>; onChange: (action: Action) => void; depth: number };
 
-const GROUPS = [...new Set(ACTION_TYPES.map((t) => ACTION_META[t].group))];
-
-export function ActionEditor({
-  action,
-  onChange,
-  allowNone = true,
-  depth = 0,
-}: {
-  action: Action | null;
-  onChange: (action: Action | null) => void;
-  allowNone?: boolean;
-  depth?: number;
-}) {
+/**
+ * Form for one action. At depth 0 (the button itself) it is the form only; nested
+ * steps (depth 1 and below) start with a "Does" select, the only place "Wait" is offered.
+ */
+export function ActionEditor({ action, onChange, depth = 0 }: { action: Action; onChange: (action: Action) => void; depth?: number }) {
   const id = useId();
   return (
-    <div className="flex flex-col gap-1">
-      <Field label="Action" htmlFor={id} compact>
-        <select
-          id={id}
-          className={inputClass}
-          value={action?.type ?? ""}
-          onChange={(e) => {
-            const type = e.target.value;
-            if (isActionType(type)) onChange(defaultAction(type));
-            else if (allowNone) onChange(null);
-          }}
-        >
-          {allowNone && <option value="">No action</option>}
-          {GROUPS.map((group) => (
-            <optgroup key={group} label={group}>
-              {ACTION_TYPES.filter((t) => ACTION_META[t].group === group).map((t) => (
-                <option key={t} value={t}>
-                  {ACTION_META[t].label}
-                </option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
-      </Field>
-      {action && <ActionForm action={action} onChange={onChange} depth={depth} />}
+    <div className="flex flex-col gap-0.5">
+      {depth > 0 && (
+        <Field label="Does" htmlFor={id} compact>
+          <select
+            id={id}
+            className={inputClass}
+            value={action.type}
+            onChange={(e) => {
+              const type = e.target.value;
+              if (isActionType(type) && type !== action.type) onChange(defaultAction(type));
+            }}
+          >
+            {ACTION_GROUPS.map((group) => (
+              <optgroup key={group} label={group}>
+                {ACTION_TYPES.filter((t) => ACTION_META[t].group === group).map((t) => (
+                  <option key={t} value={t}>
+                    {ACTION_META[t].label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </Field>
+      )}
+      <ActionForm action={action} onChange={onChange} depth={depth} />
     </div>
   );
 }
@@ -90,9 +179,17 @@ export function ActionEditor({
 function ActionForm({ action, onChange, depth }: { action: Action; onChange: (action: Action) => void; depth: number }) {
   switch (action.type) {
     case "hotkey":
-      return <HotkeyForm action={action} onChange={onChange} depth={depth} />;
+      return (
+        <Field label="Keys" compact>
+          <HotkeyInput variant="send" value={action.keys} onChange={(keys) => onChange({ ...action, keys })} />
+        </Field>
+      );
     case "typeText":
-      return <TypeTextForm action={action} onChange={onChange} depth={depth} />;
+      return (
+        <Field label="Text to type" compact>
+          <TextArea aria-label="Text to type" rows={3} value={action.text} onChange={(e) => onChange({ ...action, text: e.target.value })} />
+        </Field>
+      );
     case "openApp":
       return <OpenAppForm action={action} onChange={onChange} depth={depth} />;
     case "open":
@@ -101,7 +198,7 @@ function ActionForm({ action, onChange, depth }: { action: Action; onChange: (ac
       return <ScriptForm action={action} onChange={onChange} depth={depth} />;
     case "media":
       return (
-        <Field label="Key" compact>
+        <Field label="Do" compact>
           <EnumSelect ariaLabel="Media key" value={action.command} labels={MEDIA_LABELS} onChange={(command) => onChange({ ...action, command })} />
         </Field>
       );
@@ -117,8 +214,8 @@ function ActionForm({ action, onChange, depth }: { action: Action; onChange: (ac
       return <HttpForm action={action} onChange={onChange} depth={depth} />;
     case "system":
       return (
-        <Field label="Command" compact>
-          <EnumSelect ariaLabel="System command" value={action.command} labels={SYSTEM_LABELS} onChange={(command) => onChange({ ...action, command })} />
+        <Field label="Do" compact>
+          <EnumSelect ariaLabel="Computer" value={action.command} labels={SYSTEM_LABELS} onChange={(command) => onChange({ ...action, command })} />
         </Field>
       );
     case "navigate":
@@ -130,54 +227,91 @@ function ActionForm({ action, onChange, depth }: { action: Action; onChange: (ac
     case "delay":
       return (
         <Field label="Wait" compact>
-          <NumberField ariaLabel="Delay" value={action.ms} min={0} max={600_000} suffix="ms" onChange={(ms) => onChange({ ...action, ms })} />
+          <Seconds ariaLabel="Wait" ms={action.ms} step={0.1} onChange={(ms) => onChange({ ...action, ms })} />
         </Field>
       );
   }
 }
 
-function HotkeyForm({ action, onChange }: FormProps<"hotkey">) {
+/**
+ * Seconds field over a value stored in ms. Capped at 60 s, the engine's limit for
+ * waits (`MAX_DELAY_MS` in crates/omni-host/src/dispatch.rs).
+ */
+function Seconds({ ms, onChange, step, ariaLabel }: { ms: number; onChange: (ms: number) => void; step: number; ariaLabel: string }) {
   return (
-    <Field label="Keys" compact hint="Modifiers: CmdOrCtrl, Ctrl, Alt, Shift, Super.">
-      <HotkeyInput editable value={action.keys} onChange={(keys) => onChange({ ...action, keys })} />
-    </Field>
+    <NumberField
+      ariaLabel={ariaLabel}
+      className="w-28"
+      value={ms / 1000}
+      min={0}
+      max={60}
+      step={step}
+      suffix="s"
+      onChange={(s) => onChange(Math.round(s * 1000))}
+    />
   );
 }
 
-function TypeTextForm({ action, onChange }: FormProps<"typeText">) {
+/**
+ * Local text for a field whose saved value can change underneath it (undo or AI).
+ * The draft shows while the saved value is still the one it was typed
+ * against (`saved`, compared as a string); any other change replaces it with `shown`.
+ * Call `setText(text, savedAfter)` with the value the text saved, or the old one.
+ */
+function useDraft(saved: string, shown: string) {
+  const [draft, setDraft] = useState({ text: shown, saved });
+  // Replace the draft itself so redo cannot resurrect text discarded by undo.
+  if (draft.saved !== saved) setDraft({ text: shown, saved });
+  const text = draft.saved === saved ? draft.text : shown;
+  return [text, (next: string, savedAfter: string) => setDraft({ text: next, saved: savedAfter })] as const;
+}
+
+/** "Set up" link for integration hints. */
+function SetUpLink({ children, onClick }: { children: ReactNode; onClick: () => void }) {
   return (
-    <Field label="Text" compact>
-      <TextArea aria-label="Text to type" rows={3} value={action.text} onChange={(e) => onChange({ ...action, text: e.target.value })} />
-    </Field>
+    <button type="button" className="text-accent hover:underline" onClick={onClick}>
+      {children}
+    </button>
   );
 }
+
+const hintClass = "pl-[100px] text-xs text-muted @max-[320px]:pl-0";
+
+const parseArgs = (text: string) => text.split("\n").filter((a) => a.trim() !== "");
 
 function OpenAppForm({ action, onChange }: FormProps<"openApp">) {
   const apps = useResource(() => api.installedApps());
-  const [args, setArgs] = useState(action.args.join("\n"));
+  const installed = apps.data ?? [];
+  // Show app names; store what the host launches (a path on macOS and Windows).
+  const shown = installed.find((a) => a.launch === action.app)?.name ?? action.app;
+  const savedArgs = JSON.stringify(action.args);
+  const [args, setArgs] = useDraft(savedArgs, action.args.join("\n"));
   return (
     <>
       <Field label="App" compact>
         <ComboInput
-          ariaLabel="Application"
-          value={action.app}
-          placeholder="Name, path or desktop entry"
-          options={(apps.data ?? []).map((a) => ({ value: a.launch, label: a.name }))}
-          onChange={(app) => onChange({ ...action, app })}
+          ariaLabel="App"
+          value={shown}
+          placeholder="Pick or type an app"
+          options={installed.map((a) => ({ value: a.name, label: a.name }))}
+          onChange={(app) => onChange({ ...action, app: installed.find((a) => a.name === app)?.launch ?? app })}
         />
       </Field>
-      <Field label="Arguments" compact hint="One per line.">
-        <TextArea
-          aria-label="Arguments"
-          rows={2}
-          className="font-mono text-xs"
-          value={args}
-          onChange={(e) => {
-            setArgs(e.target.value);
-            onChange({ ...action, args: e.target.value.split("\n").filter((a) => a.trim() !== "") });
-          }}
-        />
-      </Field>
+      <Disclosure label="Advanced">
+        <Field label="Launch options" compact hint="One per line.">
+          <TextArea
+            aria-label="Launch options"
+            rows={2}
+            className="font-mono text-xs"
+            value={args}
+            onChange={(e) => {
+              const next = parseArgs(e.target.value);
+              setArgs(e.target.value, JSON.stringify(next));
+              onChange({ ...action, args: next });
+            }}
+          />
+        </Field>
+      </Disclosure>
     </>
   );
 }
@@ -188,11 +322,17 @@ function OpenForm({ action, onChange }: FormProps<"open">) {
     if (path) onChange({ ...action, target: path });
   };
   return (
-    <Field label="Target" compact hint="URL, file or folder. Opens with the default app.">
-      <div className="flex gap-1">
-        <TextInput aria-label="Target" value={action.target} onChange={(e) => onChange({ ...action, target: e.target.value })} />
-        <IconButton icon="file" label="Choose file" className="size-8" onClick={() => void browse(false)} />
-        <IconButton icon="folder-open" label="Choose folder" className="size-8" onClick={() => void browse(true)} />
+    <Field label="Opens" compact>
+      <div className="flex flex-col gap-1">
+        <TextInput aria-label="Opens" value={action.target} placeholder="https://example.com" onChange={(e) => onChange({ ...action, target: e.target.value })} />
+        <div className="flex gap-1">
+          <Button size="sm" onClick={() => void browse(false)}>
+            Choose file…
+          </Button>
+          <Button size="sm" onClick={() => void browse(true)}>
+            Choose folder…
+          </Button>
+        </div>
       </div>
     </Field>
   );
@@ -205,7 +345,7 @@ function ScriptForm({ action, onChange }: FormProps<"runScript">) {
     <>
       <Field label="Language" compact>
         <EnumSelect
-          ariaLabel="Interpreter"
+          ariaLabel="Language"
           value={action.interpreter}
           labels={INTERPRETER_LABELS}
           only={interpreters}
@@ -215,20 +355,28 @@ function ScriptForm({ action, onChange }: FormProps<"runScript">) {
       <TextArea
         aria-label="Script"
         rows={8}
-        placeholder={action.interpreter === "applescript" ? 'tell application "Music" to playpause' : "echo hello"}
+        placeholder={action.interpreter === "applescript" ? 'For example: tell application "Music" to playpause' : "For example: echo hello"}
         className="mt-1 font-mono text-xs leading-relaxed"
         value={action.script}
         onChange={(e) => onChange({ ...action, script: e.target.value })}
       />
-      <Field label="Timeout" compact>
-        <NumberField ariaLabel="Timeout" value={action.timeoutSecs} min={1} max={3600} suffix="s" onChange={(timeoutSecs) => onChange({ ...action, timeoutSecs })} />
-      </Field>
-      <Field label="Output" compact>
-        <label className="flex h-8 items-center gap-2">
-          <Switch label="Show output on the deck" checked={action.showOutput} onChange={(showOutput) => onChange({ ...action, showOutput })} />
-          Show on the deck
-        </label>
-      </Field>
+      <label className="flex h-8 items-center gap-2">
+        <Switch label="Show the result on the device" checked={action.showOutput} onChange={(showOutput) => onChange({ ...action, showOutput })} />
+        Show the result on the device
+      </label>
+      <Disclosure label="Advanced">
+        <Field label="Stop after" compact>
+          <NumberField
+            ariaLabel="Stop after"
+            className="w-28"
+            value={action.timeoutSecs}
+            min={1}
+            max={3600}
+            suffix="s"
+            onChange={(timeoutSecs) => onChange({ ...action, timeoutSecs })}
+          />
+        </Field>
+      </Disclosure>
     </>
   );
 }
@@ -249,16 +397,16 @@ function VolumeForm({ action, onChange }: FormProps<"volume">) {
   const { op } = action;
   return (
     <>
-      <Field label="Target" compact>
+      <Field label="Sound" compact>
         <VolumeTargetPicker value={action.target} onChange={(target) => onChange({ ...action, target })} />
       </Field>
       <Field label="Do" compact>
-        <EnumSelect ariaLabel="Volume operation" value={op.type} labels={VOLUME_OP_LABELS} onChange={(type) => onChange({ ...action, op: setOp(type) })} />
+        <EnumSelect ariaLabel="Do" value={op.type} labels={VOLUME_OP_LABELS} onChange={(type) => onChange({ ...action, op: setOp(type) })} />
       </Field>
       {op.type === "set" && (
-        <Field label="Volume" compact>
+        <Field label="Level" compact>
           <Range
-            label="Volume"
+            label="Level"
             min={0}
             max={1}
             step={0.01}
@@ -269,9 +417,9 @@ function VolumeForm({ action, onChange }: FormProps<"volume">) {
         </Field>
       )}
       {op.type === "step" && (
-        <Field label="Change" compact>
+        <Field label="By" compact>
           <Range
-            label="Change"
+            label="By"
             min={-0.5}
             max={0.5}
             step={0.01}
@@ -287,6 +435,7 @@ function VolumeForm({ action, onChange }: FormProps<"volume">) {
 
 function VoiceForm({ action, onChange }: FormProps<"voice">) {
   const presets = useVoicePresets();
+  const ready = useSettings().voice.outputDevice !== null;
   const { op } = action;
   const toOp = (type: VoiceOp["type"]): VoiceOp => {
     switch (type) {
@@ -303,12 +452,12 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
   return (
     <>
       <Field label="Do" compact>
-        <EnumSelect ariaLabel="Voice operation" value={op.type} labels={VOICE_OP_LABELS} onChange={(type) => onChange({ ...action, op: toOp(type) })} />
+        <EnumSelect ariaLabel="Do" value={op.type} labels={VOICE_OP_LABELS} onChange={(type) => onChange({ ...action, op: toOp(type) })} />
       </Field>
       {op.type === "setPreset" && (
-        <Field label="Preset" compact>
+        <Field label="Voice" compact>
           <Select
-            ariaLabel="Preset"
+            ariaLabel="Voice"
             value={op.presetId}
             options={presets.map((p) => ({ value: p.id, label: p.name }))}
             onChange={(presetId) => onChange({ ...action, op: { type: "setPreset", presetId } })}
@@ -316,8 +465,8 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
         </Field>
       )}
       {op.type === "cycle" && (
-        <Field label="Presets" compact hint={op.presetIds.length ? `${op.presetIds.length} selected` : "None selected cycles through all."}>
-          <div className="grid max-h-40 grid-cols-2 gap-x-2 overflow-y-auto rounded-ui-sm border border-line px-2 py-1">
+        <Field label="Voices" compact hint={op.presetIds.length ? `${op.presetIds.length} checked` : "None checked: every voice is used."}>
+          <div className="grid max-h-40 grid-cols-2 gap-x-2 overflow-y-auto py-1">
             {presets.map((p) => (
               <label key={p.id} className="flex h-6 items-center gap-1.5 truncate">
                 <input
@@ -339,6 +488,11 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
           </div>
         </Field>
       )}
+      {!ready && (
+        <p className={hintClass}>
+          The voice changer needs a one-time setup. <SetUpLink onClick={() => navigate("voice")}>Set up</SetUpLink>
+        </p>
+      )}
     </>
   );
 }
@@ -346,7 +500,7 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
 function ObsForm({ action, onChange }: FormProps<"obs">) {
   const inventory = useResource(() => api.obsInventory());
   const { op } = action;
-  const scenes = (inventory.data?.scenes ?? []).map((s) => ({ value: s, label: s }));
+  const options = (names: readonly string[] | undefined) => (names ?? []).map((s) => ({ value: s, label: s }));
   const set = (next: ObsOp) => onChange({ ...action, op: next });
   const toOp = (type: ObsOp["type"]): ObsOp => {
     switch (type) {
@@ -360,18 +514,18 @@ function ObsForm({ action, onChange }: FormProps<"obs">) {
         return { type };
     }
   };
-  const offline = inventory.error && (op.type === "setScene" || op.type === "toggleSource");
+  const named = op.type === "setScene" || op.type === "toggleSource" || op.type === "toggleMute";
   return (
     <>
       <Field label="Do" compact>
-        <EnumSelect ariaLabel="OBS operation" value={op.type} labels={OBS_OP_LABELS} onChange={(type) => set(toOp(type))} />
+        <EnumSelect ariaLabel="Do" value={op.type} labels={OBS_OP_LABELS} onChange={(type) => set(toOp(type))} />
       </Field>
       {(op.type === "setScene" || op.type === "toggleSource") && (
         <Field label="Scene" compact>
           <ComboInput
             ariaLabel="Scene"
             value={op.scene}
-            options={scenes}
+            options={options(inventory.data?.scenes)}
             placeholder="Scene name"
             onChange={(scene) => set({ ...op, scene })}
           />
@@ -383,33 +537,43 @@ function ObsForm({ action, onChange }: FormProps<"obs">) {
             ariaLabel="Source"
             value={op.source}
             placeholder="Source name"
-            options={(inventory.data?.sceneItems.find((i) => i.scene === op.scene)?.sources ?? []).map((s) => ({ value: s, label: s }))}
+            options={options(inventory.data?.sceneItems.find((i) => i.scene === op.scene)?.sources)}
             onChange={(source) => set({ ...op, source })}
           />
         </Field>
       )}
       {op.type === "toggleMute" && (
-        <Field label="Input" compact>
-          <ObsInputField value={op.input} onChange={(input) => set({ ...op, input })} />
+        <Field label="Audio source" compact>
+          <ComboInput
+            ariaLabel="Audio source"
+            value={op.input}
+            placeholder="Like Mic/Aux"
+            options={options(inventory.data?.inputs)}
+            onChange={(input) => set({ ...op, input })}
+          />
         </Field>
       )}
-      {offline && <p className="pl-[100px] text-xs text-muted">OBS is offline. Type names by hand.</p>}
+      {named && inventory.error && (
+        <p className={hintClass}>
+          OBS isn't connected. <SetUpLink onClick={() => navigate("settings", "obs")}>Set up OBS</SetUpLink>, or type the name.
+        </p>
+      )}
     </>
   );
 }
 
-const HA_OP_LABELS: Record<HaOp["type"], string> = { toggle: "Toggle entity", callService: "Call service" };
+const HA_OP_LABELS: Record<HaOp["type"], string> = { toggle: "Turn on / off", callService: "Run a service" };
 
 function HomeAssistantForm({ action, onChange }: FormProps<"homeAssistant">) {
   const entities = useResource(() => api.haEntities());
-  const options = (entities.data ?? []).map((e) => ({ value: e.entityId, label: `${e.name} (${e.state})` }));
+  const options = (entities.data ?? []).map((e) => ({ value: e.entityId, label: e.name }));
   const { op } = action;
   const set = (next: HaOp) => onChange({ ...action, op: next });
   return (
     <>
       <Field label="Do" compact>
         <EnumSelect
-          ariaLabel="Home Assistant operation"
+          ariaLabel="Do"
           value={op.type}
           labels={HA_OP_LABELS}
           onChange={(type) =>
@@ -422,8 +586,8 @@ function HomeAssistantForm({ action, onChange }: FormProps<"homeAssistant">) {
         />
       </Field>
       {op.type === "toggle" ? (
-        <Field label="Entity" compact>
-          <ComboInput ariaLabel="Entity" value={op.entityId} options={options} placeholder="light.desk" onChange={(entityId) => set({ ...op, entityId })} />
+        <Field label="Device" compact>
+          <ComboInput ariaLabel="Device" value={op.entityId} options={options} placeholder="light.desk" onChange={(entityId) => set({ ...op, entityId })} />
         </Field>
       ) : (
         <>
@@ -434,21 +598,28 @@ function HomeAssistantForm({ action, onChange }: FormProps<"homeAssistant">) {
               <TextInput aria-label="Service" placeholder="turn_on" value={op.service} onChange={(e) => set({ ...op, service: e.target.value.trim() })} />
             </div>
           </Field>
-          <Field label="Entity" compact>
+          <Field label="Device (optional)" compact>
             <ComboInput
-              ariaLabel="Entity"
+              ariaLabel="Device (optional)"
               value={op.entityId ?? ""}
               options={options}
-              placeholder="Optional"
+              placeholder="light.desk"
               onChange={(entityId) => set({ ...op, entityId: entityId || null })}
             />
           </Field>
-          <Field label="Data" compact>
-            <JsonObjectField value={op.data} onChange={(data) => set({ ...op, data })} />
-          </Field>
+          <Disclosure label="Advanced">
+            <Field label="Extra data (JSON)" compact>
+              <JsonObjectField value={op.data} onChange={(data) => set({ ...op, data })} />
+            </Field>
+          </Disclosure>
         </>
       )}
-      {entities.error && <p className="pl-[100px] text-xs text-muted">{entities.error}. Type the entity id.</p>}
+      {entities.error && (
+        <p className={hintClass}>
+          Home Assistant isn't connected. <SetUpLink onClick={() => navigate("settings", "ha")}>Set up Home Assistant</SetUpLink>, or type the
+          device id, like light.desk.
+        </p>
+      )}
     </>
   );
 }
@@ -456,34 +627,34 @@ function HomeAssistantForm({ action, onChange }: FormProps<"homeAssistant">) {
 const isJsonObject = (value: JsonValue): value is { [key in string]: JsonValue } =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** JSON object editor: commits only valid objects (or empty = null). */
+/** JSON object editor: commits only valid objects (or empty = null). Follows undo (R6-5). */
 function JsonObjectField({ value, onChange }: { value: JsonValue | null; onChange: (value: JsonValue | null) => void }) {
-  const [text, setText] = useState(value === null ? "" : JSON.stringify(value, null, 2));
-  const [error, setError] = useState<string | null>(null);
+  const saved = JSON.stringify(value);
+  const [text, setText] = useDraft(saved, value === null ? "" : JSON.stringify(value, null, 2));
+  const parse = (text: string) => {
+    if (text.trim() === "") return { value: null, error: null };
+    try {
+      const parsed: JsonValue = JSON.parse(text);
+      return isJsonObject(parsed) ? { value: parsed, error: null } : { value: null, error: "Must be a JSON object" };
+    } catch {
+      return { value: null, error: "Not valid JSON" };
+    }
+  };
+  const { error } = parse(text);
   return (
     <>
       <TextArea
-        aria-label="Service data"
+        aria-label="Extra data (JSON)"
         aria-invalid={error !== null}
         rows={4}
         placeholder={'{ "brightness_pct": 40 }'}
-        className={`font-mono text-xs ${error ? "border-danger" : ""}`}
+        className={cx("font-mono text-xs", error && "border-danger")}
         value={text}
         onChange={(e) => {
           const next = e.target.value;
-          setText(next);
-          if (next.trim() === "") {
-            setError(null);
-            return onChange(null);
-          }
-          try {
-            const parsed: JsonValue = JSON.parse(next);
-            if (!isJsonObject(parsed)) return setError("Must be a JSON object");
-            setError(null);
-            onChange(parsed);
-          } catch {
-            setError("Invalid JSON");
-          }
+          const parsed = parse(next);
+          setText(next, parsed.error ? saved : JSON.stringify(parsed.value));
+          if (!parsed.error) onChange(parsed.value);
         }}
       />
       {error && <p className="mt-1 text-xs text-danger">{error}</p>}
@@ -491,43 +662,71 @@ function JsonObjectField({ value, onChange }: { value: JsonValue | null; onChang
   );
 }
 
+const isWebAddress = (text: string) => {
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
 function HttpForm({ action, onChange }: FormProps<"http">) {
   const headers = action.headers;
   const setHeader = (i: number, patch: Partial<{ name: string; value: string }>) =>
     onChange({ ...action, headers: headers.map((h, j) => (j === i ? { ...h, ...patch } : h)) });
+  // The address only saves once it is a full http(s) URL (T2-2).
+  const [url, setUrl] = useDraft(action.url, action.url);
+  const invalid = url !== action.url && !isWebAddress(url);
   return (
     <>
-      <Field label="Request" compact>
+      <Field label="Address" compact hint={invalid && <span className="text-danger">Enter a full web address, like https://example.com</span>}>
         <div className="flex gap-1">
           <EnumSelect ariaLabel="Method" className="w-24 shrink-0" value={action.method} labels={HTTP_METHODS} onChange={(method) => onChange({ ...action, method })} />
-          <TextInput aria-label="URL" value={action.url} placeholder="https://" onChange={(e) => onChange({ ...action, url: e.target.value })} />
-        </div>
-      </Field>
-      <Field label="Headers" compact>
-        <div className="flex flex-col gap-1">
-          {headers.map((h, i) => (
-            <div key={i} className="flex gap-1">
-              <TextInput aria-label="Header name" placeholder="Name" value={h.name} onChange={(e) => setHeader(i, { name: e.target.value })} />
-              <TextInput aria-label="Header value" placeholder="Value" value={h.value} onChange={(e) => setHeader(i, { value: e.target.value })} />
-              <IconButton icon="x" label="Remove header" className="size-8" onClick={() => onChange({ ...action, headers: headers.filter((_, j) => j !== i) })} />
-            </div>
-          ))}
-          <Button size="sm" icon="plus" className="self-start" onClick={() => onChange({ ...action, headers: [...headers, { name: "", value: "" }] })}>
-            Header
-          </Button>
-        </div>
-      </Field>
-      {action.method !== "GET" && (
-        <Field label="Body" compact>
-          <TextArea
-            aria-label="Body"
-            rows={4}
-            className="font-mono text-xs"
-            value={action.body ?? ""}
-            onChange={(e) => onChange({ ...action, body: e.target.value === "" ? null : e.target.value })}
+          <TextInput
+            aria-label="Address"
+            aria-invalid={invalid}
+            className={cx(invalid && "border-danger")}
+            value={url}
+            placeholder="https://example.com"
+            onChange={(e) => {
+              const next = e.target.value.trim();
+              const valid = isWebAddress(next);
+              setUrl(e.target.value, valid ? next : action.url);
+              if (valid) onChange({ ...action, url: next });
+            }}
           />
+        </div>
+      </Field>
+      <Disclosure label="Advanced">
+        <Field label="Headers" compact>
+          <div className="flex flex-col gap-1">
+            {headers.map((h, i) => (
+              <div key={i} className="flex gap-1">
+                <TextInput aria-label="Header name" placeholder="Name" value={h.name} onChange={(e) => setHeader(i, { name: e.target.value })} />
+                <TextInput aria-label="Header value" placeholder="Value" value={h.value} onChange={(e) => setHeader(i, { value: e.target.value })} />
+                <Button size="sm" variant="ghost" className="shrink-0" onClick={() => onChange({ ...action, headers: headers.filter((_, j) => j !== i) })}>
+                  Remove
+                </Button>
+              </div>
+            ))}
+            <Button size="sm" className="self-start" onClick={() => onChange({ ...action, headers: [...headers, { name: "", value: "" }] })}>
+              Add header
+            </Button>
+          </div>
         </Field>
-      )}
+        {action.method !== "GET" && (
+          <Field label="Body" compact>
+            <TextArea
+              aria-label="Body"
+              rows={4}
+              className="font-mono text-xs"
+              value={action.body ?? ""}
+              onChange={(e) => onChange({ ...action, body: e.target.value === "" ? null : e.target.value })}
+            />
+          </Field>
+        )}
+      </Disclosure>
     </>
   );
 }
@@ -551,26 +750,26 @@ function NavigateForm({ action, onChange }: FormProps<"navigate">) {
   return (
     <>
       <Field label="Go to" compact>
-        <EnumSelect ariaLabel="Navigation" value={to.type} labels={NAV_LABELS} onChange={(type) => onChange({ ...action, to: toTarget(type) })} />
+        <EnumSelect ariaLabel="Go to" value={to.type} labels={NAV_LABELS} onChange={(type) => onChange({ ...action, to: toTarget(type) })} />
       </Field>
       {to.type === "page" && (
         <Field label="Page" compact>
           <Select
             ariaLabel="Page"
             value={to.pageId}
-            options={pages.map((p) => ({ value: p.id, label: p.name || "Untitled" }))}
-            placeholder="Missing page"
+            options={pages.map((p) => ({ value: p.id, label: p.name || "Untitled page" }))}
+            placeholder={to.pageId ? "Page was deleted" : "Choose a page"}
             onChange={(pageId) => onChange({ ...action, to: { type: "page", pageId } })}
           />
         </Field>
       )}
       {to.type === "profile" && (
-        <Field label="Profile" compact>
+        <Field label="Layout" compact>
           <Select
-            ariaLabel="Profile"
+            ariaLabel="Layout"
             value={to.profileId}
             options={profiles.map((p) => ({ value: p.id, label: p.name }))}
-            placeholder="Missing profile"
+            placeholder={to.profileId ? "Layout was deleted" : "Choose a layout"}
             onChange={(profileId) => onChange({ ...action, to: { type: "profile", profileId } })}
           />
         </Field>
@@ -579,84 +778,59 @@ function NavigateForm({ action, onChange }: FormProps<"navigate">) {
   );
 }
 
-/** Collapsible box around a nested action. */
-function Nested({ title, summary, children, actions }: { title: string; summary: string; children: ReactNode; actions?: ReactNode }) {
-  return (
-    <details className="group rounded-ui-sm border border-line bg-bg" open>
-      <summary className="flex h-8 items-center gap-1.5 pr-1 pl-2">
-        <I name="chevron-right" className="size-3.5 text-muted group-open:rotate-90" />
-        <span className="font-medium">{title}</span>
-        <span className="min-w-0 flex-1 truncate text-xs text-muted">{summary}</span>
-        {actions}
-      </summary>
-      <div className="border-t border-line px-2 py-2">{children}</div>
-    </details>
-  );
-}
-
 function MultiForm({ action, onChange, depth }: FormProps<"multi">) {
-  const presets = useVoicePresets();
-  const names = { preset: (id: string) => presets.find((p) => p.id === id)?.name };
+  // Keep identity off the saved action. Replacements inherit it; moves keep the object.
+  const identities = useRef(new WeakMap<Action, string>());
+  const identityOf = (step: Action) => {
+    let id = identities.current.get(step);
+    if (!id) identities.current.set(step, (id = newId()));
+    return id;
+  };
   const steps = action.steps;
   const setSteps = (next: Action[]) => onChange({ ...action, steps: next });
-  const stop = (fn: () => void) => (e: { preventDefault: () => void }) => {
-    e.preventDefault();
-    fn();
-  };
   return (
-    <div className="flex flex-col gap-1.5 pt-1">
-      {steps.map((step, i) => (
-        <Nested
-          key={i}
-          title={`${i + 1}.`}
-          summary={describeAction(step, names)}
-          actions={
-            <>
-              <IconButton icon="arrow-up" label="Move up" disabled={i === 0} onClick={stop(() => setSteps(moveItem(steps, i, i - 1)))} />
-              <IconButton icon="arrow-down" label="Move down" disabled={i === steps.length - 1} onClick={stop(() => setSteps(moveItem(steps, i, i + 1)))} />
-              <IconButton icon="x" label="Remove step" onClick={stop(() => setSteps(steps.filter((_, j) => j !== i)))} />
-            </>
-          }
-        >
-          <ActionEditor
-            action={step}
-            allowNone={false}
-            depth={depth + 1}
-            onChange={(next) => next && setSteps(steps.map((s, j) => (j === i ? next : s)))}
-          />
-        </Nested>
-      ))}
-      <div className="flex items-center gap-2">
-        <Button size="sm" icon="plus" onClick={() => setSteps([...steps, defaultAction("hotkey")])}>
-          Step
+    <div className="flex flex-col pt-1">
+      <ol className="flex flex-col">
+        {steps.map((step, i) => (
+          <li key={identityOf(step)} className="border-t border-line py-1">
+            <div className="flex h-7 items-center gap-0.5">
+              <span className="mr-auto font-medium">{i + 1}.</span>
+              <IconButton icon="arrow-up" label="Move up" disabled={i === 0} onClick={() => setSteps(moveItem(steps, i, i - 1))} />
+              <IconButton icon="arrow-down" label="Move down" disabled={i === steps.length - 1} onClick={() => setSteps(moveItem(steps, i, i + 1))} />
+              <Button size="sm" variant="ghost" onClick={() => setSteps(steps.filter((_, j) => j !== i))}>
+                Remove
+              </Button>
+            </div>
+            <ActionEditor action={step} depth={depth + 1} onChange={(next) => {
+              identities.current.set(next, identityOf(step));
+              setSteps(steps.map((s, j) => (j === i ? next : s)));
+            }} />
+          </li>
+        ))}
+      </ol>
+      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+        <Button size="sm" onClick={() => setSteps([...steps, defaultAction("hotkey")])}>
+          Add step
         </Button>
-        <span className="ml-auto text-muted">Pause</span>
-        <NumberField
-          ariaLabel="Pause between steps"
-          className="w-28"
-          value={action.delayMs}
-          min={0}
-          max={60_000}
-          suffix="ms"
-          onChange={(delayMs) => onChange({ ...action, delayMs })}
-        />
+        <span className="ml-auto">Wait between steps</span>
+        <Seconds ariaLabel="Wait between steps" ms={action.delayMs} step={0.05} onChange={(delayMs) => onChange({ ...action, delayMs })} />
       </div>
     </div>
   );
 }
 
 function ToggleForm({ action, onChange, depth }: FormProps<"toggle">) {
-  const presets = useVoicePresets();
-  const names = { preset: (id: string) => presets.find((p) => p.id === id)?.name };
   return (
-    <div className="flex flex-col gap-1.5 pt-1">
-      <Nested title="On" summary={describeAction(action.on, names)}>
-        <ActionEditor action={action.on} allowNone={false} depth={depth + 1} onChange={(on) => on && onChange({ ...action, on })} />
-      </Nested>
-      <Nested title="Off" summary={describeAction(action.off, names)}>
-        <ActionEditor action={action.off} allowNone={false} depth={depth + 1} onChange={(off) => off && onChange({ ...action, off })} />
-      </Nested>
-      <p className="text-xs text-muted">Presses alternate between On and Off. The button shows its active style while on.</p>
+    <div className="flex flex-col pt-1">
+      <div className="border-t border-line py-1">
+        <p className="flex h-7 items-center font-medium">First press</p>
+        <ActionEditor action={action.on} depth={depth + 1} onChange={(on) => onChange({ ...action, on })} />
+      </div>
+      <div className="border-t border-line py-1">
+        <p className="flex h-7 items-center font-medium">Second press</p>
+        <ActionEditor action={action.off} depth={depth + 1} onChange={(off) => onChange({ ...action, off })} />
+      </div>
+      <p className="border-t border-line pt-2 text-xs text-muted">Presses alternate. The button shows its While on look after the first press.</p>
     </div>
   );
 }
