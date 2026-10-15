@@ -58,11 +58,11 @@ const micFor = (output: string) =>
 
 const STATE_TONES = { Off: "text-muted", On: "text-success", "Needs setup": "text-warning", Stopped: "text-danger" };
 
-/** Setup takes priority until an output is chosen; runtime failures explain a stopped voice. */
+/** Setup takes priority until an output is chosen; running sessions can have monitor warnings. */
 function voiceState(voice: VoiceSettings, status: VoiceStatus): keyof typeof STATE_TONES {
   if (!voice.enabled) return "Off";
   if (voice.outputDevice === null) return "Needs setup";
-  return status.error ? "Stopped" : "On";
+  return status.running ? "On" : "Stopped";
 }
 
 const openLink = (url: string) => void run(api.runAction({ type: "open", target: url }));
@@ -97,7 +97,12 @@ export function VoiceChangerScreen() {
         <p className="px-6 pt-4">Changes how your microphone sounds in calls and recordings.</p>
         {state === "Stopped" && (
           <div className="px-6 pt-4">
-            <Notice tone="error">The voice changer stopped: {status.error}</Notice>
+            <Notice tone="error">The voice changer stopped{status.error ? `: ${status.error}` : "."}</Notice>
+          </div>
+        )}
+        {state === "On" && status.error && (
+          <div className="px-6 pt-4">
+            <Notice tone="warn">Hear yourself is unavailable: {status.error.replace(/^monitor unavailable:\s*/, "")}</Notice>
           </div>
         )}
 

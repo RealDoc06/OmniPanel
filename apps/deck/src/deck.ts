@@ -603,8 +603,9 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     lastGestureAt = Date.now();
     if (!online || findGesture(id)) return;
     const origin = stage.getBoundingClientRect();
-    const target = hit(clientX - origin.left, clientY - origin.top);
-    if (target && target.state.disabled) return;
+    let target = hit(clientX - origin.left, clientY - origin.top);
+    // Disabled controls still allow page swipes, but cannot press or slide.
+    if (target && target.state.disabled) target = null;
     // A slider follows one finger: a second touch on it is ignored until the first one lifts.
     if (target && target.kind === "slider" && target.dragging) return;
     const g: Gesture = {

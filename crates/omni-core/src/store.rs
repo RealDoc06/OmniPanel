@@ -101,7 +101,12 @@ pub fn load_with_repair_report(data_dir: &Path) -> Result<(Config, Option<String
 /// Keep complete members/elements at each depth, then close only their containers.
 /// A scalar at EOF needs a delimiter to prove it wasn't cut in the middle.
 fn close_truncated_json(bytes: &[u8]) -> Option<Value> {
-    std::str::from_utf8(bytes).ok()?;
+    let bytes = match std::str::from_utf8(bytes) {
+        Ok(_) => bytes,
+        // A cut multibyte character at EOF must not discard earlier records.
+        Err(error) if error.error_len().is_none() => &bytes[..error.valid_up_to()],
+        Err(_) => return None,
+    };
     #[derive(Clone, Copy)]
     enum Expect {
         FirstKey,
@@ -385,6 +390,25 @@ mod tests {
         assert!(warning.contains("devices: 1"));
         assert!(warning.contains("config.json.broken-"));
         assert!(fs::read_dir(&dir).unwrap().any(|entry| fs::read(entry.unwrap().path()).unwrap() == bytes));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn truncation_inside_utf8_keeps_preceding_layout_and_device() {
+        let dir = temp_dir("truncated-utf8");
+        let mut bytes = r#"{"profiles":[{"id":"mine","name":"Keep"}],"devices":[{"id":"tablet","tokenHash":"keep"}],"settings":{"hostName":"🎛"#
+            .as_bytes()
+            .to_vec();
+        bytes.truncate(bytes.len() - 3); // Only the emoji's first byte reached disk.
+        let error = std::str::from_utf8(&bytes).unwrap_err();
+        assert_eq!(error.error_len(), None);
+        fs::write(config_path(&dir), &bytes).unwrap();
+
+        let (loaded, warning) = load_with_repair_report(&dir).unwrap();
+        assert_eq!(loaded.profile("mine").unwrap().name, "Keep");
+        assert_eq!(loaded.device("tablet").unwrap().token_hash, "keep");
+        assert!(warning.is_some());
+        assert_eq!(load_with_repair_report(&dir).unwrap(), (loaded, None));
         fs::remove_dir_all(dir).ok();
     }
 

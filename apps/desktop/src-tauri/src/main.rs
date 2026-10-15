@@ -8,6 +8,7 @@ mod hotkeys;
 mod tray;
 mod window;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use omni_core::{HostEvent, store};
@@ -20,6 +21,12 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 const HIDDEN_ARG: &str = "--hidden";
 /// Quit waits this long at most for the engine to close decks and audio.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct QuitState {
+    requested: AtomicBool,
+    ready: AtomicBool,
+}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -37,6 +44,12 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(hotkeys::on_shortcut).build())
         .plugin(tauri_plugin_dialog::init())
         .manage(hotkeys::Registered::default())
+        .manage(QuitState::default())
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "app-quit" {
+                request_quit(app);
+            }
+        })
         .invoke_handler(commands::handler())
         // Tauri panics (aborting the app) when setup fails, so failures are
         // reported here and end with a clean exit instead.
@@ -62,13 +75,22 @@ fn main() {
     };
 
     app.run(|app, event| match event {
-        // Last window closed: keep running in the tray.
-        RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+        RunEvent::ExitRequested { code, api, .. } => {
+            if code.is_none() {
+                // Last window closed: keep running in the tray on every platform.
+                api.prevent_exit();
+            } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::Relaxed) {
+                // An explicit exit must use the same handshake as the menus.
+                api.prevent_exit();
+                request_quit(app);
+            }
+        }
         RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == window::MAIN => {
             window::on_destroyed(app);
         }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => window::show(app),
+        // tao 0.37 sends Dock Quit directly here, without an ExitRequested to defer.
         RunEvent::Exit => {
             if let Some(host) = app.try_state::<Host>() {
                 // The timer is created inside `block_on`: tokio panics when a
@@ -103,6 +125,8 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     let version = app.package_info().version.to_string();
     let host = tauri::async_runtime::block_on(Host::start(HostOptions { data_dir, version }))?;
     app.manage(host.clone());
+    #[cfg(target_os = "macos")]
+    install_app_menu(app)?;
     tray::create(app)?;
     sync_with_config(app, &host);
     forward_events(app.clone(), host.clone());
@@ -137,13 +161,35 @@ fn forward_events(app: AppHandle, host: Host) {
     });
 }
 
+/// Keep Tauri's standard menus, replacing its native terminate: Quit with our handshake.
+#[cfg(target_os = "macos")]
+fn install_app_menu(app: &AppHandle) -> anyhow::Result<()> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+
+    let menu = Menu::default(app)?;
+    // Tauri 2.12 puts the application submenu first and its predefined Quit last.
+    let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() else {
+        anyhow::bail!("the default application menu is missing");
+    };
+    let Some(quit) = app_menu.items()?.pop() else {
+        anyhow::bail!("the default Quit menu item is missing");
+    };
+    app_menu.remove(&quit)?;
+    app_menu.append(&MenuItem::with_id(app, "app-quit", "Quit OmniPanel", true, Some("Cmd+Q"))?)?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
 /// Give the webview time to flush, with a fallback if it cannot answer.
 fn request_quit(app: &AppHandle) {
+    if app.state::<QuitState>().requested.swap(true, Ordering::Relaxed) {
+        return;
+    }
     if let Some(window) = app.get_webview_window(window::MAIN) {
         let fallback = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(4)).await;
-            fallback.exit(0);
+            finish_quit(&fallback);
         });
         if let Err(error) = window.eval("window.dispatchEvent(new Event('omni-quit'))")
             && let Some(host) = app.try_state::<Host>()
@@ -151,8 +197,14 @@ fn request_quit(app: &AppHandle) {
             host.log(omni_core::LogLevel::Error, format!("Couldn't ask the window to save before quitting: {error}"));
         }
     } else {
-        app.exit(0);
+        finish_quit(app);
     }
+}
+
+/// The UI has finished its bounded drain, or the fallback timer has elapsed.
+fn finish_quit(app: &AppHandle) {
+    app.state::<QuitState>().ready.store(true, Ordering::Relaxed);
+    app.exit(0);
 }
 
 fn sync_with_config(app: &AppHandle, host: &Host) {

@@ -103,10 +103,16 @@ export function createSaver<T>(
       queued.delete(key);
       generations.set(key, (generations.get(key) ?? 0) + 1);
     },
-    /** Waits for every pending save, including edits made during an in-flight save. */
+    /** Drains pending edits, including in-flight changes, then rejects with any collected failures. */
     async flushAll() {
-      while (pending.size > 0) await Promise.all([...pending.keys()].map(flush));
+      const errors: unknown[] = [];
+      while (pending.size > 0) {
+        for (const result of await Promise.allSettled([...pending.keys()].map(flush))) {
+          if (result.status === "rejected") errors.push(result.reason);
+        }
+      }
       await chain;
+      if (errors.length > 0) throw new AggregateError(errors, "Some saves failed");
     },
     /** Unload cannot wait for responses. Send every latest snapshot immediately. */
     flushOnUnload() {
@@ -119,11 +125,15 @@ export function createSaver<T>(
   };
 }
 
-/** Drains again when another saver gained edits or commands during the previous pass. */
+/** Revisits savers with new work despite failures, reporting collected errors only after draining. */
 export async function drainSavers(savers: readonly { flushAll(): Promise<void>; isIdle(): boolean }[]) {
+  const errors: unknown[] = [];
   do {
-    await Promise.all(savers.map((saver) => saver.flushAll()));
+    for (const result of await Promise.allSettled(savers.map((saver) => saver.flushAll()))) {
+      if (result.status === "rejected") errors.push(result.reason);
+    }
   } while (savers.some((saver) => !saver.isIdle()));
+  if (errors.length > 0) throw new AggregateError(errors, "Some saves failed");
 }
 
 /** Quit always proceeds, even when saving fails or the host stops responding. */

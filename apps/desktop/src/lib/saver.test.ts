@@ -162,6 +162,79 @@ test("quit proceeds after a rejected save", async () => {
   assert.equal(quit, true);
 });
 
+test("quit waits for another saver's in-flight save and later edit after a failure", async () => {
+  const first = gate();
+  const latest = gate();
+  const errors: unknown[] = [];
+  const saved: string[] = [];
+  const failed = createSaver<string>(async () => { throw new Error("device removed"); }, (error) => errors.push(error));
+  const profiles = createSaver<string>(async (value) => {
+    saved.push(value);
+    await (value === "FIRST" ? first.promise : latest.promise);
+  }, fail);
+  failed.schedule("device", "edited", 500);
+  profiles.schedule("profile", "FIRST", 0);
+  let quit = false;
+  const quitting = quitAfterFlush(() => drainSavers([failed, profiles]), async () => { quit = true; });
+  try {
+    await tick();
+    assert.equal(errors.length, 1);
+    assert.equal(quit, false);
+    profiles.schedule("profile", "LATEST", 500);
+    first.open();
+    await tick();
+    assert.deepEqual(saved, ["FIRST", "LATEST"]);
+    assert.equal(quit, false);
+    latest.open();
+    await quitting;
+    assert.equal(quit, true);
+    assert.ok(profiles.isIdle());
+  } finally {
+    first.open();
+    latest.open();
+    await quitting;
+  }
+});
+
+test("flushAll collects key failures after successful saves and later edits settle", async () => {
+  const first = gate();
+  const latest = gate();
+  const saved: string[] = [];
+  const failures = [new Error("first failure"), new Error("second failure")];
+  const saver = createSaver<string>(async (value) => {
+    if (value === "bad-1") throw failures[0];
+    if (value === "bad-2") throw failures[1];
+    saved.push(value);
+    await (value === "FIRST" ? first.promise : latest.promise);
+  }, () => {});
+  saver.schedule("bad-1", "bad-1", 500);
+  saver.schedule("bad-2", "bad-2", 500);
+  saver.schedule("profile", "FIRST", 500);
+  let settled = false;
+  const flushed = saver.flushAll().finally(() => { settled = true; });
+  const rejected = assert.rejects(flushed, (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, failures);
+    return true;
+  });
+  try {
+    await tick();
+    assert.equal(settled, false);
+    saver.schedule("profile", "LATEST", 500);
+    first.open();
+    await tick();
+    assert.deepEqual(saved, ["FIRST", "LATEST"]);
+    assert.equal(settled, false);
+    latest.open();
+    await rejected;
+    assert.ok(saver.isIdle());
+  } finally {
+    first.open();
+    latest.open();
+    await rejected;
+  }
+});
+
 test("quit proceeds when saving never settles", async () => {
   let quit = false;
   await quitAfterFlush(() => new Promise<void>(() => {}), async () => { quit = true; }, 10);

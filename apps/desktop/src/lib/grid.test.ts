@@ -101,16 +101,18 @@ test("picker sliders use two free squares vertically, or one when blocked or at 
 test("copied layout links follow new ids through steps and both alternating branches", () => {
   const page: Action = { type: "navigate", to: { type: "page", pageId: "main" } };
   const self: Action = { type: "navigate", to: { type: "profile", profileId: "source" } };
-  const external: Action = { type: "navigate", to: { type: "profile", profileId: "other" } };
+  // An external layout may share an id with a page in the copied layout.
+  const external: Action = { type: "navigate", to: { type: "profile", profileId: "main" } };
   const relative: Action = { type: "navigate", to: { type: "nextPage" } };
   const source: Action = {
     type: "multi", delayMs: 150,
     steps: [page, { type: "toggle", on: self, off: { type: "multi", delayMs: 0, steps: [page, external, relative] } }],
   };
   const snapshot = structuredClone(source);
-  const renamed = new Map([["main", "copied-main"], ["source", "copy"]]);
+  const profiles = new Map([["source", "copy"]]);
+  const pages = new Map([["main", "copied-main"]]);
   const copiedPage: Action = { type: "navigate", to: { type: "page", pageId: "copied-main" } };
-  assert.deepEqual(followRenamed(source, renamed), {
+  assert.deepEqual(followRenamed(source, profiles, pages), {
     type: "multi", delayMs: 150,
     steps: [copiedPage, {
       type: "toggle", on: { type: "navigate", to: { type: "profile", profileId: "copy" } },

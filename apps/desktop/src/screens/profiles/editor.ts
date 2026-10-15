@@ -372,20 +372,20 @@ export function duplicateProfile() {
   const c = current();
   if (!c) return;
   const profiles = useApp.getState().config.profiles;
-  // Old layout and page ids -> new ones.
-  const renamed = new Map([[c.profile.id, newId()]]);
-  for (const page of c.profile.pages) renamed.set(page.id, newId());
+  const id = newId();
+  const profilesRenamed = new Map([[c.profile.id, id]]);
+  const pagesRenamed = new Map(c.profile.pages.map((page) => [page.id, newId()]));
   const relink = (control: Control): Control => {
     const { kind } = control;
-    return kind.type === "button" && kind.action ? { ...control, kind: { ...kind, action: followRenamed(kind.action, renamed) } } : control;
+    return kind.type === "button" && kind.action ? { ...control, kind: { ...kind, action: followRenamed(kind.action, profilesRenamed, pagesRenamed) } } : control;
   };
   const copy: Profile = {
     ...c.profile,
-    id: renamed.get(c.profile.id) ?? newId(),
+    id,
     name: uniqueName(`${c.profile.name} copy`, profiles.map((p) => p.name)),
     pages: c.profile.pages.map((page) => ({
       ...page,
-      id: renamed.get(page.id) ?? newId(),
+      id: pagesRenamed.get(page.id)!,
       controls: page.controls.map((control) => relink(cloneControl(control))),
     })),
   };

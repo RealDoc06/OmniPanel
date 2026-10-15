@@ -43,6 +43,11 @@ function Mixer() {
   const [error, setError] = useState<string | null>(null);
   const touchedAt = useRef(0);
   const mac = useIsMac();
+  const capabilities = mixer?.capabilities;
+  const note = capabilities?.note ?? (capabilities && !capabilities.perAppVolume ? "App volume controls are unavailable." : null);
+  // Match omni-audio's macOS PERMISSION_HINT, not unsupported-OS or tap failures.
+  const needsPermission = mac && capabilities?.perAppVolume === false &&
+    capabilities.note?.startsWith("Per-app volume: allow OmniPanel under System Settings > Privacy & Security > Screen & System Audio Recording");
 
   usePolling(async () => {
     try {
@@ -91,12 +96,12 @@ function Mixer() {
           {mixer.master && row({ type: "master" }, "Computer sound", "volume-2", mixer.master)}
           {mixer.mic && row({ type: "mic" }, "Microphone", "mic", mixer.mic)}
           <div className="my-2 border-t border-line" />
-          {!mixer.capabilities.perAppVolume && (
+          {note && (
             <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
               <Notice tone="warn">
-                {mac ? "Allow OmniPanel to control app volume." : (mixer.capabilities.note ?? "App volume controls are unavailable.")}
+                {note}
               </Notice>
-              {mac && (
+              {needsPermission && (
                 <Button size="sm" onClick={() => void run(api.runAction({ type: "open", target: AUDIO_PERMISSION_PANE }))}>
                   Open System Settings
                 </Button>
@@ -134,7 +139,7 @@ function MixerRow({
   return (
     <div
       className={cx("flex h-10 items-center gap-3", disabled && "opacity-40")}
-      title={disabled ? "App sliders and mute controls are unavailable until app volume control is allowed." : undefined}
+      title={disabled ? "App sliders and mute controls are unavailable." : undefined}
     >
       <I name={icon} className="size-4 text-muted" />
       <span className="flex w-44 min-w-0 items-baseline gap-2">

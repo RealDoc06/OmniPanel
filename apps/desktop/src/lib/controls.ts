@@ -52,21 +52,21 @@ export function newControlAt(x: number, y: number, { kind, style }: PickResult, 
 export const cloneControl = (control: Control): Control => ({ ...structuredClone(control), id: newId(), hotkey: null });
 
 /**
- * Points page and layout links at their copies (old id -> new id), including links
- * inside steps and branches. Mirrors `follow_renamed` in crates/omni-host/src/lib.rs.
+ * Points links at their copies using separate layout and page namespaces, including
+ * links inside steps and branches. Mirrors `follow_renamed` in crates/omni-host/src/lib.rs.
  */
-export function followRenamed(action: Action, renamed: ReadonlyMap<string, string>): Action {
+export function followRenamed(action: Action, profiles: ReadonlyMap<string, string>, pages: ReadonlyMap<string, string>): Action {
   switch (action.type) {
     case "navigate": {
       const to = action.to;
-      if (to.type === "page") return { ...action, to: { ...to, pageId: renamed.get(to.pageId) ?? to.pageId } };
-      if (to.type === "profile") return { ...action, to: { ...to, profileId: renamed.get(to.profileId) ?? to.profileId } };
+      if (to.type === "page") return { ...action, to: { ...to, pageId: pages.get(to.pageId) ?? to.pageId } };
+      if (to.type === "profile") return { ...action, to: { ...to, profileId: profiles.get(to.profileId) ?? to.profileId } };
       return action;
     }
     case "multi":
-      return { ...action, steps: action.steps.map((step) => followRenamed(step, renamed)) };
+      return { ...action, steps: action.steps.map((step) => followRenamed(step, profiles, pages)) };
     case "toggle":
-      return { ...action, on: followRenamed(action.on, renamed), off: followRenamed(action.off, renamed) };
+      return { ...action, on: followRenamed(action.on, profiles, pages), off: followRenamed(action.off, profiles, pages) };
     default:
       return action;
   }
