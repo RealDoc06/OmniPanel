@@ -200,14 +200,8 @@ export function unpairDevice(id: string) {
   return run(savers.devices.enqueue(() => api.unpairDevice(id)));
 }
 
-// Accept the old destination at runtime without adding it back to the public Screen union.
-function normalizeScreen(screen: Screen | "integrations"): Screen {
-  return screen === "integrations" ? "settings" : screen;
-}
-
 export function navigate(screen: Screen, anchor: string | null = null) {
-  const destination = normalizeScreen(screen);
-  useApp.setState((s) => ({ screen: destination, anchor, unreadErrors: destination === "log" ? 0 : s.unreadErrors }));
+  useApp.setState((s) => ({ screen, anchor, unreadErrors: screen === "log" ? 0 : s.unreadErrors }));
 }
 
 export const clearLogs = () => useApp.setState({ logs: [], unreadErrors: 0 });
