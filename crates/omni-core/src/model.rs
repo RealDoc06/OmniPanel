@@ -1,6 +1,8 @@
 //! Persisted configuration: settings, profiles (deck layouts), paired devices,
 //! user themes and user voice presets.
 
+use std::collections::HashSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -148,26 +150,18 @@ pub struct Page {
 /// A button or slider placed on the grid. `x`/`y` are 0-based cells,
 /// `w`/`h` the span in cells.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct Control {
     pub id: String,
     pub x: u8,
     pub y: u8,
-    #[serde(default = "one")]
     pub w: u8,
-    #[serde(default = "one")]
     pub h: u8,
-    #[serde(default)]
     pub style: Style,
     pub kind: ControlKind,
     /// Global shortcut that triggers this control, e.g. `"CmdOrCtrl+Alt+1"`.
-    #[serde(default)]
     pub hotkey: Option<String>,
-}
-
-fn one() -> u8 {
-    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -273,7 +267,7 @@ pub struct DeckSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct Theme {
     pub id: String,
@@ -285,7 +279,7 @@ pub struct Theme {
 
 /// Every color is `#rrggbb`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct ThemeColors {
     pub background: String,
@@ -305,7 +299,7 @@ pub struct ThemeColors {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct VoicePreset {
     pub id: String,
@@ -403,15 +397,22 @@ impl Config {
             .or_else(|| self.profiles.first())
     }
 
-    /// Repair anything a hand-edited or older config could break:
-    /// grid bounds, controls outside the grid, empty profiles.
+    /// Repair anything a hand-edited, imported or older config could break:
+    /// empty profiles, layouts (see [`Profile::normalize`]) and duplicate ids.
+    /// Lookups and toggle state go by id, so a later duplicate profile or
+    /// control gets a fresh id and the first one keeps every reference.
     pub fn normalize(&mut self) {
         self.schema = CONFIG_SCHEMA;
         if self.profiles.is_empty() {
             self.profiles.push(crate::defaults::default_profile());
         }
+        let (mut profile_ids, mut control_ids) = (HashSet::new(), HashSet::new());
         for profile in &mut self.profiles {
+            unique_id(&mut profile.id, &mut profile_ids);
             profile.normalize();
+            for control in profile.pages.iter_mut().flat_map(|p| &mut p.controls) {
+                unique_id(&mut control.id, &mut control_ids);
+            }
         }
         let has_default =
             self.settings.default_profile_id.as_deref().is_some_and(|id| self.profiles.iter().any(|p| p.id == id));
@@ -429,25 +430,108 @@ impl Profile {
         self.pages.iter().find(|p| p.id == id)
     }
 
+    /// Repair the layout: grid bounds, empty or duplicate page ids, and
+    /// controls outside the grid or overlapping an earlier one. Those keep
+    /// their span (clamped to the grid) and move to the first free cells
+    /// (row-major) of their page, else of the following pages, else of a new
+    /// page, so no control is lost. Valid layouts are left untouched.
     pub fn normalize(&mut self) {
         self.rows = self.rows.clamp(1, MAX_GRID);
         self.cols = self.cols.clamp(1, MAX_GRID);
         if self.pages.is_empty() {
             self.pages.push(Page { id: crate::new_id(), name: "Page 1".into(), controls: vec![] });
         }
-        let (rows, cols) = (self.rows, self.cols);
+        let mut page_ids = HashSet::new();
         for page in &mut self.pages {
-            page.controls.retain(|c| c.x < cols && c.y < rows);
-            for c in &mut page.controls {
-                c.w = c.w.clamp(1, cols - c.x);
-                c.h = c.h.clamp(1, rows - c.y);
+            unique_id(&mut page.id, &mut page_ids);
+        }
+        let (rows, cols) = (self.rows, self.cols);
+        // Controls that found no room, carried to the next page.
+        let mut homeless = Vec::new();
+        let mut index = 0;
+        while index < self.pages.len() || !homeless.is_empty() {
+            if index == self.pages.len() {
+                let mut id = String::new();
+                unique_id(&mut id, &mut page_ids);
+                self.pages.push(Page { id, name: format!("Page {}", index + 1), controls: vec![] });
             }
+            let page = &mut self.pages[index];
+            let mut cells = Cells::new(rows, cols);
+            let mut moving = Vec::new();
+            for mut c in std::mem::take(&mut page.controls) {
+                if cells.keep(&mut c) { page.controls.push(c) } else { moving.push(c) }
+            }
+            moving.append(&mut homeless);
+            for mut c in moving {
+                if cells.relocate(&mut c) { page.controls.push(c) } else { homeless.push(c) }
+            }
+            index += 1;
         }
     }
 
     /// Every control of every page.
     pub fn controls(&self) -> impl Iterator<Item = &Control> {
         self.pages.iter().flat_map(|p| p.controls.iter())
+    }
+}
+
+/// Give `id` a fresh value when it's empty or already `seen`, then mark it seen.
+fn unique_id(id: &mut String, seen: &mut HashSet<String>) {
+    while id.is_empty() || seen.contains(id) {
+        *id = crate::new_id();
+    }
+    seen.insert(id.clone());
+}
+
+/// Cells taken on one page, for [`Profile::normalize`].
+struct Cells {
+    rows: u8,
+    cols: u8,
+    taken: Vec<bool>,
+}
+
+impl Cells {
+    fn new(rows: u8, cols: u8) -> Self {
+        Self { rows, cols, taken: vec![false; usize::from(rows) * usize::from(cols)] }
+    }
+
+    /// Claim the span if it's inside the grid and free.
+    fn claim(&mut self, x: u8, y: u8, w: u8, h: u8) -> bool {
+        let inside = x < self.cols && y < self.rows && w <= self.cols - x && h <= self.rows - y;
+        let cols = usize::from(self.cols);
+        let cells = || (y..y + h).flat_map(move |r| (x..x + w).map(move |c| usize::from(r) * cols + usize::from(c)));
+        if !inside || cells().any(|i| self.taken[i]) {
+            return false;
+        }
+        cells().for_each(|i| self.taken[i] = true);
+        true
+    }
+
+    /// Keep `c` where it is, its span clamped to the grid edge, if those cells are free.
+    fn keep(&mut self, c: &mut Control) -> bool {
+        if c.x >= self.cols || c.y >= self.rows {
+            return false;
+        }
+        let (w, h) = (c.w.clamp(1, self.cols - c.x), c.h.clamp(1, self.rows - c.y));
+        let kept = self.claim(c.x, c.y, w, h);
+        if kept {
+            (c.w, c.h) = (w, h);
+        }
+        kept
+    }
+
+    /// Move `c`, its span clamped to the grid, to the first free spot
+    /// (row-major). Always succeeds on an empty page.
+    fn relocate(&mut self, c: &mut Control) -> bool {
+        let (rows, cols) = (self.rows, self.cols);
+        let (w, h) = (c.w.clamp(1, cols), c.h.clamp(1, rows));
+        for (y, x) in (0..=rows - h).flat_map(|y| (0..=cols - w).map(move |x| (y, x))) {
+            if self.claim(x, y, w, h) {
+                (c.x, c.y, c.w, c.h) = (x, y, w, h);
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -537,6 +621,21 @@ impl Default for Page {
     }
 }
 
+impl Default for Control {
+    fn default() -> Self {
+        Self {
+            id: crate::new_id(),
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            style: Style::default(),
+            kind: ControlKind::Button { action: None },
+            hotkey: None,
+        }
+    }
+}
+
 impl Default for Device {
     fn default() -> Self {
         Self {
@@ -555,5 +654,24 @@ impl Default for Device {
 impl Default for DeckSettings {
     fn default() -> Self {
         Self { haptics: true, keep_awake: true, dim: 0.0, show_status_bar: true, auto_rotate: true }
+    }
+}
+
+/// Fields missing from a stored theme fall back to the default built-in theme.
+impl Default for Theme {
+    fn default() -> Self {
+        Self { id: format!("custom-{}", crate::new_id()), name: "Theme".into(), ..crate::defaults::default_theme() }
+    }
+}
+
+impl Default for ThemeColors {
+    fn default() -> Self {
+        crate::defaults::default_theme().colors
+    }
+}
+
+impl Default for VoicePreset {
+    fn default() -> Self {
+        Self { id: crate::new_id(), name: "Preset".into(), effects: vec![] }
     }
 }

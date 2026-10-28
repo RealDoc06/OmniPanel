@@ -1,12 +1,14 @@
 // The deck grid: builds the DOM once per layout, patches only changed controls on state
-// messages, and turns touches into press / slide / page-swipe events.
+// messages, and turns touches and keys into press / slide / page-swipe events.
 // All geometry is computed here in JS (no CSS grid / flexbox / variables on old WebViews).
+// Controls are ARIA buttons / sliders in reading order, so keyboards and screen readers can use them.
 
 import type { ControlState, DeckControl, DeckIcon, DeckLayout, NavTarget, ThemeColors } from "@omni/protocol";
 import { readableOn } from "./color";
 import { clamp, clearChildren, el, newMap, place, px, unreachable } from "./dom";
 import type { Rect } from "./dom";
 import { svg } from "./icons";
+import { isActivationKey } from "./tap";
 import { fitLabel, lineHeight, textWidth } from "./text";
 
 /** Distance a finger may wander before a tap turns into a drag / swipe. */
@@ -21,6 +23,9 @@ const SLIDER_SETTLE_MS = 300;
 const GHOST_MOUSE_MS = 1000;
 const MOUSE_ID = -1;
 const DISABLED_OPACITY = "0.4";
+/** One arrow key press moves a focused slider by this much. */
+const SLIDER_KEY_STEP = 0.05;
+const EMPTY_TEXT = "No buttons on this page yet. Add some in OmniPanel on your computer.";
 
 export interface DeckEvents {
   press(id: string): void;
@@ -160,6 +165,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   let online = true;
   let gestures: Gesture[] = [];
   let lastTouchAt = 0;
+  let lastGestureAt = 0;
 
   // ---- building -----------------------------------------------------------------------
 
@@ -185,8 +191,17 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
+  /** The cell containing `node` (clicks can target a label or icon inside it). */
+  function cellOf(node: EventTarget | null): Cell | null {
+    if (!(node instanceof Node)) return null;
+    for (let i = 0; i < cells.length; i++) if (cells[i].el.contains(node)) return cells[i];
+    return null;
+  }
+
   function rebuild(): void {
     cancelGestures();
+    // Keyboard focus survives a rebuild: back on the same control, else on the first one.
+    const focused = cellOf(document.activeElement);
     clearChildren(stage);
     cells = [];
     byId = newMap<Cell>();
@@ -195,8 +210,12 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     const height = stage.clientHeight;
     if (width < 20 || height < 20) return;
     gap = clamp(Math.round(Math.min(width / Math.max(1, layout.cols), height / Math.max(1, layout.rows)) * 0.07), 4, 14);
-    for (let i = 0; i < layout.controls.length; i++) {
-      const ctl = layout.controls[i];
+    // DOM (and so Tab) order is reading order: rows top to bottom, then columns.
+    const ordered = layout.controls.slice().sort(function (a, b) {
+      return a.y - b.y || a.x - b.x;
+    });
+    for (let i = 0; i < ordered.length; i++) {
+      const ctl = ordered[i];
       const rect = controlRect(ctl, layout, width, height);
       if (!rect || rect.w < 4 || rect.h < 4) continue;
       const state = states[ctl.id] || ctl.state;
@@ -217,10 +236,22 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
       cells.push(cell);
       byId[ctl.id] = cell;
     }
+    if (ordered.length === 0) {
+      const empty = el("div", "empty", stage);
+      empty.textContent = EMPTY_TEXT;
+      empty.style.color = layout.theme.textMuted;
+    }
+    if (focused) {
+      const again = byId[focused.ctl.id] || cells[0];
+      if (again) again.el.focus();
+    }
   }
 
-  function buildBase(className: string, rect: Rect, radius: string): { root: HTMLElement; iconEl: HTMLElement; labelEl: HTMLElement } {
-    const root = el("div", className, stage);
+  /** A focusable cell root with the matching ARIA role (button / slider). */
+  function buildBase(kind: Cell["kind"], rect: Rect, radius: string): { root: HTMLElement; iconEl: HTMLElement; labelEl: HTMLElement } {
+    const root = el("div", kind === "button" ? "btn" : "slider", stage);
+    root.setAttribute("role", kind);
+    root.tabIndex = 0;
     place(root, rect);
     root.style.borderRadius = radius;
     return { root: root, iconEl: el("div", "ico", root), labelEl: el("div", "lbl", root) };
@@ -229,7 +260,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   // ---- buttons ------------------------------------------------------------------------
 
   function buildButton(ctl: DeckControl, rect: Rect, state: ControlState, theme: ThemeColors, radius: string): ButtonCell {
-    const base = buildBase("btn", rect, radius);
+    const base = buildBase("button", rect, radius);
     const cell: ButtonCell = {
       kind: "button",
       ctl: ctl,
@@ -258,6 +289,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     c.el.style.backgroundColor = bg;
     c.el.style.color = fg;
     c.el.style.opacity = st.disabled ? DISABLED_OPACITY : "";
+    c.el.setAttribute("aria-disabled", String(st.disabled));
     const icon = st.active && ctl.active.icon ? ctl.active.icon : ctl.icon;
     const label = st.label !== null ? st.label : st.active && ctl.active.label !== null ? ctl.active.label : ctl.label;
     const key = iconKey(icon);
@@ -265,6 +297,8 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
       if (key !== c.drawnIcon) drawIcon(c.iconEl, icon);
       c.drawnIcon = key;
       c.drawnLabel = label;
+      // The full label, also when it is hidden or shortened on screen.
+      c.el.setAttribute("aria-label", label);
       layoutButton(c, icon, label);
     }
   }
@@ -334,6 +368,9 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
 
   function buildSlider(ctl: DeckControl, rect: Rect, state: ControlState, theme: ThemeColors, radius: string, vertical: boolean): SliderCell {
     const base = buildBase("slider", rect, radius);
+    base.root.setAttribute("aria-orientation", vertical ? "vertical" : "horizontal");
+    base.root.setAttribute("aria-valuemin", "0");
+    base.root.setAttribute("aria-valuemax", "100");
     // The fill goes underneath the icon and text.
     const fill = el("div", vertical ? "fill v" : "fill h");
     base.root.insertBefore(fill, base.root.firstChild);
@@ -383,6 +420,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     c.el.style.backgroundColor = ctl.bg || c.theme.button;
     c.el.style.color = ctl.fg || c.theme.buttonText;
     c.el.style.opacity = st.disabled ? DISABLED_OPACITY : "";
+    c.el.setAttribute("aria-disabled", String(st.disabled));
     c.fill.style.backgroundColor = st.active ? ctl.active.bg || c.theme.accent : c.theme.accent;
     const icon = st.active && ctl.active.icon ? ctl.active.icon : ctl.icon;
     const key = iconKey(icon);
@@ -391,6 +429,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
       if (key !== c.drawnIcon) drawIcon(c.iconEl, icon);
       c.drawnIcon = key;
       c.drawnLabel = label;
+      c.el.setAttribute("aria-label", label);
       layoutSlider(c, icon, label);
     }
   }
@@ -462,15 +501,21 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     }
   }
 
+  /** Redraws the value text (also read out by screen readers) when it changed. */
+  function drawValueText(c: SliderCell): void {
+    const text = sliderValueText(c);
+    if (text === c.drawnValue) return;
+    c.drawnValue = text;
+    c.valueEl.textContent = text;
+    c.el.setAttribute("aria-valuetext", text);
+  }
+
   function setSliderValue(c: SliderCell, value: number): void {
     c.value = clamp(value, 0, 1);
     if (c.vertical) c.fill.style.height = px(c.rect.h * c.value);
     else c.fill.style.width = px(c.rect.w * c.value);
-    const text = sliderValueText(c);
-    if (text !== c.drawnValue) {
-      c.drawnValue = text;
-      c.valueEl.textContent = text;
-    }
+    c.el.setAttribute("aria-valuenow", String(Math.round(c.value * 100)));
+    drawValueText(c);
   }
 
   /** Maps a stage point to 0..1; the outer 2% of the bar snaps to exactly 0 / 1. */
@@ -482,6 +527,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   /** Sends the current value; unchanged values are skipped unless `final` (the release always reports). */
   function sendSlide(c: SliderCell, final: boolean): void {
     c.sendTimer = 0;
+    if (c.state.disabled) return;
     const value = Math.round(c.value * 1000) / 1000;
     if (!final && value === c.lastSentValue) return;
     c.lastSent = Date.now();
@@ -498,10 +544,8 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     }, wait);
   }
 
-  function endSlide(c: SliderCell): void {
-    window.clearTimeout(c.sendTimer);
-    c.dragging = false;
-    sendSlide(c, true);
+  /** Ignores host values for SLIDER_SETTLE_MS from now (they echo our own sends), then applies the newest. */
+  function holdEchoes(c: SliderCell): void {
     c.settleUntil = Date.now() + SLIDER_SETTLE_MS;
     window.clearTimeout(c.settleTimer);
     c.settleTimer = window.setTimeout(function () {
@@ -512,6 +556,21 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     }, SLIDER_SETTLE_MS);
   }
 
+  function endSlide(c: SliderCell): void {
+    window.clearTimeout(c.sendTimer);
+    c.dragging = false;
+    sendSlide(c, true);
+    holdEchoes(c);
+  }
+
+  /** One arrow / Home / End press on a focused slider: sent like a short drag. */
+  function keySlide(c: SliderCell, value: number): void {
+    c.held = null; // anything held predates this step
+    setSliderValue(c, value);
+    scheduleSlide(c);
+    holdEchoes(c);
+  }
+
   function patchSlider(c: SliderCell, st: ControlState): void {
     c.state = st;
     paintSlider(c);
@@ -519,14 +578,8 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
       if (c.dragging || Date.now() < c.settleUntil) c.held = st;
       else setSliderValue(c, st.value);
     }
-    if (!c.dragging) {
-      // The dynamic label may have changed even when the value didn't.
-      const text = sliderValueText(c);
-      if (text !== c.drawnValue) {
-        c.drawnValue = text;
-        c.valueEl.textContent = text;
-      }
-    }
+    // The dynamic label may have changed even when the value didn't.
+    if (!c.dragging) drawValueText(c);
   }
 
   // ---- gestures -----------------------------------------------------------------------
@@ -547,11 +600,17 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   }
 
   function pointDown(id: number, clientX: number, clientY: number): void {
+    lastGestureAt = Date.now();
     if (!online || findGesture(id)) return;
     const origin = stage.getBoundingClientRect();
+    let target = hit(clientX - origin.left, clientY - origin.top);
+    // Disabled controls still allow page swipes, but cannot press or slide.
+    if (target && target.state.disabled) target = null;
+    // A slider follows one finger: a second touch on it is ignored until the first one lifts.
+    if (target && target.kind === "slider" && target.dragging) return;
     const g: Gesture = {
       id: id,
-      cell: hit(clientX - origin.left, clientY - origin.top),
+      cell: target,
       startX: clientX,
       startY: clientY,
       originX: origin.left,
@@ -586,6 +645,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   }
 
   function slideTo(c: SliderCell, g: Gesture, clientX: number, clientY: number): void {
+    if (c.state.disabled) return;
     setSliderValue(c, sliderValueAt(c, clientX - g.originX, clientY - g.originY));
     scheduleSlide(c);
   }
@@ -615,12 +675,13 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   function pointUp(id: number, cancelled: boolean): void {
     const g = findGesture(id);
     if (!g) return;
+    lastGestureAt = Date.now();
     gestures.splice(gestures.indexOf(g), 1);
     const cell = g.cell;
     if (!cell) return;
     switch (cell.kind) {
       case "button": {
-        if (!cancelled && !g.moved && !g.fired) events.press(cell.ctl.id);
+        if (!cell.state.disabled && !cancelled && !g.moved && !g.fired) events.press(cell.ctl.id);
         const wait = MIN_PRESS_MS - (Date.now() - g.startedAt);
         if (wait > 0) window.setTimeout(function () {
           setPressed(cell, false);
@@ -678,6 +739,57 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
   }, false);
   window.addEventListener("mouseup", function () {
     pointUp(MOUSE_ID, false);
+  }, false);
+
+  function activateButton(cell: ButtonCell): void {
+    setPressed(cell, true);
+    events.press(cell.ctl.id);
+    window.setTimeout(function () {
+      setPressed(cell, false);
+    }, MIN_PRESS_MS);
+  }
+
+  // Screen readers and scripted activation can send only click. Physical clicks following
+  // our mouse/touch gestures have a nonzero detail; suppress those, including after swipes.
+  stage.addEventListener("click", function (e) {
+    if (e.detail !== 0 && Date.now() - lastGestureAt < GHOST_MOUSE_MS) return;
+    const cell = cellOf(e.target);
+    if (!cell || !online || cell.state.disabled || cell.kind !== "button") return;
+    activateButton(cell);
+  }, false);
+
+  // Keyboard: Enter / Space press the focused button; arrows, Home and End move the focused slider.
+  stage.addEventListener("keydown", function (e) {
+    const cell = cellOf(e.target);
+    if (!cell || !online || cell.state.disabled) return;
+    if (cell.kind === "button") {
+      if (!isActivationKey(e)) return;
+      e.preventDefault(); // Space would scroll
+      if (e.repeat) return;
+      activateButton(cell);
+      return;
+    }
+    let next: number;
+    switch (e.keyCode) {
+      case 37: // left
+      case 40: // down
+        next = cell.value - SLIDER_KEY_STEP;
+        break;
+      case 38: // up
+      case 39: // right
+        next = cell.value + SLIDER_KEY_STEP;
+        break;
+      case 36: // Home
+        next = 0;
+        break;
+      case 35: // End
+        next = 1;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    if (!cell.dragging) keySlide(cell, next);
   }, false);
 
   // ---- public -------------------------------------------------------------------------

@@ -16,5 +16,5 @@ async fn host(host: State<'_, Host>, request: HostRequest) -> Result<serde_json:
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
-    app.exit(0);
+    crate::finish_quit(&app);
 }

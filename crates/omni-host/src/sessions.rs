@@ -9,9 +9,13 @@ use omni_core::{
     ClientInfo, Config, ControlState, DeckLayout, DeckSession, Device, HostToDeck, NavTarget, Profile, Transport,
     now_ms,
 };
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Notify, mpsc};
 
 use crate::{Host, layout};
+
+/// Frames a deck may fall behind by before it is disconnected.
+const OUTBOUND_QUEUE: usize = 256;
 
 /// Frames queued for a deck's socket writer.
 #[derive(Debug, Clone)]
@@ -20,10 +24,40 @@ pub enum Outbound {
     Close,
 }
 
-pub type DeckTx = mpsc::UnboundedSender<Outbound>;
+/// A deck's outbound queue. Bounded: a deck that stops reading fills it and
+/// is disconnected (it reconnects and resyncs) instead of buffering forever.
+#[derive(Clone)]
+pub struct DeckTx {
+    frames: mpsc::Sender<Outbound>,
+    overflow: Arc<Notify>,
+}
+
+impl DeckTx {
+    pub fn new() -> (Self, mpsc::Receiver<Outbound>) {
+        let (frames, rx) = mpsc::channel(OUTBOUND_QUEUE);
+        (Self { frames, overflow: Arc::default() }, rx)
+    }
+
+    fn push(&self, frame: Outbound) {
+        if let Err(TrySendError::Full(_)) = self.frames.try_send(frame) {
+            self.overflow.notify_one();
+        }
+    }
+
+    /// Ask the writer to close the socket after the queued frames.
+    pub fn close(&self) {
+        self.push(Outbound::Close);
+    }
+
+    /// Resolves once a frame was dropped because the queue was full.
+    pub async fn overflowed(&self) {
+        self.overflow.notified().await;
+    }
+}
 
 pub struct Session {
     pub device_id: String,
+    pub names: (String, String),
     pub tx: DeckTx,
     pub transport: Transport,
     pub address: String,
@@ -45,7 +79,7 @@ pub struct Sessions {
 
 pub fn send(tx: &DeckTx, message: &HostToDeck) {
     if let Ok(json) = serde_json::to_string(message) {
-        let _ = tx.send(Outbound::Text(json.into()));
+        tx.push(Outbound::Text(json.into()));
     }
 }
 
@@ -73,6 +107,7 @@ impl Host {
             }
             Ok(())
         });
+        let host_name = self.host_name();
         let device_name = {
             let config = self.config();
             let device = config.device(device_id);
@@ -83,6 +118,7 @@ impl Host {
                 id,
                 Session {
                     device_id: device_id.to_string(),
+                    names: (name.clone(), host_name.clone()),
                     tx: tx.clone(),
                     transport,
                     address: addr.ip().to_string(),
@@ -100,7 +136,7 @@ impl Host {
             &HostToDeck::Welcome {
                 device_id: device_id.to_string(),
                 device_name,
-                host_name: self.host_name(),
+                host_name,
                 host_version: self.version.clone(),
             },
         );
@@ -167,15 +203,33 @@ impl Host {
     pub(crate) fn refresh_sessions(&self) {
         let config = self.config();
         let states = self.state_context(&config);
+        let host_name = if config.settings.host_name.trim().is_empty() {
+            self.machine_name.clone()
+        } else {
+            config.settings.host_name.trim().to_string()
+        };
         let mut sessions = self.sessions.lock().unwrap();
         let mut gone = vec![];
         for (id, session) in sessions.by_id.iter_mut() {
             let Some(device) = config.device(&session.device_id) else {
                 send(&session.tx, &HostToDeck::Unpaired);
-                let _ = session.tx.send(Outbound::Close);
+                session.tx.close();
                 gone.push(*id);
                 continue;
             };
+            let names = (device.name.clone(), host_name.clone());
+            if session.names != names {
+                send(
+                    &session.tx,
+                    &HostToDeck::Welcome {
+                        device_id: device.id.clone(),
+                        device_name: device.name.clone(),
+                        host_name: host_name.clone(),
+                        host_version: self.version.clone(),
+                    },
+                );
+                session.names = names;
+            }
             let Some(profile) = config.profile_for_device(device) else { continue };
             let index = page_index(profile, &session.page_id);
             session.page_id = profile.pages[index].id.clone();
@@ -262,7 +316,7 @@ impl Host {
     pub(crate) fn close_all_sessions(&self) {
         let mut sessions = self.sessions.lock().unwrap();
         for session in sessions.by_id.values() {
-            let _ = session.tx.send(Outbound::Close);
+            session.tx.close();
         }
         sessions.by_id.clear();
     }
@@ -270,4 +324,22 @@ impl Host {
 
 pub(crate) fn profile_of<'a>(config: &'a Config, device_id: &str) -> Option<&'a Profile> {
     config.device(device_id).and_then(|d: &Device| config.profile_for_device(d))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_deck_that_stops_reading_overflows_instead_of_buffering() {
+        let (tx, _rx) = DeckTx::new();
+        for _ in 0..OUTBOUND_QUEUE {
+            send(&tx, &HostToDeck::Pong);
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(20), tx.overflowed()).await.is_err());
+        send(&tx, &HostToDeck::Pong);
+        tokio::time::timeout(Duration::from_secs(1), tx.overflowed()).await.expect("overflow signalled");
+    }
 }

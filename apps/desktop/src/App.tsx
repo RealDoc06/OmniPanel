@@ -1,11 +1,12 @@
+// App shell: sidebar, the current screen, and the global overlays (toasts, confirm dialog).
 import { useEffect, useLayoutEffect } from "react";
 import { ConfirmHost, Toasts } from "./components/Overlays";
 import { Sidebar, SCREENS } from "./components/Sidebar";
 import { navigate, useApp, useAppTheme, type Screen } from "./lib/store";
 import { applyTheme } from "./lib/theme";
 import { AudioScreen } from "./screens/audio/AudioScreen";
+import { VoiceChangerScreen } from "./screens/audio/VoiceChanger";
 import { DecksScreen } from "./screens/decks/DecksScreen";
-import { IntegrationsScreen } from "./screens/integrations/IntegrationsScreen";
 import { LogScreen } from "./screens/log/LogScreen";
 import { ProfilesScreen } from "./screens/profiles/ProfilesScreen";
 import { SettingsScreen } from "./screens/settings/SettingsScreen";
@@ -15,7 +16,7 @@ export function App() {
   const theme = useAppTheme();
   useLayoutEffect(() => applyTheme(theme), [theme]);
 
-  // Cmd/Ctrl + 1..6 switches screens.
+  // Cmd/Ctrl + 1..5 switches between the sidebar screens.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
@@ -49,8 +50,8 @@ function ScreenView({ screen }: { screen: Screen }) {
       return <ProfilesScreen />;
     case "audio":
       return <AudioScreen />;
-    case "integrations":
-      return <IntegrationsScreen />;
+    case "voice":
+      return <VoiceChangerScreen />;
     case "settings":
       return <SettingsScreen />;
     case "log":

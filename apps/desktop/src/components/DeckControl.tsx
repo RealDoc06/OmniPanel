@@ -5,7 +5,16 @@ import type { Control, Icon, LabelPosition } from "@omni/protocol";
 import { cx } from "../lib/util";
 import { ControlIcon } from "./Icon";
 
-export function DeckControlView({ control, active = false }: { control: Control; active?: boolean }) {
+export function DeckControlView({
+  control,
+  active = false,
+  truncateLabel = false,
+}: {
+  control: Control;
+  active?: boolean;
+  /** Keeps labels on one line in the small inspector preview. */
+  truncateLabel?: boolean;
+}) {
   const { style, kind } = control;
   const bg = (active && style.activeBg) || style.bg || "var(--button)";
   const fg = style.fg ?? "var(--button-fg)";
@@ -19,25 +28,32 @@ export function DeckControlView({ control, active = false }: { control: Control;
       {kind.type === "slider" ? (
         <SliderBody vertical={kind.vertical} icon={icon} label={style.labelPosition === "hidden" ? "" : label} />
       ) : (
-        <ButtonBody icon={icon} label={label} position={style.labelPosition} />
+        <ButtonBody icon={icon} label={label} position={style.labelPosition} truncateLabel={truncateLabel} />
       )}
     </div>
   );
 }
 
-const labelClass = "line-clamp-2 max-w-full px-[6cqmin] text-center leading-tight font-medium break-words";
-
-function ButtonBody({ icon, label, position }: { icon: Icon | null; label: string; position: LabelPosition }) {
+function ButtonBody({ icon, label, position, truncateLabel }: {
+  icon: Icon | null;
+  label: string;
+  position: LabelPosition;
+  truncateLabel: boolean;
+}) {
+  const labelClass = cx(
+    "max-w-full px-[6cqmin] text-center leading-tight font-medium",
+    truncateLabel ? "truncate" : "line-clamp-2 break-words",
+  );
   const showLabel = position !== "hidden" && label !== "";
   if (!icon) {
     return (
       <div className="flex size-full items-center justify-center">
-        {showLabel && <span className={labelClass} style={{ fontSize: "max(9px, 15cqmin)" }}>{label}</span>}
+        {showLabel && <span className={labelClass} style={{ fontSize: "max(11px, 15cqmin)" }}>{label}</span>}
       </div>
     );
   }
   const text = showLabel && (
-    <span className={labelClass} style={{ fontSize: "max(8px, 12cqmin)" }}>
+    <span className={labelClass} style={{ fontSize: "max(10px, 12cqmin)" }}>
       {label}
     </span>
   );
@@ -80,7 +96,7 @@ function SliderBody({ vertical, icon, label }: { vertical: boolean; icon: Icon |
       {icon && <ControlIcon icon={icon} size="30cqmin" />}
       {track}
       {label && (
-        <span className="max-w-full truncate text-center leading-tight font-medium" style={{ fontSize: "max(8px, 12cqmin)" }}>
+        <span className="max-w-full truncate text-center leading-tight font-medium" style={{ fontSize: "max(10px, 12cqmin)" }}>
           {label}
         </span>
       )}

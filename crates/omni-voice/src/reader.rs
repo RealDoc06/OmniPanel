@@ -81,7 +81,10 @@ impl Reader {
         let fill = self.rx.slots() as f64;
         let in_started = in_block > 0.0;
         // Ring fill (input samples) to aim for: one block each way plus jitter margin.
-        let target = self.in_hold + self.out_hold * self.base_ratio + MARGIN_SECS * self.in_rate;
+        // Capped at half the ring so huge callbacks can still prime (with dropouts)
+        // instead of waiting forever for a fill the ring cannot hold.
+        let half_ring = 0.5 * self.rx.buffer().capacity() as f64;
+        let target = (self.in_hold + self.out_hold * self.base_ratio + MARGIN_SECS * self.in_rate).min(half_ring);
 
         if !self.primed {
             if !in_started || fill < target {
@@ -150,10 +153,26 @@ impl Reader {
 mod tests {
     use super::*;
 
+    /// Ring size the engine uses.
+    fn ring(in_rate: f64) -> usize {
+        (in_rate * crate::audio::RING_CAPACITY_SECS) as usize
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
     /// Simulates two free-running device clocks for `secs` and returns
     /// (underrun count after start-up, max ring fill in ms, output samples).
-    fn simulate(in_rate: f64, in_block: usize, out_rate: f64, out_block: usize, secs: f64) -> (usize, f64, Vec<f32>) {
-        let (mut tx, rx) = rtrb::RingBuffer::new(in_rate as usize);
+    fn simulate(
+        in_rate: f64,
+        in_block: usize,
+        out_rate: f64,
+        out_block: usize,
+        secs: f64,
+        ring: usize,
+    ) -> (usize, f64, Vec<f32>) {
+        let (mut tx, rx) = rtrb::RingBuffer::new(ring);
         let in_max = Arc::new(AtomicUsize::new(0));
         let mut reader = Reader::new(rx, in_rate as u32, 48_000, in_max.clone());
         // The reader believes the output runs at 48 kHz; `out_rate` is the real clock.
@@ -190,7 +209,7 @@ mod tests {
         // Nominally equal 48 kHz clocks, real ones 300 ppm apart in both directions,
         // with mismatched callback sizes.
         for out_rate in [48_000.0 * 1.0003, 48_000.0 * 0.9997] {
-            let (underruns, max_fill_ms, _) = simulate(48_000.0, 480, out_rate, 256, 120.0);
+            let (underruns, max_fill_ms, _) = simulate(48_000.0, 480, out_rate, 256, 120.0, ring(48_000.0));
             assert_eq!(underruns, 0, "out clock {out_rate}");
             assert!(max_fill_ms < 40.0, "latency grew to {max_fill_ms} ms");
         }
@@ -200,10 +219,21 @@ mod tests {
     fn resamples_between_rates() {
         // 44.1 kHz input played on a 48 kHz output: the 440 Hz tone (generated at
         // 48 kHz phase steps, so 404.25 Hz at 44.1 kHz) must come out at 404.25 Hz.
-        let (underruns, _, out) = simulate(44_100.0, 441, 48_000.0, 512, 10.0);
+        let (underruns, _, out) = simulate(44_100.0, 441, 48_000.0, 512, 10.0, ring(44_100.0));
         assert_eq!(underruns, 0);
         let tail = &out[out.len() - 48_000 * 4..];
         let crossings = tail.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f64 / 4.0;
         assert!((crossings - 404.25).abs() < 1.0, "{crossings} Hz");
+    }
+
+    #[test]
+    fn huge_callbacks_still_play() {
+        // 16384-frame callbacks each way need ~0.7 s of fill, which the engine's ring holds.
+        let (underruns, _, out) = simulate(48_000.0, 16_384, 48_000.0, 16_384, 10.0, ring(48_000.0));
+        assert_eq!(underruns, 0);
+        assert!(rms(&out[out.len() / 2..]) > 0.3);
+        // A ring too small for that fill plays with gaps instead of staying silent.
+        let (_, _, out) = simulate(48_000.0, 16_384, 48_000.0, 16_384, 10.0, 24_000);
+        assert!(rms(&out[out.len() / 2..]) > 0.1);
     }
 }

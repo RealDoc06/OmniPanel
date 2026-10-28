@@ -1,6 +1,8 @@
 // Metadata, defaults and one-line summaries for every `Action` variant.
+// Labels follow the plain-words vocabulary of the desktop UI (no "hotkey", "deck" or "profile").
 import type {
   Action,
+  Control,
   Effect,
   FilterKind,
   HttpMethod,
@@ -13,34 +15,52 @@ import type {
   VolumeOp,
   VolumeTarget,
 } from "@omni/protocol";
+import { formatAccelerator } from "./accelerator.ts";
 import type { IconName } from "./icons";
+import { isMacPlatform } from "./util.ts";
 
 export type ActionType = Action["type"];
 export type ActionOf<T extends ActionType> = Extract<Action, { type: T }>;
 
+/** Groups in display order, shared by the action picker and the step "Does" select. */
+export const ACTION_GROUPS = [
+  "Sound",
+  "Music and video",
+  "Voice changer",
+  "Open",
+  "Keyboard",
+  "Pages",
+  "Computer",
+  "OBS Studio",
+  "Home Assistant",
+  "Advanced",
+] as const;
+
+export type ActionGroup = (typeof ACTION_GROUPS)[number];
+
 interface ActionMeta {
   label: string;
   icon: IconName;
-  group: string;
+  group: ActionGroup;
 }
 
 export const ACTION_META = {
-  hotkey: { label: "Hotkey", icon: "keyboard", group: "Keyboard" },
+  volume: { label: "Volume and mute", icon: "volume-2", group: "Sound" },
+  media: { label: "Play, pause and skip", icon: "play", group: "Music and video" },
+  voice: { label: "Voice changer", icon: "audio-waveform", group: "Voice changer" },
+  openApp: { label: "Open an app", icon: "app-window", group: "Open" },
+  open: { label: "Open a website, file or folder", icon: "external-link", group: "Open" },
+  hotkey: { label: "Press keys", icon: "keyboard", group: "Keyboard" },
   typeText: { label: "Type text", icon: "type", group: "Keyboard" },
-  openApp: { label: "Open app", icon: "app-window", group: "Launch" },
-  open: { label: "Open URL or file", icon: "external-link", group: "Launch" },
-  runScript: { label: "Run script", icon: "terminal", group: "Launch" },
-  media: { label: "Media key", icon: "play", group: "Audio" },
-  volume: { label: "Volume", icon: "volume-2", group: "Audio" },
-  voice: { label: "Voice changer", icon: "audio-waveform", group: "Audio" },
-  obs: { label: "OBS", icon: "video", group: "Integrations" },
-  homeAssistant: { label: "Home Assistant", icon: "house", group: "Integrations" },
-  http: { label: "HTTP request", icon: "globe", group: "Integrations" },
-  system: { label: "System", icon: "power", group: "System" },
-  navigate: { label: "Navigate deck", icon: "chevron-right", group: "Deck" },
-  multi: { label: "Multi action", icon: "list-ordered", group: "Flow" },
-  toggle: { label: "Toggle", icon: "toggle-right", group: "Flow" },
-  delay: { label: "Delay", icon: "timer", group: "Flow" },
+  navigate: { label: "Change page or layout", icon: "chevron-right", group: "Pages" },
+  system: { label: "Computer", icon: "power", group: "Computer" },
+  obs: { label: "OBS Studio", icon: "video", group: "OBS Studio" },
+  homeAssistant: { label: "Home Assistant", icon: "house", group: "Home Assistant" },
+  multi: { label: "Several actions in a row", icon: "list-ordered", group: "Advanced" },
+  toggle: { label: "Alternate between two actions", icon: "toggle-right", group: "Advanced" },
+  runScript: { label: "Run a script", icon: "terminal", group: "Advanced" },
+  http: { label: "Web request", icon: "webhook", group: "Advanced" },
+  delay: { label: "Wait", icon: "timer", group: "Advanced" },
 } satisfies Record<ActionType, ActionMeta>;
 
 export const isActionType = (value: string): value is ActionType => Object.hasOwn(ACTION_META, value);
@@ -49,18 +69,18 @@ export const isActionType = (value: string): value is ActionType => Object.hasOw
 export const ACTION_TYPES: ActionType[] = Object.keys(ACTION_META).filter(isActionType);
 
 export const MEDIA_LABELS: Record<MediaCommand, string> = {
-  playPause: "Play / Pause",
+  playPause: "Play / pause",
   next: "Next track",
   previous: "Previous track",
   stop: "Stop",
-  volumeUp: "Volume up",
-  volumeDown: "Volume down",
-  mute: "Mute",
+  volumeUp: "Volume up key",
+  volumeDown: "Volume down key",
+  mute: "Mute key",
 };
 
 export const SYSTEM_LABELS: Record<SystemCommand, string> = {
-  lock: "Lock screen",
-  sleep: "Sleep",
+  lock: "Lock computer",
+  sleep: "Put computer to sleep",
   displaySleep: "Turn display off",
 };
 
@@ -82,56 +102,56 @@ export const HTTP_METHODS: Record<HttpMethod, string> = {
 };
 
 export const VOLUME_TARGET_LABELS: Record<VolumeTarget["type"], string> = {
-  master: "System output",
+  master: "Computer sound",
   mic: "Microphone",
-  app: "Application",
-  obsInput: "OBS input",
+  app: "An app",
+  obsInput: "OBS audio source",
 };
 
 export const VOLUME_OP_LABELS: Record<VolumeOp["type"], string> = {
-  toggleMute: "Toggle mute",
+  toggleMute: "Mute / unmute",
   mute: "Mute",
   unmute: "Unmute",
-  set: "Set volume",
-  step: "Change by",
+  set: "Set to",
+  step: "Turn up or down by",
 };
 
 export const VOICE_OP_LABELS: Record<VoiceOp["type"], string> = {
-  toggle: "Toggle on / off",
+  toggle: "Turn on / off",
   enable: "Turn on",
   disable: "Turn off",
-  setPreset: "Switch to preset",
-  cycle: "Cycle presets",
+  setPreset: "Switch to a voice",
+  cycle: "Next voice",
 };
 
 export const OBS_OP_LABELS: Record<ObsOp["type"], string> = {
   setScene: "Switch scene",
-  toggleRecord: "Toggle recording",
+  toggleRecord: "Start / stop recording",
   startRecord: "Start recording",
   stopRecord: "Stop recording",
   pauseRecord: "Pause recording",
-  toggleStream: "Toggle stream",
-  startStream: "Start stream",
-  stopStream: "Stop stream",
-  toggleReplayBuffer: "Toggle replay buffer",
+  toggleStream: "Go live / end stream",
+  startStream: "Go live",
+  stopStream: "End stream",
+  toggleReplayBuffer: "Replay buffer on / off",
   saveReplay: "Save replay",
-  toggleVirtualCam: "Toggle virtual camera",
-  toggleMute: "Toggle input mute",
-  toggleSource: "Show / hide source",
-  toggleStudioMode: "Toggle studio mode",
+  toggleVirtualCam: "Virtual camera on / off",
+  toggleMute: "Mute / unmute an audio source",
+  toggleSource: "Show / hide a source",
+  toggleStudioMode: "Studio mode on / off",
 };
 
 export const NAV_LABELS: Record<NavTarget["type"], string> = {
   nextPage: "Next page",
   prevPage: "Previous page",
-  page: "Go to page",
-  profile: "Switch profile",
+  page: "A page",
+  profile: "Another layout",
 };
 
 export const FILTER_LABELS: Record<FilterKind, string> = {
-  lowpass: "Low-pass",
-  highpass: "High-pass",
-  bandpass: "Band-pass",
+  lowpass: "Muffled (low-pass)",
+  highpass: "Thin (high-pass)",
+  bandpass: "Narrow (band-pass)",
 };
 
 /** A fresh action of the given type with sensible defaults. */
@@ -172,29 +192,33 @@ export function defaultAction(type: ActionType): Action {
   }
 }
 
-export const volumeTargetLabel = (target: VolumeTarget): string => {
+/** Lowercase name of a volume target for summaries ("computer sound", "Spotify"). */
+const volumeTargetPhrase = (target: VolumeTarget): string => {
   switch (target.type) {
     case "master":
-      return "System output";
+      return "computer sound";
     case "mic":
-      return "Microphone";
+      return "microphone";
     case "app":
-      return target.app || "App";
+      return target.app || "an app";
     case "obsInput":
-      return `OBS ${target.input || "input"}`;
+      return `${target.input || "an audio source"} in OBS`;
   }
 };
 
-const volumeOpLabel = (op: VolumeOp): string => {
+const volumeSummary = (target: VolumeTarget, op: VolumeOp): string => {
+  const what = volumeTargetPhrase(target);
   switch (op.type) {
-    case "set":
-      return `set ${Math.round(op.value * 100)}%`;
-    case "step":
-      return `${op.delta >= 0 ? "+" : ""}${Math.round(op.delta * 100)}%`;
     case "toggleMute":
+      return `Mute / unmute ${what}`;
     case "mute":
+      return `Mute ${what}`;
     case "unmute":
-      return VOLUME_OP_LABELS[op.type].toLowerCase();
+      return `Unmute ${what}`;
+    case "set":
+      return `Set ${what} to ${Math.round(op.value * 100)}%`;
+    case "step":
+      return `Turn ${what} ${op.delta >= 0 ? "up" : "down"} ${Math.abs(Math.round(op.delta * 100))}%`;
   }
 };
 
@@ -203,49 +227,68 @@ export interface NameLookup {
   page?: (id: string) => string | undefined;
   profile?: (id: string) => string | undefined;
   preset?: (id: string) => string | undefined;
+  entity?: (id: string) => string | undefined;
 }
 
 const short = (text: string, max = 32) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
-/** One-line, human readable summary of an action. */
-export function describeAction(action: Action, names: NameLookup = {}): string {
+/** Seconds for display: 500 -> "0.5". */
+export const seconds = (ms: number) => String(Math.round(ms / 10) / 100);
+
+const hostOf = (url: string): string | null => {
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return null;
+  }
+};
+
+/** One-line, plain-words summary of an action ("Mute / unmute microphone"). */
+export function describeAction(action: Action | null, names: NameLookup = {}): string {
+  if (!action) return "Does nothing yet";
   switch (action.type) {
     case "hotkey":
-      return action.keys ? `Press ${action.keys}` : "Press keys";
+      return action.keys ? `Press ${formatAccelerator(action.keys, isMacPlatform())}` : "Press keys";
     case "typeText":
       return action.text ? `Type "${short(action.text, 24)}"` : "Type text";
     case "openApp":
-      return action.app ? `Open ${short(action.app)}` : "Open app";
-    case "open":
-      return `Open ${short(action.target)}`;
-    case "runScript":
-      return `Run ${INTERPRETER_LABELS[action.interpreter]} script`;
+      return action.app ? `Open ${short(action.app)}` : "Open an app";
+    case "open": {
+      const target = action.target.trim().replace(/^https?:\/\//, "");
+      return target ? `Open ${short(target)}` : "Open a website, file or folder";
+    }
+    case "runScript": {
+      const language = INTERPRETER_LABELS[action.interpreter];
+      return `Run ${/^[AEIOU]/.test(language) ? "an" : "a"} ${language} script`;
+    }
     case "media":
       return MEDIA_LABELS[action.command];
     case "volume":
-      return `${volumeTargetLabel(action.target)}: ${volumeOpLabel(action.op)}`;
+      return volumeSummary(action.target, action.op);
     case "voice": {
       const op = action.op;
       switch (op.type) {
         case "setPreset":
-          return `Voice: ${names.preset?.(op.presetId) ?? op.presetId}`;
+          return `Switch to ${names.preset?.(op.presetId) ?? op.presetId} voice`;
         case "cycle":
-          return op.presetIds.length ? `Cycle ${op.presetIds.length} voices` : "Cycle voices";
+          return op.presetIds.length ? `Next voice (${op.presetIds.length} voices)` : "Next voice";
         case "toggle":
+          return "Turn voice changer on / off";
         case "enable":
+          return "Turn voice changer on";
         case "disable":
-          return `Voice changer: ${VOICE_OP_LABELS[op.type].toLowerCase()}`;
+          return "Turn voice changer off";
       }
     }
     case "obs": {
       const op = action.op;
       switch (op.type) {
         case "setScene":
-          return `OBS scene ${op.scene || "?"}`;
+          return op.scene ? `Switch OBS to ${op.scene}` : "Switch OBS scene";
         case "toggleMute":
-          return `OBS mute ${op.input || "?"}`;
+          return `Mute / unmute ${op.input || "an audio source"} in OBS`;
         case "toggleSource":
-          return `OBS ${op.source || "source"} in ${op.scene || "scene"}`;
+          return op.source ? `Show / hide ${op.source} in ${op.scene || "OBS"}` : "Show / hide an OBS source";
         default:
           return `OBS: ${OBS_OP_LABELS[op.type].toLowerCase()}`;
       }
@@ -254,13 +297,15 @@ export function describeAction(action: Action, names: NameLookup = {}): string {
       const op = action.op;
       switch (op.type) {
         case "toggle":
-          return `Toggle ${op.entityId || "entity"}`;
+          return op.entityId ? `Turn ${names.entity?.(op.entityId) ?? op.entityId} on / off` : "Turn a device on / off";
         case "callService":
-          return `${op.domain || "domain"}.${op.service || "service"}${op.entityId ? ` ${op.entityId}` : ""}`;
+          return op.domain && op.service ? `Run ${op.domain}.${op.service}` : "Run a Home Assistant service";
       }
     }
-    case "http":
-      return `${action.method} ${short(action.url.replace(/^https?:\/\//, ""))}`;
+    case "http": {
+      const host = hostOf(action.url);
+      return host ? `Send a web request to ${short(host)}` : "Send a web request";
+    }
     case "system":
       return SYSTEM_LABELS[action.command];
     case "navigate": {
@@ -269,10 +314,14 @@ export function describeAction(action: Action, names: NameLookup = {}): string {
         case "nextPage":
         case "prevPage":
           return NAV_LABELS[to.type];
-        case "page":
-          return `Go to ${names.page?.(to.pageId) ?? "page"}`;
-        case "profile":
-          return `Switch to ${names.profile?.(to.profileId) ?? "profile"}`;
+        case "page": {
+          const page = names.page?.(to.pageId);
+          return page ? `Go to ${page}` : "Go to a page";
+        }
+        case "profile": {
+          const layout = names.profile?.(to.profileId);
+          return layout ? `Switch to ${layout} layout` : "Switch layout";
+        }
       }
     }
     case "multi":
@@ -280,8 +329,54 @@ export function describeAction(action: Action, names: NameLookup = {}): string {
     case "toggle":
       return `${describeAction(action.on, names)} / ${describeAction(action.off, names)}`;
     case "delay":
-      return `Wait ${action.ms} ms`;
+      return `Wait ${seconds(action.ms)} s`;
   }
+}
+
+const OBS_LIVE_TITLES: Record<ObsOp["type"], string> = {
+  setScene: "While on this scene",
+  toggleRecord: "While recording",
+  startRecord: "While recording",
+  stopRecord: "While recording",
+  pauseRecord: "While paused",
+  toggleStream: "While live",
+  startStream: "While live",
+  stopStream: "While live",
+  toggleReplayBuffer: "While the replay buffer is on",
+  saveReplay: "While the replay buffer is on",
+  toggleVirtualCam: "While the virtual camera is on",
+  toggleMute: "While muted",
+  toggleSource: "While shown",
+  toggleStudioMode: "While in studio mode",
+};
+
+function actionLiveTitle(action: Action): string | null {
+  switch (action.type) {
+    case "volume":
+      return action.op.type === "set" || action.op.type === "step" ? null : "While muted";
+    case "toggle":
+      return "While on";
+    case "voice":
+      return action.op.type === "setPreset" ? "While this voice is on" : "While the voice changer is on";
+    case "obs":
+      return OBS_LIVE_TITLES[action.op.type];
+    case "navigate":
+      return action.to.type === "page" ? "While on this page" : action.to.type === "profile" ? "While this layout is shown" : null;
+    case "multi":
+      return action.steps[0] ? actionLiveTitle(action.steps[0]) : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Title of the inspector section for a control's lit-up look ("While muted"), or null
+ * when the host never lights it up. Mirrors `action_state` in
+ * crates/omni-host/src/feedback.rs: keep both in sync.
+ */
+export function liveStateTitle(kind: Control["kind"]): string | null {
+  if (kind.type === "slider") return "While muted";
+  return kind.action ? actionLiveTitle(kind.action) : null;
 }
 
 /** Default parameters for a new voice effect. */
@@ -317,14 +412,14 @@ export function defaultEffect(type: Effect["type"]): Effect {
 export const EFFECT_LABELS: Record<Effect["type"], string> = {
   pitch: "Pitch",
   robot: "Robot",
-  ringMod: "Ring modulator",
+  ringMod: "Metallic",
   echo: "Echo",
-  reverb: "Reverb",
+  reverb: "Room echo",
   distortion: "Distortion",
-  filter: "Filter",
-  chorus: "Chorus",
-  flanger: "Flanger",
-  tremolo: "Tremolo",
-  bitcrush: "Bitcrusher",
-  gain: "Gain",
+  filter: "Tone filter",
+  chorus: "Layered",
+  flanger: "Sweep",
+  tremolo: "Wobble",
+  bitcrush: "Lo-fi",
+  gain: "Volume",
 };

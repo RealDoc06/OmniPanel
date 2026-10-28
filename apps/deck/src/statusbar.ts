@@ -5,7 +5,7 @@ import type { DeckLayout, ThemeColors } from "@omni/protocol";
 import type { ConnStatus } from "./conn";
 import { clearChildren, el, setVisible } from "./dom";
 import { ICONS } from "./icons";
-import { onTap } from "./tap";
+import { tapButton } from "./tap";
 
 const LONG_PRESS_MS = 600;
 const LONG_PRESS_SLOP = 10;
@@ -35,6 +35,9 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
   sepEl.textContent = " / ";
   const pageEl = el("span", "bar-page", left);
   const dots = el("div", "bar-dots", bar);
+  dots.setAttribute("role", "group");
+  dots.setAttribute("aria-label", "Pages");
+  dots.title = "Swipe left or right to change pages";
   const right = el("div", "bar-right", bar);
   const connDot = el("span", "bar-conn", right);
   const hostEl = document.createTextNode("");
@@ -50,7 +53,7 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
   let dotEls: HTMLElement[] = [];
   let dotCount = -1;
 
-  onTap(gear, actions.openSettings);
+  tapButton(gear, actions.openSettings, "Settings");
 
   // Long press on the bar (not on the dots / gear, which own their touches).
   let pressTimer = 0;
@@ -93,11 +96,16 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
   function paintDots(): void {
     if (!layout || !theme) return;
     for (let i = 0; i < dotEls.length; i++) {
-      const dot = dotEls[i].firstChild as HTMLElement;
+      const hit = dotEls[i];
+      const dot = hit.firstChild as HTMLElement;
       const current = i === layout.pageIndex;
+      const page = layout.pages[i];
       dot.style.backgroundColor = current ? theme.text : theme.textMuted;
       dot.style.opacity = current ? "1" : "0.4";
       dot.className = current ? "bar-dot current" : "bar-dot";
+      hit.setAttribute("aria-label", "Page " + (i + 1) + " of " + dotEls.length + (page ? ": " + page.name : ""));
+      if (current) hit.setAttribute("aria-current", "page");
+      else hit.removeAttribute("aria-current");
     }
   }
 
@@ -110,7 +118,7 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
       const hit = el("div", "bar-dot-hit", dots);
       el("span", "bar-dot", hit);
       const index = i;
-      onTap(hit, function () {
+      tapButton(hit, function () {
         if (layout && index !== layout.pageIndex) actions.goToPage(index);
       });
       dotEls.push(hit);
@@ -160,6 +168,7 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
       dotEls = [];
       dotCount = -1;
     }
+    setVisible(dots, pages > 1);
     dots.style.width = dotsWidth + "px";
     dots.style.left = Math.round((width - dotsWidth) / 2) + "px";
     dots.style.height = barHeight + "px";

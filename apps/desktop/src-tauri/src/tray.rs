@@ -20,7 +20,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(macos)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => window::show(app),
-            "quit" => app.exit(0),
+            "quit" => crate::request_quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

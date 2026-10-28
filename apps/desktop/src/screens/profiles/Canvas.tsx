@@ -1,8 +1,8 @@
-// Live deck preview with drag & drop (move, swap, add from the palette), resize handles,
-// selection and a context menu. Geometry is computed from the pointer, so no droppables.
+// Live deck preview: drag & drop (move, swap), resize handles, selection, empty squares
+// that target the action picker, and context menus. Geometry is computed from the
+// pointer delta, so no droppables.
 import {
   DndContext,
-  DragOverlay,
   PointerSensor,
   useDraggable,
   useSensor,
@@ -10,21 +10,21 @@ import {
   type DragEndEvent,
   type DragMoveEvent,
   type DragStartEvent,
-  type UniqueIdentifier,
 } from "@dnd-kit/core";
 import type { Control, Page, Profile, Theme } from "@omni/protocol";
 import { useLayoutEffect, useRef, useState, type MouseEvent, type PointerEvent, type RefObject } from "react";
 import { useContextMenu, type MenuItem } from "../../components/ContextMenu";
 import { DeckControlView } from "../../components/DeckControl";
 import { I } from "../../components/Icon";
-import { ACTION_META, ACTION_TYPES, isActionType, type ActionType } from "../../lib/actions";
-import { newActionButton, newButton, newSlider } from "../../lib/controls";
-import { bestSize, emptyCells, findFreeSpot, fits } from "../../lib/grid";
+import { Button } from "../../components/ui";
+import { newControlAt } from "../../lib/controls";
+import { bestSize, emptyCells, MAX_GRID } from "../../lib/grid";
 import { useIsMac } from "../../lib/store";
 import { themeStyle } from "../../lib/theme";
 import { clamp, cx } from "../../lib/util";
 import {
   addControl,
+  addPage,
   copySelected,
   cutSelected,
   deleteSelected,
@@ -32,25 +32,14 @@ import {
   duplicateSelected,
   hasClipboard,
   paste,
+  pickAt,
   planDrop,
   resizeControl,
   select,
+  setGrid,
   toggleSelect,
   useEditor,
 } from "./editor";
-
-type PaletteItem = ActionType | "slider";
-
-type DragItem = { kind: "control"; id: string } | { kind: "palette"; item: PaletteItem };
-
-const PALETTE_PREFIX = "palette:";
-
-function parseDragId(id: UniqueIdentifier): DragItem {
-  const value = String(id);
-  if (!value.startsWith(PALETTE_PREFIX)) return { kind: "control", id: value };
-  const item = value.slice(PALETTE_PREFIX.length);
-  return { kind: "palette", item: isActionType(item) ? item : "slider" };
-}
 
 interface Ghost {
   x: number;
@@ -60,56 +49,30 @@ interface Ghost {
   valid: boolean;
 }
 
-interface Metrics {
-  el: HTMLDivElement | null;
-  /** Cell size + gap, in px. */
-  pitch: number;
-}
-
 const sameGhost = (a: Ghost | null, b: Ghost | null) =>
   a === b || (!!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h && a.valid === b.valid);
 
-function newFromPalette(item: PaletteItem, x: number, y: number, h: number): Control {
-  return item === "slider" ? newSlider(x, y, h) : newActionButton(x, y, item);
-}
-
 export function Canvas({ profile, page, theme }: { profile: Profile; page: Page; theme: Theme }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
-  const metrics = useRef<Metrics>({ el: null, pitch: 1 });
+  /** Cell size + gap, in px, measured by DeckGrid. */
+  const pitchRef = useRef(1);
   const [ghost, setGhost] = useState<Ghost | null>(null);
-  const [dragging, setDragging] = useState<DragItem | null>(null);
   const grid = { rows: profile.rows, cols: profile.cols };
 
-  const sliderHeight = (x: number, y: number) => (fits({ x, y, w: 1, h: 2 }, page.controls, grid) ? 2 : 1);
-
+  /** Where the dragged control would land. */
   const targetOf = (e: DragMoveEvent | DragEndEvent): Ghost | null => {
-    const { el, pitch } = metrics.current;
-    if (!el) return null;
-    const item = parseDragId(e.active.id);
-    if (item.kind === "control") {
-      const control = page.controls.find((c) => c.id === item.id);
-      if (!control) return null;
-      const x = clamp(control.x + Math.round(e.delta.x / pitch), 0, grid.cols - control.w);
-      const y = clamp(control.y + Math.round(e.delta.y / pitch), 0, grid.rows - control.h);
-      if (x === control.x && y === control.y) return null;
-      return { x, y, w: control.w, h: control.h, valid: planDrop(page.controls, control.id, x, y, grid) !== null };
-    }
-    const rect = e.active.rect.current.translated;
-    if (!rect) return null;
-    const box = el.getBoundingClientRect();
-    const px = rect.left + rect.width / 2 - box.left;
-    const py = rect.top + rect.height / 2 - box.top;
-    if (px < 0 || py < 0 || px > box.width || py > box.height) return null;
-    const x = clamp(Math.floor(px / pitch), 0, grid.cols - 1);
-    const y = clamp(Math.floor(py / pitch), 0, grid.rows - 1);
-    const h = item.item === "slider" ? sliderHeight(x, y) : 1;
-    return { x, y, w: 1, h, valid: fits({ x, y, w: 1, h }, page.controls, grid) };
+    const pitch = pitchRef.current;
+    const control = page.controls.find((c) => c.id === String(e.active.id));
+    if (!control) return null;
+    const x = clamp(control.x + Math.round(e.delta.x / pitch), 0, grid.cols - control.w);
+    const y = clamp(control.y + Math.round(e.delta.y / pitch), 0, grid.rows - control.h);
+    if (x === control.x && y === control.y) return null;
+    return { x, y, w: control.w, h: control.h, valid: planDrop(page.controls, control.id, x, y, grid) !== null };
   };
 
   const onDragStart = (e: DragStartEvent) => {
-    const item = parseDragId(e.active.id);
-    setDragging(item);
-    if (item.kind === "control" && !useEditor.getState().selected.includes(item.id)) select([item.id]);
+    const id = String(e.active.id);
+    if (!useEditor.getState().selected.includes(id)) select([id]);
   };
 
   const onDragMove = (e: DragMoveEvent) => {
@@ -119,19 +82,8 @@ export function Canvas({ profile, page, theme }: { profile: Profile; page: Page;
 
   const onDragEnd = (e: DragEndEvent) => {
     const target = targetOf(e);
-    const item = parseDragId(e.active.id);
     setGhost(null);
-    setDragging(null);
-    if (!target?.valid) return;
-    if (item.kind === "control") dropControl(item.id, target.x, target.y);
-    else addControl(newFromPalette(item.item, target.x, target.y, target.h));
-  };
-
-  /** Keyboard / click add from the palette: first free cell. */
-  const addFromPalette = (item: PaletteItem) => {
-    const tall = item === "slider" ? findFreeSpot(page.controls, grid, 1, 2) : null;
-    const spot = tall ?? findFreeSpot(page.controls, grid);
-    if (spot) addControl(newFromPalette(item, spot.x, spot.y, tall ? 2 : 1));
+    if (target?.valid) dropControl(String(e.active.id), target.x, target.y);
   };
 
   return (
@@ -141,22 +93,24 @@ export function Canvas({ profile, page, theme }: { profile: Profile; page: Page;
       onDragStart={onDragStart}
       onDragMove={onDragMove}
       onDragEnd={onDragEnd}
-      onDragCancel={() => {
-        setGhost(null);
-        setDragging(null);
-      }}
+      onDragCancel={() => setGhost(null)}
     >
       <div className="flex min-h-0 flex-1 flex-col">
-        <DeckGrid profile={profile} page={page} theme={theme} ghost={ghost} metrics={metrics} />
-        <Palette onAdd={addFromPalette} />
-      </div>
-      <DragOverlay dropAnimation={null}>
-        {dragging?.kind === "palette" && (
-          <div className="inline-flex h-7 items-center gap-1.5 rounded-ui-sm border border-line bg-hover px-2 text-xs whitespace-nowrap text-fg shadow-lg shadow-black/50">
-            <ChipContent item={dragging.item} />
+        <DeckGrid profile={profile} page={page} theme={theme} ghost={ghost} pitchRef={pitchRef} />
+        {emptyCells(page.controls, grid).length === 0 && (
+          <div className="flex shrink-0 items-center justify-center gap-1 px-4 pb-4">
+            <span className="mr-1">This page is full.</span>
+            {profile.rows < MAX_GRID && (
+              <Button size="sm" onClick={() => setGrid(profile.rows + 1, profile.cols)}>
+                Add a row
+              </Button>
+            )}
+            <Button size="sm" onClick={addPage}>
+              Add a page
+            </Button>
           </div>
         )}
-      </DragOverlay>
+      </div>
     </DndContext>
   );
 }
@@ -168,19 +122,19 @@ function DeckGrid({
   page,
   theme,
   ghost,
-  metrics,
+  pitchRef,
 }: {
   profile: Profile;
   page: Page;
   theme: Theme;
   ghost: Ghost | null;
-  metrics: RefObject<Metrics>;
+  pitchRef: RefObject<number>;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const gridRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [resizing, setResizing] = useState<{ id: string; w: number; h: number } | null>(null);
   const selected = useEditor((s) => s.selected);
+  const target = useEditor((s) => s.target);
   const previewActive = useEditor((s) => s.previewActive);
   const menu = useContextMenu();
   const mac = useIsMac();
@@ -203,7 +157,7 @@ function DeckGrid({
   const cell = Math.max(24, Math.floor(Math.min(box.w / units(cols), box.h / units(rows))));
   const gap = Math.max(4, Math.round(cell * GAP_RATIO));
   useLayoutEffect(() => {
-    metrics.current = { el: gridRef.current, pitch: cell + gap };
+    pitchRef.current = cell + gap;
   });
 
   const controlMenu = (e: MouseEvent, control: Control) => {
@@ -220,11 +174,11 @@ function DeckGrid({
 
   const cellMenu = (e: MouseEvent, x: number, y: number) =>
     menu.open(e, [
-      { label: "Add button", icon: "square-plus", run: () => addControl(newButton(x, y)) },
+      { label: "Add button…", icon: "square-plus", run: () => pickAt(x, y) },
       {
-        label: "Add slider",
+        label: "Add volume slider",
         icon: "sliders-vertical",
-        run: () => addControl(newSlider(x, y, fits({ x, y, w: 1, h: 2 }, page.controls, grid) ? 2 : 1)),
+        run: () => addControl(newControlAt(x, y, { kind: { type: "slider", target: { type: "master" }, vertical: true }, style: {} }, page, grid)),
       },
       { label: "Paste here", icon: "clipboard-paste", disabled: !hasClipboard(), run: () => paste({ x, y }) },
     ]);
@@ -235,34 +189,43 @@ function DeckGrid({
   });
 
   return (
-    <div ref={wrapRef} className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-6">
+    <div ref={wrapRef} className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-3 min-[1100px]:p-6">
       <div
         style={{ ...themeStyle(theme), padding: gap, borderRadius: theme.radius + gap / 2 }}
         className="border border-line bg-bg"
         onMouseDown={(e) => e.target === e.currentTarget && select([])}
       >
         <div
-          ref={gridRef}
           role="grid"
           aria-label={`${page.name} layout, ${cols} by ${rows}`}
           className="relative grid"
           style={{ gridTemplateColumns: `repeat(${cols}, ${cell}px)`, gridTemplateRows: `repeat(${rows}, ${cell}px)`, gap }}
           onMouseDown={(e) => e.target === e.currentTarget && select([])}
         >
-          {emptyCells(page.controls, grid).map(({ x, y }) => (
-            <button
-              key={`${x}:${y}`}
-              type="button"
-              aria-label={`Add button at row ${y + 1}, column ${x + 1}`}
-              style={placement({ x, y, w: 1, h: 1 })}
-              onClick={() => addControl(newButton(x, y))}
-              onContextMenu={(e) => cellMenu(e, x, y)}
-              className="group flex items-center justify-center border border-dashed border-line text-muted hover:border-solid hover:bg-surface focus-visible:bg-surface"
-              data-cell
-            >
-              <I name="plus" className="size-5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
-            </button>
-          ))}
+          {emptyCells(page.controls, grid).map(({ x, y }) => {
+            const targeted = target?.x === x && target.y === y;
+            return (
+              <button
+                key={`${x}:${y}`}
+                type="button"
+                aria-label={`Add button at row ${y + 1}, column ${x + 1}`}
+                aria-pressed={targeted}
+                style={placement({ x, y, w: 1, h: 1 })}
+                onClick={() => pickAt(x, y)}
+                onContextMenu={(e) => cellMenu(e, x, y)}
+                className={cx(
+                  "group flex items-center justify-center border text-muted hover:border-solid hover:bg-surface focus-visible:bg-surface",
+                  targeted ? "border-solid border-accent" : "border-dashed border-line",
+                )}
+                data-cell
+              >
+                <I
+                  name="plus"
+                  className={cx("size-5 group-hover:opacity-100 group-focus-visible:opacity-100", targeted ? "opacity-100" : "opacity-40")}
+                />
+              </button>
+            );
+          })}
           {page.controls.map((control) => {
             const size = resizing?.id === control.id ? resizing : control;
             return (
@@ -384,43 +347,5 @@ function ResizeHandle({ control, pitch, onResize }: { control: Control; pitch: n
       onClick={(e) => e.stopPropagation()}
       className="absolute -right-1.5 -bottom-1.5 z-10 size-3.5 cursor-nwse-resize rounded-sm border-2 border-bg bg-accent"
     />
-  );
-}
-
-function Palette({ onAdd }: { onAdd: (item: PaletteItem) => void }) {
-  const items: PaletteItem[] = [...ACTION_TYPES, "slider"];
-  return (
-    <div className="flex shrink-0 flex-wrap justify-center gap-1 border-t border-line px-4 py-2.5" aria-label="Add control">
-      {items.map((item) => (
-        <PaletteChip key={item} item={item} onAdd={onAdd} />
-      ))}
-    </div>
-  );
-}
-
-function PaletteChip({ item, onAdd }: { item: PaletteItem; onAdd: (item: PaletteItem) => void }) {
-  const { attributes, listeners, setNodeRef } = useDraggable({ id: `${PALETTE_PREFIX}${item}` });
-  return (
-    <button
-      ref={setNodeRef}
-      type="button"
-      {...attributes}
-      {...listeners}
-      title="Drag onto the deck, or click to add"
-      onClick={() => onAdd(item)}
-      className="inline-flex h-7 touch-none items-center gap-1.5 rounded-ui-sm border border-line bg-surface px-2 text-xs whitespace-nowrap text-muted hover:bg-hover hover:text-fg"
-    >
-      <ChipContent item={item} />
-    </button>
-  );
-}
-
-function ChipContent({ item }: { item: PaletteItem }) {
-  const meta = item === "slider" ? { label: "Slider", icon: "sliders-vertical" as const } : ACTION_META[item];
-  return (
-    <>
-      <I name={meta.icon} className="size-3.5" />
-      {meta.label}
-    </>
   );
 }

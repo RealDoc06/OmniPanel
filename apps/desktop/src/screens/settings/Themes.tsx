@@ -1,4 +1,5 @@
-// Theme picker (built-in + custom) and the custom theme editor with a live preview.
+// Theme picker (built-in + custom), "Customize" to make an editable copy, and the
+// custom theme editor with a live preview.
 import type { Theme, ThemeColors } from "@omni/protocol";
 import { DeckControlView } from "../../components/DeckControl";
 import { Button, ColorField, Field, Range, TextInput } from "../../components/ui";
@@ -15,6 +16,7 @@ export function ThemeSettings() {
   const active = themes.find((t) => t.id === activeId);
   const editing = custom.find((t) => t.id === activeId);
 
+  /** Makes an editable copy of the active theme and switches to it. */
   const duplicate = () => {
     if (!active) return;
     const copy: Theme = {
@@ -54,11 +56,12 @@ export function ThemeSettings() {
           </button>
         ))}
       </div>
-      <div className="flex gap-2">
-        <Button size="sm" icon="copy" onClick={duplicate} disabled={!active}>
-          Duplicate {active?.name ?? "theme"}
+      <p className="text-xs text-muted">Devices use this theme too, unless a layout picks its own.</p>
+      {active && (
+        <Button size="sm" icon="copy" className="self-start" onClick={duplicate}>
+          {editing ? "Make a copy" : `Customize ${active.name}`}
         </Button>
-      </div>
+      )}
       {editing && <ThemeEditor key={editing.id} theme={editing} />}
     </div>
   );
@@ -81,9 +84,9 @@ function ThemeEditor({ theme }: { theme: Theme }) {
         <Field label="Name">
           <TextInput aria-label="Theme name" className="max-w-xs" value={theme.name} onChange={(e) => save({ ...theme, name: e.target.value })} />
         </Field>
-        <Field label="Corner radius">
+        <Field label="Corner roundness">
           <Range
-            label="Corner radius"
+            label="Corner roundness"
             className="max-w-xs"
             min={0}
             max={24}
@@ -122,16 +125,16 @@ function ThemePreview({ theme }: { theme: Theme }) {
   return (
     <div style={themeStyle(theme)} className="flex flex-col gap-3 self-start rounded-ui border border-line bg-bg p-3 text-fg" aria-label="Theme preview">
       <div className="rounded-ui border border-line bg-surface p-3">
-        <p className="font-semibold">Surface</p>
-        <p className="text-muted">Muted text on the surface.</p>
+        <p className="font-semibold">Panel</p>
+        <p className="text-muted">Secondary text on a panel.</p>
         <div className="mt-2 flex gap-1.5">
           <span className="rounded-ui-sm bg-accent px-2.5 py-1 text-xs font-medium text-on-accent">Accent</span>
-          <span className="rounded-ui-sm border border-line bg-hover px-2.5 py-1 text-xs">Hover</span>
+          <span className="rounded-ui-sm border border-line bg-hover px-2.5 py-1 text-xs">Highlight</span>
         </div>
         <div className="mt-2 flex gap-3 text-xs">
           <span className="text-success">Success</span>
           <span className="text-warning">Warning</span>
-          <span className="text-danger">Danger</span>
+          <span className="text-danger">Error</span>
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2">

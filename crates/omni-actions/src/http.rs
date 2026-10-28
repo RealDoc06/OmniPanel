@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use omni_core::{ActionOutcome, HttpHeader, HttpMethod};
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
-use reqwest::{Client, Method, Url};
+use reqwest::{Client, Method, Response, Url};
 
 use crate::{ActionError, Result};
 
@@ -45,26 +45,20 @@ pub(crate) async fn run(
 
     let mut response = request.send().await.map_err(request_error)?;
     let status = response.status();
-    let mut preview = Vec::new();
-    while preview.len() < PREVIEW_BYTES {
-        match response.chunk().await {
-            Ok(Some(chunk)) => preview.extend_from_slice(&chunk),
-            Ok(None) | Err(_) => break,
-        }
-    }
-    let preview = preview_text(&String::from_utf8_lossy(&preview));
+    let preview = preview(&mut response, "").await;
     let message = if preview.is_empty() { status.to_string() } else { format!("{status}: {preview}") };
     if status.is_success() { Ok(ActionOutcome { message: Some(message) }) } else { Err(ActionError::Failed(message)) }
 }
 
-/// A missing scheme means a local address typed without `http://`.
+/// A missing scheme means a local address typed without `http://`. Errors
+/// never repeat the URL: it may carry credentials or secret query values.
 fn parse_url(text: &str) -> Result<Url> {
     let text = text.trim();
     let with_scheme = if text.contains("://") { text.to_owned() } else { format!("http://{text}") };
-    let url = Url::parse(&with_scheme).map_err(|e| ActionError::Invalid(format!("bad URL \"{text}\": {e}")))?;
+    let url = Url::parse(&with_scheme).map_err(|e| ActionError::Invalid(format!("the URL is not valid ({e})")))?;
     match url.scheme() {
         "http" | "https" if url.host_str().is_some() => Ok(url),
-        _ => Err(ActionError::Invalid(format!("only http and https URLs are supported: \"{text}\""))),
+        _ => Err(ActionError::Invalid("only http:// and https:// URLs are supported".into())),
     }
 }
 
@@ -76,6 +70,32 @@ fn to_reqwest(method: HttpMethod) -> Method {
         HttpMethod::Patch => Method::PATCH,
         HttpMethod::Delete => Method::DELETE,
     }
+}
+
+/// Start of the response body for messages: at most [`PREVIEW_BYTES`] are
+/// downloaded and `secret` (when not empty) is replaced by `[redacted]`.
+pub(crate) async fn preview(response: &mut Response, secret: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut complete = false;
+    while bytes.len() < PREVIEW_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+            Ok(None) => {
+                complete = true;
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if !secret.is_empty() {
+        text = text.replace(secret, "[redacted]");
+        if !complete {
+            // A secret cut off by the read limit escapes the replace: drop the tail it could be in.
+            text.truncate(text.floor_char_boundary(text.len().saturating_sub(secret.len())));
+        }
+    }
+    preview_text(&text)
 }
 
 /// Whitespace-collapsed start of the body.
@@ -161,6 +181,11 @@ mod tests {
         for url in ["ftp://example.com", "http://", "not a url"] {
             let err = run(&client, HttpMethod::Get, url, &[], None).await.unwrap_err();
             assert!(matches!(err, ActionError::Invalid(_)), "{url}: {err}");
+        }
+        // The URL can carry secrets, so errors never repeat it.
+        for url in ["http://127.0.0.1:bad/?api_key=SECRET", "ftp://user:SECRET@example.com"] {
+            let err = run(&client, HttpMethod::Get, url, &[], None).await.unwrap_err();
+            assert!(!err.to_string().contains("SECRET"), "{err}");
         }
         let bad_header = [header("bad name", "x")];
         assert!(matches!(

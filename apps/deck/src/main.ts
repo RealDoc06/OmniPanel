@@ -156,6 +156,7 @@ function relayoutAll(): void {
   stage.style.top = statusBar.height() + "px";
   deck.relayout();
   pair.relayout();
+  sheet.relayout();
 }
 
 function applyLayout(next: DeckLayout): void {
@@ -216,13 +217,14 @@ function onMessage(msg: HostToDeck, raw: string): void {
           if (screen !== "deck") conn.send({ t: "hello", token: loadToken(), client: clientInfo() });
         }, HELLO_FALLBACK_MS);
       } else {
-        pair.fail(msg.error || "Pairing failed. Check the code and try again.");
+        pair.fail(msg.error || "Connection failed. Check the code and try again.");
       }
       break;
     case "welcome":
       hostName = msg.hostName;
       hostVersion = msg.hostVersion;
       deviceName = msg.deviceName;
+      sheet.refreshInfo();
       statusBar.setHost(hostName);
       break;
     case "layout":
@@ -280,6 +282,20 @@ onVisibilityChange(function () {
 window.addEventListener("blur", function () {
   deck.cancelGestures();
 }, false);
+
+// Focus rings only while the keyboard is in use (old WebViews have no :focus-visible); see `.kbd` in app.css.
+// Capture phase: tap targets stop their touches and mouse presses from bubbling. Typing into the name
+// field doesn't count (on-screen keyboards send keys too), except Tab out of it.
+const docClasses = document.documentElement.classList;
+document.addEventListener("keydown", function (e) {
+  if ((e.target as HTMLElement).tagName !== "INPUT" || e.keyCode === 9) docClasses.add("kbd");
+}, true);
+document.addEventListener("touchstart", function () {
+  docClasses.remove("kbd");
+}, true);
+document.addEventListener("mousedown", function () {
+  docClasses.remove("kbd");
+}, true);
 
 // No context menu, pinch zoom (iOS 10+ ignores user-scalable=no) or rubber-banding.
 document.addEventListener("contextmenu", function (e) {

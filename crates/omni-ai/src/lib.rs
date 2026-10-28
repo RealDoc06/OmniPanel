@@ -55,15 +55,18 @@ pub fn default_base_url(provider: AiProvider) -> Option<&'static str> {
     }
 }
 
-/// Shared HTTP client for all providers. Generation never executes actions.
+/// HTTP client for all providers. Generation never executes actions.
 pub struct AiClient {
     http: reqwest::Client,
 }
 
 impl AiClient {
-    /// Reuse the host's HTTP client; requests have their own bounded timeouts.
-    pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+    /// Build the client from the host's settings (user agent, proxy, connect
+    /// timeout); requests have their own bounded timeouts. Redirects are never
+    /// followed: reqwest would forward the Anthropic `x-api-key` header to
+    /// whatever origin a redirect names.
+    pub fn new(http: reqwest::ClientBuilder) -> reqwest::Result<Self> {
+        Ok(Self { http: http.redirect(reqwest::redirect::Policy::none()).build()? })
     }
 
     /// Generate or refine a control, retrying malformed control JSON once.

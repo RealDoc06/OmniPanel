@@ -2,13 +2,14 @@
 // against real state (`cargo run -p omni-host --example serve -- --bridge 7711`,
 // then open the UI with `?bridge=http://127.0.0.1:7711`). File dialogs become prompts.
 import type { HostEvent } from "@omni/protocol";
-import { makeApi } from "./api";
+import { type Send, makeApi } from "./api";
 import type { Backend } from "./backend";
 
 export function bridge(base: string, imageUrl: Backend["imageUrl"]): Backend {
-  const send = async (request: unknown) => {
+  const send: Send = async (request, options) => {
     const response = await fetch(`${base}/invoke`, {
       method: "POST",
+      keepalive: options?.unload ?? false,
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),
     });

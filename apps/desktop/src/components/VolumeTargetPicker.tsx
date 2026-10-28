@@ -1,4 +1,5 @@
-// Picks a `VolumeTarget`: system output, mic, an app (from the mixer) or an OBS input.
+// Picks a `VolumeTarget`: computer sound, microphone, an app (by name, from the mixer)
+// or an OBS audio source.
 import type { VolumeTarget } from "@omni/protocol";
 import { VOLUME_TARGET_LABELS } from "../lib/actions";
 import { api } from "../lib/backend";
@@ -9,7 +10,7 @@ export function VolumeTargetPicker({ value, onChange }: { value: VolumeTarget; o
   return (
     <div className="flex flex-col gap-1.5">
       <EnumSelect
-        ariaLabel="Target"
+        ariaLabel="Sound"
         value={value.type}
         labels={VOLUME_TARGET_LABELS}
         onChange={(type) => {
@@ -30,30 +31,31 @@ export function VolumeTargetPicker({ value, onChange }: { value: VolumeTarget; o
   );
 }
 
+/** App name. Suggestions are the apps the mixer knows; the host matches names too. */
 function AppField({ value, onChange }: { value: string; onChange: (app: string) => void }) {
   const mixer = useResource(() => api.getMixer());
-  const options = (mixer.data?.apps ?? []).map((a) => ({ value: a.id, label: a.name }));
+  const options = (mixer.data?.apps ?? []).map((a) => ({ value: a.name, label: a.name }));
   return (
     <>
-      <ComboInput ariaLabel="Application" value={value} onChange={onChange} options={options} placeholder="App name or id, e.g. Spotify" />
-      {mixer.data && options.length === 0 && <p className="text-xs text-muted">No app is playing audio right now. Type its name.</p>}
+      <ComboInput ariaLabel="App" value={value} onChange={onChange} options={options} placeholder="Pick or type an app" />
+      {mixer.data && options.length === 0 && <p className="text-xs text-muted">Apps show up here while they play sound. You can also type a name.</p>}
     </>
   );
 }
 
-/** OBS input name, with suggestions while OBS is connected. */
+/** OBS audio source name, with suggestions while OBS is connected. */
 export function ObsInputField({ value, onChange }: { value: string; onChange: (input: string) => void }) {
   const inventory = useResource(() => api.obsInventory());
   return (
     <>
       <ComboInput
-        ariaLabel="OBS input"
+        ariaLabel="OBS audio source"
         value={value}
         onChange={onChange}
         options={(inventory.data?.inputs ?? []).map((i) => ({ value: i, label: i }))}
-        placeholder="Input name, e.g. Mic/Aux"
+        placeholder="Like Mic/Aux"
       />
-      {inventory.error && <p className="text-xs text-muted">OBS is offline. Type the input name.</p>}
+      {inventory.error && <p className="text-xs text-muted">OBS isn't connected. Type the source name.</p>}
     </>
   );
 }

@@ -26,6 +26,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest wait for the answer to a user request.
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest wait for one WebSocket write; OBS not reading for this long ends the session.
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Quiet time after a structural event before the state is reloaded.
 const RELOAD_DELAY: Duration = Duration::from_millis(250);
 const PING_EVERY: Duration = Duration::from_secs(20);
@@ -182,8 +184,14 @@ impl<'a> Session<'a> {
         timeout_at(deadline, self.recv()).await.map_err(|_| Fail::other(format!("OBS did not send {what} in time")))?
     }
 
-    async fn send(&mut self, text: String) -> Result<(), Fail> {
-        self.socket.send(Message::text(text)).await.map_err(|e| Fail::other(format!("connection to OBS lost: {e}")))
+    /// Write one message. A write stuck for [`SEND_TIMEOUT`] ends the session
+    /// instead of blocking the heartbeat and reconnect logic.
+    async fn send(&mut self, message: Message) -> Result<(), Fail> {
+        match timeout(SEND_TIMEOUT, self.socket.send(message)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(Fail::other(format!("connection to OBS lost: {error}"))),
+            Err(_) => Err(Fail::other("connection to OBS timed out")),
+        }
     }
 
     /// Hello, then Identify (answering the password challenge), then Identified.
@@ -199,7 +207,7 @@ impl<'a> Session<'a> {
             Some(challenge) => Some(proto::auth_response(password, &challenge.salt, &challenge.challenge)),
             None => None,
         };
-        self.send(proto::identify(authentication)).await?;
+        self.send(Message::text(proto::identify(authentication))).await?;
         loop {
             if let Incoming::Identified = self.recv_by(deadline, "Identified").await? {
                 return Ok(());
@@ -223,7 +231,7 @@ impl<'a> Session<'a> {
         for (index, query) in queries.iter().enumerate() {
             let id = self.shared.next_request_id();
             let (kind, data) = query.request();
-            self.send(proto::request(&id, kind, &data)).await?;
+            self.send(Message::text(proto::request(&id, kind, &data))).await?;
             waiting.insert(id, index);
         }
         let deadline = Instant::now() + STEP_TIMEOUT;
@@ -276,8 +284,11 @@ impl<'a> Session<'a> {
                 Some(call) = calls.recv() => {
                     // Answers nobody waits for anymore (timed out) would pile up otherwise.
                     self.pending.retain(|_, reply| !reply.is_closed());
-                    self.send(proto::request(&call.id, &call.kind, &call.data)).await?;
-                    self.pending.insert(call.id, call.reply);
+                    // The caller gave up while the call was queued: don't run the action late.
+                    if !call.reply.is_closed() {
+                        self.send(Message::text(proto::request(&call.id, &call.kind, &call.data))).await?;
+                        self.pending.insert(call.id, call.reply);
+                    }
                 }
                 () = sleep_until(reload_at.unwrap_or_else(Instant::now)), if reload_at.is_some() => {
                     reload_at = None;
@@ -288,7 +299,7 @@ impl<'a> Session<'a> {
                     if self.last_received.elapsed() > DEAD_AFTER {
                         return Err(Fail::other("connection to OBS timed out"));
                     }
-                    self.socket.send(Message::Ping(Bytes::new())).await.map_err(|e| Fail::other(format!("connection to OBS lost: {e}")))?;
+                    self.send(Message::Ping(Bytes::new())).await?;
                 }
             }
             if self.stale && reload_at.is_none() {

@@ -27,13 +27,14 @@ use omni_actions::Executor;
 use omni_ai::AiClient;
 use omni_audio::AudioController;
 use omni_core::{
-    Action, ActionOutcome, AiContext, AppInfo, AppState, AudioCapabilities, AudioDevices, Config, DeckSettings,
-    GenerateRequest, GeneratedControl, HaEntity, HostEvent, InstalledApp, LogEntry, LogLevel, MixerState, ObsInventory,
-    PairingInfo, Profile, RuntimeState, Settings, Theme, VoiceLevels, VoiceOp, VoicePreset, VolumeOp, VolumeTarget,
-    defaults, new_id, now_ms, store,
+    Action, ActionOutcome, AiContext, AppInfo, AppState, AudioCapabilities, AudioDevices, Config, ControlKind,
+    DeckSettings, GenerateRequest, GeneratedControl, HaEntity, HostEvent, InstalledApp, LogEntry, LogLevel, MixerState,
+    NavTarget, ObsInventory, PairingInfo, Profile, RuntimeState, ServerStatus, Settings, SettingsPatch, Theme,
+    VoiceLevels, VoiceOp, VoicePreset, VolumeOp, VolumeTarget, defaults, new_id, now_ms, store,
 };
 use omni_voice::VoiceEngine;
 use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 pub use dispatch::Origin;
 
@@ -57,13 +58,20 @@ pub struct Inner {
     version: String,
     machine_name: String,
     config: RwLock<Config>,
+    /// Keep synchronous commits and their propagation in the same order.
+    config_changes: Mutex<()>,
+    save_revisions: Mutex<HashMap<(String, String), u64>>,
     events: broadcast::Sender<HostEvent>,
+    logs: Mutex<Vec<LogEntry>>,
     sessions: Mutex<sessions::Sessions>,
     next_session: AtomicU64,
     pairing: Mutex<pairing::Pairing>,
     /// Toggle action state per control id.
     toggles: Mutex<HashMap<String, bool>>,
-    server: Mutex<server::ServerHandle>,
+    /// Runs presses of a control with toggles one at a time, see [`Host::run_control`].
+    control_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    server: tokio::sync::Mutex<server::ServerControl>,
+    server_status: Mutex<ServerStatus>,
     usb: usb::UsbBridge,
     audio: Arc<AudioController>,
     audio_caps: AudioCapabilities,
@@ -80,6 +88,12 @@ pub struct Inner {
     app_levels_dirty: Notify,
     ui_active: AtomicBool,
     last_runtime: Mutex<Option<RuntimeState>>,
+    /// Background loops, stopped by [`Host::shutdown`]. They hold `Host`
+    /// clones, so the engine is only freed once they are gone.
+    workers: Mutex<Vec<JoinHandle<()>>>,
+    voice_task: Mutex<Option<JoinHandle<()>>>,
+    /// Shutdown started: the voice worker turns the voice changer off and exits.
+    closing: AtomicBool,
 }
 
 impl std::ops::Deref for Host {
@@ -92,33 +106,38 @@ impl std::ops::Deref for Host {
 impl Host {
     /// Load the config and start every subsystem. Call inside a tokio runtime.
     pub async fn start(options: HostOptions) -> Result<Host> {
-        let config = store::load(&options.data_dir).context("loading config")?;
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .user_agent(format!("OmniPanel/{}", options.version))
-            .build()?;
+        let (config, repair_warning) = store::load_with_repair_report(&options.data_dir).context("loading config")?;
+        let http = || {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .user_agent(format!("OmniPanel/{}", options.version))
+        };
+        let ai = AiClient::new(http())?;
         let audio = Arc::new(AudioController::new());
-        let executor = Executor::new(audio.clone(), http.clone());
+        let executor = Executor::new(audio.clone(), http().build()?);
         executor.configure(&config.settings);
         let (sliders, slider_rx) = mpsc::unbounded_channel();
         let rt = tokio::runtime::Handle::current();
         let inner = Inner {
-            usb: usb::UsbBridge::new(rt.clone()),
+            usb: usb::UsbBridge::new(&rt),
             rt,
             data_dir: options.data_dir,
             version: options.version,
             machine_name: machine_name(),
             events: broadcast::channel(64).0,
+            logs: Mutex::default(),
             sessions: Mutex::default(),
             next_session: AtomicU64::new(1),
             pairing: Mutex::default(),
             toggles: Mutex::default(),
-            server: Mutex::default(),
+            control_locks: Mutex::default(),
+            server: tokio::sync::Mutex::default(),
+            server_status: Mutex::default(),
             audio_caps: audio.capabilities(),
             audio,
             voice: VoiceEngine::new(),
             executor,
-            ai: AiClient::new(http),
+            ai,
             feedback: Notify::new(),
             voice_dirty: Notify::new(),
             audio_snapshot: Mutex::default(),
@@ -126,20 +145,30 @@ impl Host {
             app_levels_dirty: Notify::new(),
             ui_active: AtomicBool::new(false),
             last_runtime: Mutex::new(None),
+            workers: Mutex::default(),
+            voice_task: Mutex::default(),
+            closing: AtomicBool::new(false),
             config: RwLock::new(config),
+            config_changes: Mutex::default(),
+            save_revisions: Mutex::default(),
         };
         let host = Host(Arc::new(inner));
+        if let Some(warning) = repair_warning {
+            host.log(LogLevel::Warn, warning);
+        }
         let settings = host.config().settings.clone();
-        host.restart_server(settings.port).await;
+        host.restart_server().await;
         host.usb.configure(&settings.usb, settings.port);
         host.apply_voice();
         let (audio, levels) = (host.audio.clone(), host.config().app_levels.clone());
         tokio::task::spawn_blocking(move || audio.restore_app_levels(&levels));
-        tokio::spawn(voice_worker(host.clone()));
-        tokio::spawn(persist_app_levels(host.clone()));
-        tokio::spawn(feedback::run(host.clone()));
-        tokio::spawn(dispatch::slider_worker(host.clone(), slider_rx));
-        tokio::spawn(runtime_watcher(host.clone()));
+        *host.voice_task.lock().unwrap() = Some(tokio::spawn(voice_worker(host.clone())));
+        *host.workers.lock().unwrap() = vec![
+            tokio::spawn(persist_app_levels(host.clone())),
+            tokio::spawn(feedback::run(host.clone())),
+            tokio::spawn(dispatch::slider_worker(host.clone(), slider_rx)),
+            tokio::spawn(runtime_watcher(host.clone())),
+        ];
         Ok(host)
     }
 
@@ -152,8 +181,12 @@ impl Host {
     }
 
     pub fn state(&self) -> AppState {
+        // Own statement: the read guard must be gone before `runtime()` reads
+        // the config again, or a queued writer deadlocks both.
+        let config = self.config().clone();
         AppState {
-            config: self.config().clone(),
+            config,
+            logs: self.logs.lock().unwrap().clone(),
             runtime: self.runtime(),
             builtin_themes: defaults::builtin_themes(),
             builtin_voice_presets: defaults::builtin_voice_presets(),
@@ -168,7 +201,7 @@ impl Host {
     }
 
     pub fn runtime(&self) -> RuntimeState {
-        let mut server = self.server.lock().unwrap().status.clone();
+        let mut server = self.server_status.lock().unwrap().clone();
         if server.running {
             server.urls = net::deck_urls(server.port);
         }
@@ -208,6 +241,14 @@ impl Host {
         })
     }
 
+    /// Merge fields while holding the same lock used by every config mutation.
+    pub fn patch_settings(&self, patch: SettingsPatch) -> Result<()> {
+        self.mutate(|c| {
+            patch.apply(&mut c.settings);
+            Ok(())
+        })
+    }
+
     pub fn save_profile(&self, profile: Profile) -> Result<()> {
         self.mutate(|c| {
             match c.profiles.iter_mut().find(|p| p.id == profile.id) {
@@ -238,14 +279,21 @@ impl Host {
     }
 
     /// Import a profile file with fresh ids, so importing twice never collides.
+    /// Navigation to its own pages or itself follows the new ids.
     pub fn import_profile(&self, path: &Path) -> Result<Profile> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let mut profile: Profile = serde_json::from_slice(&bytes).context("not an OmniPanel profile")?;
-        profile.id = new_id();
+        let new_profile_id = new_id();
+        let profiles = HashMap::from([(std::mem::replace(&mut profile.id, new_profile_id.clone()), new_profile_id)]);
+        let mut pages = HashMap::new();
         for page in &mut profile.pages {
-            page.id = new_id();
-            for control in &mut page.controls {
-                control.id = new_id();
+            let new = new_id();
+            pages.insert(std::mem::replace(&mut page.id, new.clone()), new);
+        }
+        for control in profile.pages.iter_mut().flat_map(|p| &mut p.controls) {
+            control.id = new_id();
+            if let ControlKind::Button { action: Some(action) } = &mut control.kind {
+                follow_renamed(action, &profiles, &pages);
             }
         }
         if self.config().profiles.iter().any(|p| p.name == profile.name) {
@@ -323,18 +371,22 @@ impl Host {
         })
     }
 
-    /// Apply `f` to the config, persist it, then propagate the change
-    /// (UI event, deck layouts, server port, USB, integrations, voice).
+    /// Apply `f` to a copy of the config and persist it; only then does the
+    /// copy become the live config and the change propagate (UI event, deck
+    /// layouts, server port, USB, integrations, voice). On any error the live
+    /// config is untouched.
     pub(crate) fn mutate<R>(&self, f: impl FnOnce(&mut Config) -> Result<R>) -> Result<R> {
+        let _change = self.config_changes.lock().unwrap();
         let (result, before, after) = {
             let mut config = self.config.write().unwrap();
-            let before = config.clone();
-            let result = f(&mut config)?;
-            config.normalize();
-            if *config == before {
+            let mut next = config.clone();
+            let result = f(&mut next)?;
+            next.normalize();
+            if next == *config {
                 return Ok(result);
             }
-            store::save(&self.data_dir, &config)?;
+            store::save(&self.data_dir, &next)?;
+            let before = std::mem::replace(&mut *config, next);
             (result, before, config.clone())
         };
         self.after_config_change(&before, &after);
@@ -346,8 +398,7 @@ impl Host {
         let (old, new) = (&before.settings, &after.settings);
         if old.port != new.port {
             let host = self.clone();
-            let port = new.port;
-            self.rt.spawn(async move { host.restart_server(port).await });
+            self.rt.spawn(async move { host.restart_server().await });
         }
         if old.usb != new.usb || old.port != new.port {
             self.usb.configure(&new.usb, new.port);
@@ -361,6 +412,8 @@ impl Host {
         }
         self.refresh_sessions();
         self.emit_runtime();
+        // A deck may now show a control that needs audio polling or fresh state.
+        self.feedback.notify_one();
     }
 
     // ----- pairing ----------------------------------------------------------
@@ -414,13 +467,13 @@ impl Host {
         Ok(())
     }
 
-    /// Run a leaf action; app volume changes get persisted afterwards.
+    /// Run a leaf action; persist app volume changes even if applying them fails.
     pub(crate) async fn run_leaf(&self, action: &Action) -> Result<ActionOutcome> {
-        let outcome = self.executor.run(action).await?;
+        let outcome = self.executor.run(action).await;
         if let Action::Volume { target: VolumeTarget::App { .. }, .. } = action {
             self.app_levels_dirty.notify_one();
         }
-        Ok(outcome)
+        Ok(outcome?)
     }
 
     // ----- voice ------------------------------------------------------------
@@ -535,7 +588,12 @@ impl Host {
             LogLevel::Warn => tracing::warn!("{message}"),
             LogLevel::Error => tracing::error!("{message}"),
         }
-        let _ = self.events.send(HostEvent::Log { entry: LogEntry { at: now_ms(), level, message } });
+        let entry = LogEntry { at: now_ms(), level, message };
+        let mut logs = self.logs.lock().unwrap();
+        logs.insert(0, entry.clone());
+        logs.truncate(300);
+        drop(logs);
+        let _ = self.events.send(HostEvent::Log { entry });
     }
 
     /// Emit a `runtime` event if anything changed since the last one.
@@ -548,24 +606,38 @@ impl Host {
         }
     }
 
-    /// Stop the server and close every deck connection.
+    /// Close every deck connection, stop the server and the USB bridge for
+    /// good, turn the voice changer off and stop the background loops, so
+    /// the engine is freed once the last `Host` is dropped.
     pub async fn shutdown(&self) {
         self.close_all_sessions();
-        self.server.lock().unwrap().stop();
-        let host = self.clone();
-        let off = omni_core::VoiceSettings { enabled: false, ..Default::default() };
-        let _ =
-            tokio::task::spawn_blocking(move || host.voice.apply(&off, &defaults::builtin_voice_presets()[0])).await;
+        let voice_off = async {
+            self.closing.store(true, Ordering::Relaxed);
+            self.voice_dirty.notify_one();
+            let voice = self.voice_task.lock().unwrap().take();
+            if let Some(voice) = voice {
+                let _ = voice.await;
+            }
+        };
+        tokio::join!(self.stop_server(), self.usb.stop(), voice_off);
+        let workers = std::mem::take(&mut *self.workers.lock().unwrap());
+        for worker in workers {
+            worker.abort();
+            let _ = worker.await;
+        }
     }
 }
 
 /// Applies voice settings one at a time and always the latest ones, so fast
 /// toggles can't finish out of order. Opening devices blocks, hence the
-/// blocking pool.
+/// blocking pool. Once [`Host::shutdown`] started it turns the voice changer
+/// off (after any apply in flight) and exits.
 async fn voice_worker(host: Host) {
     loop {
         host.voice_dirty.notified().await;
-        let settings = host.config().settings.voice.clone();
+        let closing = host.closing.load(Ordering::Relaxed);
+        let mut settings = host.config().settings.voice.clone();
+        settings.enabled &= !closing;
         let presets = host.voice_presets();
         let preset = presets.iter().find(|p| p.id == settings.preset_id).unwrap_or(&presets[0]).clone();
         let engine = host.clone();
@@ -574,6 +646,9 @@ async fn voice_worker(host: Host) {
             Ok(Err(e)) => host.log(LogLevel::Error, format!("Voice changer: {e}")),
             Err(e) => host.log(LogLevel::Error, format!("Voice changer stopped: {e}")),
             Ok(Ok(())) => {}
+        }
+        if closing {
+            return;
         }
         host.emit_runtime();
         host.feedback.notify_one();
@@ -617,6 +692,29 @@ async fn runtime_watcher(host: Host) {
     }
 }
 
+/// Remap imported navigation within its own profile or page namespace.
+/// Targets outside the maps (other profiles) stay as they are.
+fn follow_renamed(action: &mut Action, profiles: &HashMap<String, String>, pages: &HashMap<String, String>) {
+    match action {
+        Action::Navigate { to } => {
+            let (id, renamed) = match to {
+                NavTarget::Page { page_id } => (page_id, pages),
+                NavTarget::Profile { profile_id } => (profile_id, profiles),
+                _ => return,
+            };
+            if let Some(new) = renamed.get(id) {
+                id.clone_from(new);
+            }
+        }
+        Action::Multi { steps, .. } => steps.iter_mut().for_each(|step| follow_renamed(step, profiles, pages)),
+        Action::Toggle { on, off } => {
+            follow_renamed(on, profiles, pages);
+            follow_renamed(off, profiles, pages);
+        }
+        _ => {}
+    }
+}
+
 fn clean_name(name: &str) -> Option<String> {
     let name: String = name.trim().chars().filter(|c| !c.is_control()).take(40).collect();
     (!name.is_empty()).then_some(name)
@@ -626,14 +724,7 @@ fn clean_name(name: &str) -> Option<String> {
 /// elsewhere the hostname without its DNS domain.
 fn machine_name() -> String {
     #[cfg(target_os = "macos")]
-    if let Some(name) = std::process::Command::new("scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|name| !name.is_empty())
-    {
+    if let Some(name) = net::scutil("ComputerName") {
         return name;
     }
     let host = gethostname::gethostname().to_string_lossy().to_string();
@@ -646,5 +737,120 @@ pub fn os_name() -> &'static str {
         "macos" => "macos",
         "windows" => "windows",
         _ => "linux",
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A host on a free port with a throwaway data dir, USB off.
+    pub(crate) async fn start_host() -> Host {
+        let data_dir = std::env::temp_dir().join(format!("omni-host-unit-{}", new_id()));
+        let mut config = Config::default();
+        config.settings.port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        config.settings.usb.enabled = false;
+        store::save(&data_dir, &config).unwrap();
+        Host::start(HostOptions { data_dir, version: "test".into() }).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn config_commit_waits_for_previous_propagation() {
+        let host = start_host().await;
+        let engine = host.clone();
+        tokio::task::spawn_blocking(move || {
+            // Stall A while it propagates, after committing and emitting its config.
+            let runtime = engine.last_runtime.lock().unwrap();
+            let mut events = engine.subscribe();
+            std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    engine.mutate(|c| {
+                        c.settings.host_name = "A".into();
+                        Ok(())
+                    })
+                });
+                while !matches!(events.blocking_recv().unwrap(), HostEvent::Config { .. }) {}
+                let (started, starting) = std::sync::mpsc::channel();
+                let (committing, commit) = std::sync::mpsc::channel();
+                let second_engine = &engine;
+                let second = scope.spawn(move || {
+                    started.send(()).unwrap();
+                    second_engine.mutate(|c| {
+                        committing.send(()).unwrap();
+                        c.settings.host_name = "B".into();
+                        Ok(())
+                    })
+                });
+                starting.recv_timeout(Duration::from_secs(1)).unwrap();
+                let blocked = commit.recv_timeout(Duration::from_millis(100)).is_err();
+                drop(runtime);
+                first.join().unwrap().unwrap();
+                second.join().unwrap().unwrap();
+                assert!(blocked, "B committed while A was still propagating");
+            });
+            assert_eq!(engine.config().settings.host_name, "B");
+        })
+        .await
+        .unwrap();
+        host.shutdown().await;
+        std::fs::remove_dir_all(host.data_dir()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_keeps_profile_and_page_navigation_separate() {
+        let host = start_host().await;
+        let profile_nav = |id: &str| Action::Navigate { to: NavTarget::Profile { profile_id: id.into() } };
+        let page_nav = |id: &str| Action::Navigate { to: NavTarget::Page { page_id: id.into() } };
+        let mut profile = defaults::default_profile();
+        profile.id = "main".into();
+        profile.pages.truncate(1);
+        let page = &mut profile.pages[0];
+        page.id = "main".into();
+        page.controls.truncate(1);
+        page.controls[0].kind = ControlKind::Button {
+            action: Some(Action::Toggle {
+                on: Box::new(profile_nav("main")),
+                off: Box::new(Action::Multi {
+                    steps: vec![page_nav("main"), profile_nav("external"), profile_nav("page-only")],
+                    delay_ms: 0,
+                }),
+            }),
+        };
+        profile.pages.push(omni_core::Page { id: "page-only".into(), name: "Other".into(), controls: vec![] });
+        let path = host.data_dir().join("import.json");
+        std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+
+        let imported = host.import_profile(&path).unwrap();
+        assert_ne!(imported.id, imported.pages[0].id);
+        assert_ne!(imported.id, "main");
+        assert_ne!(imported.pages[0].id, "main");
+        assert_eq!(
+            imported.pages[0].controls[0].kind,
+            ControlKind::Button {
+                action: Some(Action::Toggle {
+                    on: Box::new(profile_nav(&imported.id)),
+                    off: Box::new(Action::Multi {
+                        steps: vec![page_nav(&imported.pages[0].id), profile_nav("external"), profile_nav("page-only")],
+                        delay_ms: 0,
+                    }),
+                })
+            }
+        );
+        host.shutdown().await;
+        std::fs::remove_dir_all(host.data_dir()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_for_good_and_frees_the_engine() {
+        let host = start_host().await;
+        let mut settings = host.config().settings.clone();
+        settings.port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // Queues a server restart that only runs once shutdown yields.
+        host.set_settings(settings).unwrap();
+        host.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!host.runtime().server.running);
+        // Every background loop is gone: this handle is the last one.
+        assert_eq!(Arc::strong_count(&host.0), 1);
     }
 }

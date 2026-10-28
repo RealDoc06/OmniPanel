@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
             other => data_dir = PathBuf::from(other), // legacy positional data dir
         }
     }
+    // Keep the same single-writer guard as the desktop shell, before any config writes.
+    let _lock = store::lock(&data_dir)?
+        .ok_or_else(|| anyhow::anyhow!("OmniPanel is already running with data dir {}", data_dir.display()))?;
     if let Some(port) = port {
         let mut config = store::load(&data_dir)?;
         config.settings.port = port;

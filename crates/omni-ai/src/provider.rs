@@ -209,6 +209,13 @@ impl AiClient {
     async fn json(&self, config: &Config<'_>, request: RequestBuilder) -> Result<Value> {
         let mut response = request.send().await.map_err(http_error)?;
         let status = response.status();
+        if status.is_redirection() {
+            return Err(AiError::Provider {
+                status: status.as_u16(),
+                message: "The API address redirects elsewhere. Enter the final address as the base URL in AI settings."
+                    .into(),
+            });
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(http_error)? {
             if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
@@ -234,11 +241,10 @@ impl AiClient {
                         .as_str()
                 })
                 .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    let text = String::from_utf8_lossy(&bytes);
-                    if text.trim().is_empty() { status.to_string() } else { text.trim().chars().take(1000).collect() }
-                });
+                .unwrap_or_else(|| String::from_utf8_lossy(&bytes).trim().to_owned());
+            // Redact before cutting, so a key at the cut is not left partly visible.
             let message = if config.key.is_empty() { message } else { message.replace(config.key, "[redacted]") };
+            let message = if message.is_empty() { status.to_string() } else { message.chars().take(1000).collect() };
             return Err(AiError::Provider { status: status.as_u16(), message });
         }
         parsed.map_err(|error| AiError::InvalidOutput(format!("Provider response is not JSON: {error}")))

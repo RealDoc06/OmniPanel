@@ -1,6 +1,7 @@
 //! The audio thread. It owns the cpal streams (which may be `!Send`), opens and
 //! closes them on command, forwards preset swaps to the input callback and
-//! recovers from unplugged devices.
+//! recovers from unplugged devices. The optional monitor output comes and goes
+//! on its own without interrupting the main output.
 //!
 //! Signal path: input callback (downmix -> [`Processor`]) -> one SPSC ring per
 //! output -> output callbacks ([`Reader`]: resample, drift control, upmix).
@@ -26,11 +27,22 @@ use crate::{Effect, Result, VoiceError, VoiceLevels, VoiceStatus};
 const PREFERRED_RATE: u32 = 48_000;
 /// Requested callback size (~5 ms) where the device lets us choose.
 const CALLBACK_SECS: f32 = 0.005;
-/// Ring capacity; latency is bounded far below this by [`Reader`].
-const RING_CAPACITY_SECS: f32 = 0.5;
+/// Ring capacity; latency is bounded far below this by [`Reader`]. Roomy so even
+/// huge device callbacks (~0.6 s each way) can prime and play without gaps.
+pub(crate) const RING_CAPACITY_SECS: f64 = 2.0;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long closing the streams may take before the audio thread is abandoned.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_AFTER_ERROR: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
+/// cpal's macOS input stays on the device it opened, so a session on the default
+/// microphone polls for default changes. WASAPI default-device streams and macOS
+/// default outputs follow the default by themselves.
+const FOLLOW_DEFAULT_INPUT: bool = cfg!(target_os = "macos");
+/// A lost monitor is brought back by polling. Not on Linux: there every cpal
+/// device query opens a new PulseAudio connection.
+const POLL_MONITOR: bool = cfg!(not(target_os = "linux"));
+const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Longer than the preset crossfade.
 const DRAIN_AFTER_SWAP: Duration = Duration::from_millis(250);
 
@@ -59,6 +71,33 @@ impl Shared {
 
     pub fn set_has_cable(&self, value: bool) {
         *self.has_cable.lock().unwrap_or_else(PoisonError::into_inner) = Some(value);
+    }
+}
+
+/// Cancellation and publication share a lock, so a dropped worker cannot publish late.
+struct WorkerState {
+    shared: Arc<Shared>,
+    active: Mutex<bool>,
+}
+
+impl WorkerState {
+    fn new(shared: Arc<Shared>) -> Self {
+        Self { shared, active: Mutex::new(true) }
+    }
+
+    fn update(&self, f: impl FnOnce(&Shared)) {
+        let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        if *active {
+            f(&self.shared);
+        }
+    }
+
+    fn cancel(&self) {
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = false;
+    }
+
+    fn is_active(&self) -> bool {
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -123,29 +162,41 @@ enum Command {
         reply: SyncSender<Result<()>>,
     },
     Effects(Vec<Effect>),
-    /// Fatal stream error reported by cpal for session `generation`.
+    /// Fatal error reported by cpal for the stream opened as `generation`
+    /// (a session's microphone and output, or one monitor attach).
     StreamError {
         generation: u64,
+        stream: &'static str,
         message: String,
     },
     Stop,
 }
 
-/// Handle to the audio thread. Dropping it closes the streams and joins the thread.
+/// Handle to the audio thread. Dropping it closes the streams and joins the thread
+/// (or abandons it after [`STOP_TIMEOUT`]).
 pub(crate) struct Worker {
     tx: Sender<Command>,
+    state: Arc<WorkerState>,
     thread: Option<JoinHandle<()>>,
+    /// Disconnects when the thread is done.
+    done: Receiver<()>,
 }
 
 impl Worker {
     pub fn spawn(shared: Arc<Shared>) -> Result<Self> {
+        let state = Arc::new(WorkerState::new(shared));
+        let worker_state = state.clone();
         let (tx, rx) = mpsc::channel();
         let events = tx.clone();
+        let (done_tx, done) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("omni-voice".into())
-            .spawn(move || run(rx, events, shared))
+            .spawn(move || {
+                let _done = done_tx;
+                run(rx, events, worker_state);
+            })
             .map_err(|e| VoiceError::Backend(format!("cannot start audio thread: {e}")))?;
-        Ok(Self { tx, thread: Some(thread) })
+        Ok(Self { tx, state, thread: Some(thread), done })
     }
 
     /// (Re)open all streams; blocks until the devices are running or failed.
@@ -169,23 +220,31 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        self.state.cancel();
         let _ = self.tx.send(Command::Stop);
-        if let Some(thread) = self.thread.take() {
+        // A backend call that never returns must not hang disabling or quitting.
+        if let Err(RecvTimeoutError::Timeout) = self.done.recv_timeout(STOP_TIMEOUT) {
+            tracing::warn!("voice: audio thread did not stop, abandoning it");
+        } else if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-fn run(rx: Receiver<Command>, events: Sender<Command>, shared: Arc<Shared>) {
+/// The audio thread's loop. Publications stop as soon as its handle is dropped;
+/// status updates on exit are left to [`crate::VoiceEngine`].
+fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>) {
     let mut session: Option<Session> = None;
     let mut wanted: Option<(Selection, Vec<Effect>)> = None;
+    // Counts sessions and monitor attaches, so errors of closed streams are ignored.
     let mut generation = 0u64;
     let mut retry_at: Option<Instant> = None;
     // After a swap the old chain comes back once its crossfade is done.
     let mut drain_at: Option<Instant> = None;
+    let mut poll_at: Option<Instant> = None;
 
     loop {
-        let wake = [retry_at, drain_at].into_iter().flatten().min();
+        let wake = [retry_at, drain_at, poll_at].into_iter().flatten().min();
         let command = match wake {
             Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -193,10 +252,11 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, shared: Arc<Shared>) {
         match command {
             Ok(Command::Open { selection, effects, reply }) => {
                 session = None; // release the devices before opening them again
-                generation += 1;
-                let result = open(&selection, &effects, &shared, &events, generation);
+                // A poll due for the old session would find the new microphone "stalled".
+                poll_at = None;
+                let result = open(&selection, &effects, &worker, &events, &mut generation);
                 retry_at = result.as_ref().err().filter(|e| retryable(e)).map(|_| Instant::now() + RETRY_INTERVAL);
-                let reply_result = publish(&shared, result.map(|s| session.insert(s).warning.clone()));
+                let reply_result = publish(&worker, result.map(|s| session.insert(s).warning.clone()));
                 wanted = Some((selection, effects));
                 let _ = reply.send(reply_result);
             }
@@ -209,39 +269,88 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, shared: Arc<Shared>) {
                     *current = effects;
                 }
             }
-            Ok(Command::StreamError { generation: g, message }) if g == generation && session.is_some() => {
-                tracing::warn!("voice stream failed: {message}");
-                session = None;
-                let _ = publish(&shared, Err(VoiceError::DeviceNotFound(message)));
-                retry_at = Some(Instant::now() + RETRY_AFTER_ERROR);
-            }
-            Ok(Command::StreamError { .. }) | Err(RecvTimeoutError::Timeout) => {}
+            Ok(Command::StreamError { generation: g, stream, message }) => match session.as_mut() {
+                Some(s) if s.generation == g => {
+                    tracing::warn!("voice {stream} failed: {message}");
+                    session = None;
+                    let _ = publish(&worker, Err(VoiceError::DeviceNotFound(format!("{stream}: {message}"))));
+                    retry_at = Some(Instant::now() + RETRY_AFTER_ERROR);
+                }
+                // Only the monitor is lost: the voice keeps reaching the main output.
+                Some(s) if s.monitor.as_ref().is_some_and(|m| m.generation == g) => {
+                    tracing::warn!("voice {stream} failed: {message}");
+                    s.monitor = None;
+                    s.warning = Some(format!("monitor unavailable: {message}"));
+                    worker.update(|shared| shared.status().error.clone_from(&s.warning));
+                }
+                _ => {}
+            },
+            Err(RecvTimeoutError::Timeout) => {}
             Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        if drain_at.is_some_and(|at| Instant::now() >= at) {
+        if !worker.is_active() {
+            break;
+        }
+        let now = Instant::now();
+        if drain_at.is_some_and(|at| now >= at) {
             drain_at = None;
             if let Some(s) = session.as_mut() {
                 s.drop_retired();
+                // A swap the full queue refused goes out now (or on the next drain).
+                if s.unsent.is_some() {
+                    s.send_unsent();
+                    drain_at = Some(now + DRAIN_AFTER_SWAP);
+                }
+            }
+        }
+        if poll_at.is_some_and(|at| now >= at) {
+            poll_at = None;
+            if let (Some(s), Some((selection, effects))) = (session.as_mut(), wanted.as_ref()) {
+                if s.input_stalled() {
+                    let message = "stopped delivering audio".into();
+                    let _ =
+                        events.send(Command::StreamError { generation: s.generation, stream: "microphone", message });
+                } else if s.default_input_moved() {
+                    // Open on the new default first: if it can't be used (say it is the
+                    // cable itself), the running session stays.
+                    match open(selection, effects, &worker, &events, &mut generation) {
+                        Ok(new) => {
+                            tracing::info!("voice: switched to the new default microphone");
+                            let _ = publish(&worker, Ok(session.insert(new).warning.clone()));
+                        }
+                        Err(e) => {
+                            tracing::warn!("voice: keeping the microphone, the new default is unusable: {e}");
+                            if let Some(input) = s.default_input.as_mut() {
+                                input.switch_failed(Instant::now());
+                            }
+                        }
+                    }
+                } else {
+                    s.retry_monitor(selection, &events, &mut generation);
+                    worker.update(|shared| shared.status().error.clone_from(&s.warning));
+                }
             }
         }
         if session.is_none()
             && let (Some(at), Some((selection, effects))) = (retry_at, wanted.as_ref())
-            && Instant::now() >= at
+            && now >= at
         {
-            generation += 1;
-            let result = open(selection, effects, &shared, &events, generation);
+            let result = open(selection, effects, &worker, &events, &mut generation);
             retry_at = result.as_ref().err().filter(|e| retryable(e)).map(|_| Instant::now() + RETRY_INTERVAL);
             if result.is_ok() {
                 tracing::info!("voice devices recovered");
             }
-            let _ = publish(&shared, result.map(|s| session.insert(s).warning.clone()));
+            let _ = publish(&worker, result.map(|s| session.insert(s).warning.clone()));
         }
+        poll_at = match (&session, &wanted) {
+            (Some(s), Some((selection, _))) if s.needs_poll(selection) => {
+                poll_at.or_else(|| Some(Instant::now() + POLL_INTERVAL))
+            }
+            _ => None,
+        };
     }
     drop(session); // close the streams on this thread, where they were created
-    let mut status = shared.status();
-    status.running = false;
-    status.virtual_mic = None;
 }
 
 /// Missing / unplugged devices may come back; anything else needs a settings change.
@@ -250,94 +359,128 @@ fn retryable(err: &VoiceError) -> bool {
 }
 
 /// Mirror an open result (with an optional non-fatal warning) into the status.
-fn publish(shared: &Shared, result: Result<Option<String>>) -> Result<()> {
-    let mut status = shared.status();
-    status.running = result.is_ok();
-    match result {
-        Ok(warning) => {
-            status.error = warning;
-            Ok(())
+fn publish(worker: &WorkerState, result: Result<Option<String>>) -> Result<()> {
+    worker.update(|shared| {
+        let mut status = shared.status();
+        status.running = result.is_ok();
+        match &result {
+            Ok(warning) => status.error.clone_from(warning),
+            Err(e) => {
+                status.error = Some(e.to_string());
+                status.virtual_mic = None;
+            }
         }
-        Err(e) => {
-            status.error = Some(e.to_string());
-            status.virtual_mic = None;
-            Err(e)
-        }
-    }
+    });
+    result.map(|_| ())
 }
 
 /// Open streams for `selection`. On success the status' `virtual_mic` is set.
 fn open(
     selection: &Selection,
     effects: &[Effect],
-    shared: &Arc<Shared>,
+    worker: &WorkerState,
     events: &Sender<Command>,
-    generation: u64,
+    generation: &mut u64,
 ) -> Result<Session> {
     let input = devices::find(selection.input.as_deref(), Direction::Input)?;
     let output = match selection.output.as_deref() {
         Some(id) => devices::find(Some(id), Direction::Output)?,
         None => {
             let found = devices::best_cable_output()?;
-            shared.set_has_cable(found.is_some());
+            worker.update(|shared| shared.set_has_cable(found.is_some()));
             found.ok_or_else(|| VoiceError::DeviceNotFound("virtual audio cable".into()))?
         }
     };
-    // The monitor is a convenience: without it the voice must still reach the cable.
-    let mut warning = None;
-    let monitor = selection.monitor.as_ref().and_then(|id| match devices::find(id.as_deref(), Direction::Output) {
-        Ok(m) => (!devices::same_device(&m, &output)).then_some(m),
-        Err(e) => {
-            warning = Some(format!("monitor unavailable: {e}"));
-            None
-        }
-    });
 
     let output_name = devices::name(&output);
     let output_virtual = devices::is_virtual(&output);
     let input_name = devices::name(&input);
-    if devices::same_device(&input, &output)
-        || (output_virtual && input_name == devices::mic_name_for_output(&output_name))
+    // A virtual cable plays its output back into its own input; the two directions
+    // of a physical interface (mic in, headphones out) are separate.
+    if output_virtual
+        && (devices::same_device(&input, &output) || input_name == devices::mic_name_for_output(&output_name))
     {
         return Err(VoiceError::Unsupported(format!(
             "\"{input_name}\" is both the microphone and the output; that would feed the voice back into itself"
         )));
     }
     if devices::cable_rank(&output_name).is_some() {
-        shared.set_has_cable(true);
+        worker.update(|shared| shared.set_has_cable(true));
     }
 
     let in_cfg = pick_config(&input, Direction::Input, PREFERRED_RATE)?;
-    let outputs = [Some(output), monitor]
-        .into_iter()
-        .flatten()
-        .map(|d| pick_config(&d, Direction::Output, in_cfg.sample_rate()).map(|cfg| (d, cfg)))
-        .collect::<Result<Vec<_>>>()?;
-
-    let build = |fixed| Session::build(&input, in_cfg, &outputs, effects, fixed, shared, events, generation);
+    let out_cfg = pick_config(&output, Direction::Output, in_cfg.sample_rate())?;
+    let mut build = |fixed| {
+        *generation += 1;
+        Session::build(&input, in_cfg, &output, out_cfg, effects, fixed, &worker.shared, events, *generation)
+    };
     // Small fixed buffers keep latency low; some drivers refuse them, so fall back.
     let mut session = build(true).or_else(|e| {
         tracing::debug!("voice: fixed buffer size refused ({e}), using device default");
         build(false)
     })?;
-    session.warning = session.warning.take().or(warning);
+    if FOLLOW_DEFAULT_INPUT && selection.input.is_none() {
+        session.default_input = Some(DefaultInput { id: devices::id(&input), retry_at: None });
+    }
+    // The monitor is a convenience: without it the voice must still reach the cable.
+    if let Err(e) = session.attach_monitor(selection, events, generation) {
+        session.warning = Some(format!("monitor unavailable: {e}"));
+    }
     tracing::info!("voice running: {input_name} @ {} Hz -> {output_name}", in_cfg.sample_rate());
     if let Some(w) = &session.warning {
         tracing::warn!("voice: {w}");
     }
-    shared.status().virtual_mic = output_virtual.then(|| devices::mic_name_for_output(&output_name));
+    worker.update(|shared| {
+        shared.status().virtual_mic = output_virtual.then(|| devices::mic_name_for_output(&output_name));
+    });
     Ok(session)
 }
 
 /// Open streams of one enabled period. Field order matters: the input stops first.
 struct Session {
     _input: Input,
-    _outputs: Vec<cpal::Stream>,
+    _output: cpal::Stream,
+    monitor: Option<Monitor>,
+    generation: u64,
+    rate: u32,
+    in_block: Arc<AtomicUsize>,
+    output_id: String,
+    /// The system default microphone in use, when the selection follows the default.
+    default_input: Option<DefaultInput>,
+    /// Input callback count and the value at the previous poll, for a microphone
+    /// stream that can't report errors (see [`Input::reports_errors`]).
+    watchdog: Option<(Arc<AtomicU32>, u32)>,
+    /// Monitor rings for the input callback, and the ones it replaced (freed here).
+    monitor_rings: rtrb::Producer<rtrb::Producer<f32>>,
+    retired_rings: rtrb::Consumer<rtrb::Producer<f32>>,
     chains: rtrb::Producer<Box<Chain>>,
     retired: rtrb::Consumer<Box<Chain>>,
-    sample_rate: f32,
+    /// Newest chain the full swap queue did not take yet; it replaces older unsent ones.
+    unsent: Option<Box<Chain>>,
     /// Non-fatal problem (monitor missing), shown as the status error while running.
     warning: Option<String>,
+}
+
+/// The microphone actually open, with a delay before retrying a failed switch.
+struct DefaultInput {
+    id: String,
+    retry_at: Option<Instant>,
+}
+
+impl DefaultInput {
+    fn switch_failed(&mut self, now: Instant) {
+        self.retry_at = Some(now + RETRY_INTERVAL);
+    }
+
+    fn should_switch(&self, desired: &str, now: Instant) -> bool {
+        self.id != desired && self.retry_at.is_none_or(|at| now >= at)
+    }
+}
+
+/// The optional second output, attached and detached while the session runs.
+struct Monitor {
+    _stream: cpal::Stream,
+    generation: u64,
 }
 
 impl Session {
@@ -345,7 +488,8 @@ impl Session {
     fn build(
         input: &cpal::Device,
         in_cfg: SupportedStreamConfig,
-        outputs: &[(cpal::Device, SupportedStreamConfig)],
+        output: &cpal::Device,
+        out_cfg: SupportedStreamConfig,
         effects: &[Effect],
         fixed: bool,
         shared: &Arc<Shared>,
@@ -354,66 +498,152 @@ impl Session {
     ) -> Result<Self> {
         let rate = in_cfg.sample_rate();
         let in_block = Arc::new(AtomicUsize::new(0));
-        let on_error = || stream_error_handler(events.clone(), generation);
-
-        let mut streams = Vec::with_capacity(outputs.len());
-        let mut rings = Vec::with_capacity(outputs.len());
-        let mut warning = None;
-        for (i, (device, cfg)) in outputs.iter().enumerate() {
-            let (tx, rx) = RingBuffer::new((rate as f32 * RING_CAPACITY_SECS) as usize);
-            let reader = Reader::new(rx, rate, cfg.sample_rate(), in_block.clone());
-            match output_stream(device, *cfg, fixed, reader, on_error()) {
-                Ok(stream) => {
-                    streams.push(stream);
-                    rings.push(tx);
-                }
-                // Only the first output (the cable) is required; the rest is the monitor.
-                Err(e) if i > 0 => warning = Some(format!("monitor unavailable: {e}")),
-                Err(e) => return Err(e),
-            }
-        }
+        let callbacks = Arc::new(AtomicU32::new(0));
+        let (ring, rx) = ring(rate);
+        let reader = Reader::new(rx, rate, out_cfg.sample_rate(), in_block.clone());
+        let on_error = stream_error_handler(events.clone(), generation, "output");
+        let stream = output_stream(output, out_cfg, fixed, reader, on_error)?;
 
         let (chains, incoming) = RingBuffer::new(4);
         let (retired_tx, retired) = RingBuffer::new(8);
+        let (monitor_rings, monitor_in) = RingBuffer::new(2);
+        let (retired_rings_tx, retired_rings) = RingBuffer::new(2);
         let sample_rate = rate as f32;
         let processor = Processor::new(sample_rate, Chain::new(effects, sample_rate))
             .with_port(ChainPort { incoming, retired: retired_tx });
         let side = InputSide {
             processor,
-            rings,
-            in_block,
+            output: ring,
+            monitor: None,
+            monitor_rings: monitor_in,
+            retired_rings: retired_rings_tx,
+            in_block: in_block.clone(),
+            callbacks: callbacks.clone(),
             shared: shared.clone(),
             scratch: vec![0.0; 1024].into_boxed_slice(),
         };
-        for stream in &streams {
-            stream.play().map_err(backend)?;
-        }
-        let input = Input::open(input, in_cfg, fixed, side, on_error())?;
-        Ok(Self { _input: input, _outputs: streams, chains, retired, sample_rate, warning })
+        stream.play().map_err(backend)?;
+        let on_error = stream_error_handler(events.clone(), generation, "microphone");
+        let input = Input::open(input, in_cfg, fixed, side, on_error)?;
+        Ok(Self {
+            watchdog: (!input.reports_errors()).then_some((callbacks, 0)),
+            _input: input,
+            _output: stream,
+            monitor: None,
+            generation,
+            rate,
+            in_block,
+            output_id: devices::id(output),
+            default_input: None,
+            monitor_rings,
+            retired_rings,
+            chains,
+            retired,
+            unsent: None,
+            warning: None,
+        })
     }
 
     fn set_effects(&mut self, effects: &[Effect]) {
         self.drop_retired();
-        let chain = Box::new(Chain::new(effects, self.sample_rate));
-        if self.chains.push(chain).is_err() {
-            tracing::warn!("voice: preset swap queue full, change ignored");
+        self.unsent = Some(Box::new(Chain::new(effects, self.rate as f32)));
+        self.send_unsent();
+    }
+
+    /// Queue the unsent chain for the input callback; it stays unsent while the queue is full.
+    fn send_unsent(&mut self) {
+        if let Some(chain) = self.unsent.take()
+            && let Err(rtrb::PushError::Full(chain)) = self.chains.push(chain)
+        {
+            tracing::debug!("voice: preset swap queue full, retrying");
+            self.unsent = Some(chain);
         }
     }
 
-    /// Chains the callback no longer uses are freed here, never on the audio thread.
+    /// Chains and rings the callback no longer uses are freed here, never on the audio thread.
     fn drop_retired(&mut self) {
         while self.retired.pop().is_ok() {}
+        while self.retired_rings.pop().is_ok() {}
+    }
+
+    /// Whether the audio thread should poll: for a stalled microphone, a change of
+    /// the default microphone, or to bring back a wanted monitor that is not running.
+    fn needs_poll(&self, selection: &Selection) -> bool {
+        self.watchdog.is_some()
+            || self.default_input.is_some()
+            || (POLL_MONITOR && selection.monitor.is_some() && self.monitor.is_none())
+    }
+
+    /// No input callback since the previous poll.
+    fn input_stalled(&mut self) -> bool {
+        let Some((callbacks, seen)) = self.watchdog.as_mut() else { return false };
+        let now = callbacks.load(Ordering::Relaxed);
+        std::mem::replace(seen, now) == now
+    }
+
+    /// Whether the default microphone changed and any failed switch can be retried.
+    fn default_input_moved(&self) -> bool {
+        let Some(current) = self.default_input.as_ref() else { return false };
+        let Ok(desired) = devices::find(None, Direction::Input) else { return false };
+        current.should_switch(&devices::id(&desired), Instant::now())
+    }
+
+    fn retry_monitor(&mut self, selection: &Selection, events: &Sender<Command>, generation: &mut u64) {
+        if POLL_MONITOR && self.monitor.is_none() {
+            let result = self.attach_monitor(selection, events, generation);
+            self.warning = result.err().map(|e| format!("monitor unavailable: {e}"));
+        }
+    }
+
+    /// Start the monitor `selection` asks for, unless it already runs. No monitor
+    /// when it is off or would be the main output itself.
+    fn attach_monitor(&mut self, selection: &Selection, events: &Sender<Command>, generation: &mut u64) -> Result<()> {
+        let (None, Some(id)) = (&self.monitor, &selection.monitor) else {
+            return Ok(());
+        };
+        let device = devices::find(id.as_deref(), Direction::Output)?;
+        if devices::id(&device) == self.output_id {
+            return Ok(());
+        }
+
+        let cfg = pick_config(&device, Direction::Output, self.rate)?;
+        let mut start = |fixed| {
+            *generation += 1;
+            let (tx, rx) = ring(self.rate);
+            let reader = Reader::new(rx, self.rate, cfg.sample_rate(), self.in_block.clone());
+            let on_error = stream_error_handler(events.clone(), *generation, "monitor");
+            let stream = output_stream(&device, cfg, fixed, reader, on_error)?;
+            stream.play().map_err(backend)?;
+            Ok::<_, VoiceError>((Monitor { _stream: stream, generation: *generation }, tx))
+        };
+        let (monitor, ring) = start(true).or_else(|_| start(false))?;
+        self.drop_retired();
+        if self.monitor_rings.push(ring).is_err() {
+            return Err(VoiceError::Backend("the microphone stream stalled".into()));
+        }
+        self.monitor = Some(monitor);
+        Ok(())
     }
 }
 
-fn stream_error_handler(events: Sender<Command>, generation: u64) -> impl FnMut(cpal::Error) + Send + 'static {
+/// Ring from the input callback to one output, see [`RING_CAPACITY_SECS`].
+fn ring(rate: u32) -> (rtrb::Producer<f32>, rtrb::Consumer<f32>) {
+    RingBuffer::new((f64::from(rate) * RING_CAPACITY_SECS) as usize)
+}
+
+/// `stream` names the endpoint in messages ("microphone", "output", "monitor").
+fn stream_error_handler(
+    events: Sender<Command>,
+    generation: u64,
+    stream: &'static str,
+) -> impl FnMut(cpal::Error) + Send + 'static {
     move |err| match err.kind() {
         // Recoverable or informational: the stream keeps running.
         cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
-            tracing::debug!("voice stream: {err}");
+            tracing::debug!("voice {stream}: {err}");
         }
         _ => {
-            let _ = events.send(Command::StreamError { generation, message: err.to_string() });
+            let _ = events.send(Command::StreamError { generation, stream, message: err.to_string() });
         }
     }
 }
@@ -441,13 +671,24 @@ impl Input {
         stream.play().map_err(backend)?;
         Ok(Self::Cpal(stream))
     }
+
+    /// The PulseAudio capture has no error callback: a killed stream (say, the
+    /// microphone was unplugged) or a lost connection just goes quiet.
+    fn reports_errors(&self) -> bool {
+        matches!(self, Self::Cpal(_))
+    }
 }
 
 /// Everything the input callback owns.
 pub(crate) struct InputSide {
     processor: Processor,
-    rings: Vec<rtrb::Producer<f32>>,
+    output: rtrb::Producer<f32>,
+    monitor: Option<rtrb::Producer<f32>>,
+    /// Monitor rings from the audio thread, and the replaced ones going back to be freed.
+    monitor_rings: rtrb::Consumer<rtrb::Producer<f32>>,
+    retired_rings: rtrb::Producer<rtrb::Producer<f32>>,
     in_block: Arc<AtomicUsize>,
+    callbacks: Arc<AtomicU32>,
     shared: Arc<Shared>,
     scratch: Box<[f32]>,
 }
@@ -465,8 +706,15 @@ impl InputSide {
 
     /// Process and publish one callback's worth of mono samples. Realtime-safe.
     pub(crate) fn process_mono(&mut self, frames: usize, mut samples: impl Iterator<Item = f32>) {
+        while let Ok(ring) = self.monitor_rings.pop() {
+            if let Some(old) = self.monitor.replace(ring) {
+                // Only fails if the audio thread stopped draining; then dropping here is the lesser evil.
+                let _ = self.retired_rings.push(old);
+            }
+        }
         self.processor.set_params(self.shared.params.load());
         self.in_block.store(frames, Ordering::Relaxed);
+        self.callbacks.fetch_add(1, Ordering::Relaxed);
         let mut left = frames;
         while left > 0 {
             let n = left.min(self.scratch.len());
@@ -475,8 +723,8 @@ impl InputSide {
                 *out = s;
             }
             self.processor.process(buf);
-            for ring in &mut self.rings {
-                // Full ring = the output stalled; dropping is the only realtime-safe option.
+            for ring in std::iter::once(&mut self.output).chain(self.monitor.as_mut()) {
+                // Full ring = the output stalled (or a lost monitor); dropping is the only realtime-safe option.
                 let _ = ring.push_partial_slice(buf);
             }
             left -= n;
@@ -589,34 +837,106 @@ fn format_rank(format: SampleFormat) -> Option<u8> {
     })
 }
 
-/// Pick a config at `want_rate` (else 48 kHz, else the device default rate),
-/// preferring f32 and the device's default channel count.
+/// Pick a config for `device`, see [`choose_config`].
 fn pick_config(device: &cpal::Device, dir: Direction, want_rate: u32) -> Result<SupportedStreamConfig> {
     let (default, ranges) = match dir {
         Direction::Input => (device.default_input_config(), device.supported_input_configs().map(|r| r.collect())),
         Direction::Output => (device.default_output_config(), device.supported_output_configs().map(|r| r.collect())),
     };
-    let default = default.map_err(backend)?;
     let ranges: Vec<cpal::SupportedStreamConfigRange> = ranges.unwrap_or_default();
-    for rate in [want_rate, PREFERRED_RATE, default.sample_rate()] {
-        let best = ranges
-            .iter()
-            .filter(|r| r.contains_rate(rate) && r.channels() > 0)
-            .filter_map(|r| format_rank(r.sample_format()).map(|rank| (rank, r)))
-            .min_by_key(|(rank, r)| (*rank, r.channels() != default.channels(), r.channels()));
-        if let Some((_, range)) = best {
-            return Ok(range.with_sample_rate(rate));
-        }
+    if let Some(cfg) = choose_config(default.as_ref().ok(), &ranges, want_rate) {
+        return Ok(cfg);
     }
-    match format_rank(default.sample_format()) {
-        Some(_) => Ok(default),
-        None => Err(VoiceError::Unsupported(format!("{} has no usable sample format", devices::name(device)))),
+    match default {
+        Ok(default) if format_rank(default.sample_format()).is_some() => Ok(default),
+        Ok(_) => Err(VoiceError::Unsupported(format!("{} has no usable sample format", devices::name(device)))),
+        Err(e) => Err(backend(e)),
     }
+}
+
+/// A supported config at `want_rate` (else 48 kHz, else the default rate, else any
+/// supported rate), preferring f32 and the default channel count. The default
+/// config is only a preference: cpal's macOS backend fails it for some formats
+/// (e.g. 24-bit) that the supported configs still cover.
+fn choose_config(
+    default: Option<&SupportedStreamConfig>,
+    ranges: &[cpal::SupportedStreamConfigRange],
+    want_rate: u32,
+) -> Option<SupportedStreamConfig> {
+    let default_channels = default.map(SupportedStreamConfig::channels);
+    [Some(want_rate), Some(PREFERRED_RATE), default.map(SupportedStreamConfig::sample_rate)]
+        .into_iter()
+        .flatten()
+        .chain(ranges.iter().map(cpal::SupportedStreamConfigRange::max_sample_rate))
+        .find_map(|rate| {
+            ranges
+                .iter()
+                .filter(|r| r.contains_rate(rate) && r.channels() > 0)
+                .filter_map(|r| format_rank(r.sample_format()).map(|rank| (rank, r)))
+                .min_by_key(|(rank, r)| (*rank, Some(r.channels()) != default_channels, r.channels()))
+                .map(|(_, range)| range.with_sample_rate(rate))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_default_input_switch_retries_after_backoff() {
+        let now = Instant::now();
+        let mut input = DefaultInput { id: "old-mic".into(), retry_at: None };
+        assert!(input.should_switch("new-mic", now));
+
+        input.switch_failed(now);
+        assert_eq!(input.id, "old-mic");
+        assert!(!input.should_switch("new-mic", now));
+        assert!(!input.should_switch("new-mic", now + RETRY_INTERVAL - Duration::from_millis(1)));
+        assert!(input.should_switch("new-mic", now + RETRY_INTERVAL));
+        assert!(!input.should_switch("old-mic", now + RETRY_INTERVAL));
+    }
+
+    #[test]
+    fn cancelled_worker_cannot_publish_after_disable_or_replacement() {
+        let shared = Arc::new(Shared::default());
+        // An idle worker opens no devices; keep its publication token after dropping it.
+        let worker = Worker::spawn(shared.clone()).unwrap();
+        let old = worker.state.clone();
+        publish(&old, Ok(None)).unwrap();
+        drop(worker);
+        *shared.status() = VoiceStatus::default();
+
+        // A stalled open finishes after disable cleared the status.
+        old.update(|shared| {
+            shared.status().virtual_mic = Some("old cable".into());
+            shared.set_has_cable(false);
+        });
+        publish(&old, Ok(Some("old warning".into()))).unwrap();
+        assert_eq!(*shared.status(), VoiceStatus::default());
+        assert_eq!(*shared.has_cable.lock().unwrap(), None);
+
+        let current = WorkerState::new(shared.clone());
+        current.update(|shared| shared.status().virtual_mic = Some("new cable".into()));
+        publish(&current, Ok(Some("new warning".into()))).unwrap();
+        let expected = shared.status().clone();
+        publish(&old, Err(VoiceError::Backend("late failure".into()))).unwrap_err();
+        publish(&old, Ok(None)).unwrap();
+        old.update(|shared| shared.status().error = None);
+        assert_eq!(*shared.status(), expected);
+    }
+
+    #[test]
+    fn config_choice_does_not_need_the_default() {
+        // cpal's macOS backend fails the default config of e.g. 24-bit devices that still list f32.
+        let range =
+            |format, min, max| cpal::SupportedStreamConfigRange::new(2, min, max, SupportedBufferSize::Unknown, format);
+        let ranges = [range(SampleFormat::I24, 44_100, 96_000), range(SampleFormat::F32, 44_100, 96_000)];
+        let cfg = choose_config(None, &ranges, 48_000).unwrap();
+        assert_eq!((cfg.sample_format(), cfg.sample_rate()), (SampleFormat::F32, 48_000));
+        // Neither the wanted rate nor 48 kHz: any supported rate beats failing.
+        let cfg = choose_config(None, &[range(SampleFormat::I16, 44_100, 44_100)], 48_000).unwrap();
+        assert_eq!((cfg.sample_format(), cfg.sample_rate()), (SampleFormat::I16, 44_100));
+    }
 
     /// Real-device smoke test of the output path (ring -> Reader -> cpal), no microphone needed.
     /// OMNI_VOICE_TEST_OUTPUT=<device id or name> picks the device, else the first virtual one.
@@ -638,7 +958,7 @@ mod tests {
         let (mut tx, rx) = RingBuffer::new(rate as usize);
         let reader = Reader::new(rx, rate, rate, Arc::new(AtomicUsize::new(block)));
         let (events, errors) = mpsc::channel();
-        let stream = output_stream(&device, cfg, true, reader, stream_error_handler(events, 1)).unwrap();
+        let stream = output_stream(&device, cfg, true, reader, stream_error_handler(events, 1, "output")).unwrap();
         stream.play().unwrap();
         println!(
             "{} @ {rate} Hz, {} ch, {:?}, callback {:?} frames",

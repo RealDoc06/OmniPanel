@@ -63,7 +63,9 @@ impl VoiceEngine {
     /// Gains and the noise gate apply instantly; a device change reopens the
     /// streams; after a device error, calling it again retries. With no
     /// `output_device` the first virtual cable is used (never the speakers,
-    /// which would feed back into the microphone).
+    /// which would feed back into the microphone). A lost monitor never stops
+    /// the voice. Except on Linux it also comes back by itself, and with no
+    /// `input_device` the voice follows the system default microphone.
     pub fn apply(&self, settings: &VoiceSettings, preset: &VoicePreset) -> Result<()> {
         let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let state = &mut *guard;
@@ -71,7 +73,7 @@ impl VoiceEngine {
 
         if !settings.enabled {
             state.applied = None;
-            drop(state.worker.take()); // closes the streams and joins the audio thread
+            drop(state.worker.take()); // closes the streams and joins the audio thread (bounded wait)
             let mut status = self.shared.status();
             status.running = false;
             status.error = None;

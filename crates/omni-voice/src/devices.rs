@@ -24,12 +24,13 @@ impl Direction {
         }
     }
 
+    /// Retried once: enumerating can fail when the device list changes mid-query.
     pub(crate) fn list(self, host: &cpal::Host) -> Result<Vec<cpal::Device>> {
-        let devices = match self {
+        let list = || match self {
             Self::Input => host.input_devices().map(|d| d.collect()),
             Self::Output => host.output_devices().map(|d| d.collect()),
         };
-        devices.map_err(backend)
+        list().or_else(|_| list()).map_err(backend)
     }
 
     fn default_device(self, host: &cpal::Host) -> Option<cpal::Device> {
@@ -40,6 +41,8 @@ impl Direction {
     }
 }
 
+/// Devices that can't even be described (gone mid-enumeration, or bogus entries
+/// from cpal's macOS enumeration racing a device removal) are left out.
 pub(crate) fn list() -> Result<AudioDevices> {
     let host = cpal::default_host();
     let infos = |dir: Direction| -> Result<Vec<AudioDeviceInfo>> {
@@ -48,14 +51,10 @@ pub(crate) fn list() -> Result<AudioDevices> {
             .list(&host)?
             .iter()
             .filter(|d| dir == Direction::Output || !is_monitor_source(d))
-            .map(|d| {
+            .filter_map(|d| {
+                let name = d.description().ok()?.name().to_owned();
                 let id = id(d);
-                AudioDeviceInfo {
-                    is_default: default.as_ref() == Some(&id),
-                    is_virtual: is_virtual(d),
-                    name: name(d),
-                    id,
-                }
+                Some(AudioDeviceInfo { is_default: default.as_ref() == Some(&id), is_virtual: is_virtual(d), name, id })
             })
             .collect())
     };

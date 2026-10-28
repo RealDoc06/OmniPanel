@@ -1,6 +1,6 @@
 //! Built-in themes, voice presets and the starter profile.
 
-use crate::action::{Action, MediaCommand, NavTarget, SystemCommand, VoiceOp, VolumeOp, VolumeTarget};
+use crate::action::{Action, MediaCommand, NavTarget, VoiceOp, VolumeOp, VolumeTarget};
 use crate::model::{
     Control, ControlKind, Effect, FilterKind, Icon, Page, Profile, Style, Theme, ThemeColors, VoicePreset,
 };
@@ -34,6 +34,11 @@ pub fn builtin_themes() -> Vec<Theme> {
         t("contrast", "High Contrast", 4, ["#000000", "#000000", "#1a1a1a", "#ffffff", "#ffffff", "#e6e6e6", "#ffff00", "#000000", "#00ff00", "#ffa500", "#ff3030", "#000000", "#ffffff"]),
     ];
     themes
+}
+
+/// The theme used when none is set ([`DEFAULT_THEME_ID`]), first of the built-ins.
+pub fn default_theme() -> Theme {
+    builtin_themes().swap_remove(0)
 }
 
 pub fn builtin_voice_presets() -> Vec<VoicePreset> {
@@ -111,83 +116,69 @@ fn builtin(name: &str) -> Option<Icon> {
 
 fn button(x: u8, y: u8, label: &str, icon: &str, action: Action) -> Control {
     Control {
-        id: new_id(),
         x,
         y,
-        w: 1,
-        h: 1,
         style: Style { label: label.into(), icon: builtin(icon), ..Style::default() },
         kind: ControlKind::Button { action: Some(action) },
-        hotkey: None,
+        ..Control::default()
     }
 }
 
-/// Toggle-style control: shows `active_icon` on `danger`-ish red while active.
-fn toggle_button(x: u8, y: u8, label: &str, icon: &str, active_icon: &str, action: Action) -> Control {
+/// Toggle-style control: shows `active_label` and `active_icon` on red while active.
+fn toggle_button(
+    x: u8,
+    y: u8,
+    label: &str,
+    icon: &str,
+    active_label: &str,
+    active_icon: &str,
+    action: Action,
+) -> Control {
     let mut c = button(x, y, label, icon, action);
+    c.style.active_label = Some(active_label.into());
     c.style.active_icon = builtin(active_icon);
     c.style.active_bg = Some("#b91c1c".into());
     c
 }
 
-/// Starter profile created on first launch.
+/// Starter profile created on first launch. Plain labels, and nothing a
+/// beginner could press by accident and lose their screen to (lock, display off).
 pub fn default_profile() -> Profile {
     let media = |command| Action::Media { command };
+    let master = |op| Action::Volume { target: VolumeTarget::Master, op };
     let main = Page {
         id: new_id(),
         name: "Main".into(),
         controls: vec![
-            button(0, 0, "Play", "play", media(MediaCommand::PlayPause)),
+            button(0, 0, "Play / pause", "play", media(MediaCommand::PlayPause)),
             button(1, 0, "Previous", "skip-back", media(MediaCommand::Previous)),
             button(2, 0, "Next", "skip-forward", media(MediaCommand::Next)),
+            button(3, 0, "Open browser", "globe", Action::Open { target: "https://www.google.com".into() }),
+            button(0, 1, "Volume down", "volume-1", master(VolumeOp::Step { delta: -0.05 })),
+            button(1, 1, "Volume up", "volume-2", master(VolumeOp::Step { delta: 0.05 })),
+            toggle_button(2, 1, "Mute sound", "volume-off", "Sound muted", "volume-x", master(VolumeOp::ToggleMute)),
             toggle_button(
                 3,
-                0,
-                "Mic",
+                1,
+                "Mute mic",
                 "mic",
+                "Mic muted",
                 "mic-off",
                 Action::Volume { target: VolumeTarget::Mic, op: VolumeOp::ToggleMute },
             ),
-            toggle_button(
-                0,
-                1,
-                "Sound",
-                "volume-2",
-                "volume-x",
-                Action::Volume { target: VolumeTarget::Master, op: VolumeOp::ToggleMute },
-            ),
             {
-                let mut c = button(1, 1, "Voice FX", "audio-waveform", Action::Voice { op: VoiceOp::Toggle });
-                c.style.active_label = Some("FX On".into());
+                let mut c = button(0, 2, "Voice effects", "audio-waveform", Action::Voice { op: VoiceOp::Toggle });
+                c.style.active_label = Some("Effects on".into());
                 c
             },
-            button(2, 1, "Next Voice", "shuffle", Action::Voice { op: VoiceOp::Cycle { preset_ids: vec![] } }),
-            button(3, 1, "Lock", "lock", Action::System { command: SystemCommand::Lock }),
-            button(
-                0,
-                2,
-                "Vol -",
-                "volume-1",
-                Action::Volume { target: VolumeTarget::Master, op: VolumeOp::Step { delta: -0.05 } },
-            ),
-            button(
-                1,
-                2,
-                "Vol +",
-                "volume-2",
-                Action::Volume { target: VolumeTarget::Master, op: VolumeOp::Step { delta: 0.05 } },
-            ),
-            button(2, 2, "Display Off", "monitor-off", Action::System { command: SystemCommand::DisplaySleep }),
+            button(1, 2, "Next voice", "shuffle", Action::Voice { op: VoiceOp::Cycle { preset_ids: vec![] } }),
             button(3, 2, "More", "chevron-right", Action::Navigate { to: NavTarget::NextPage }),
             Control {
-                id: new_id(),
                 x: 4,
-                y: 0,
-                w: 1,
                 h: 3,
                 style: Style { label: "Volume".into(), icon: builtin("volume-2"), ..Style::default() },
                 kind: ControlKind::Slider { target: VolumeTarget::Master, vertical: true },
-                hotkey: None,
+                ..Control::default()
             },
         ],
     };

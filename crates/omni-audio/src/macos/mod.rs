@@ -4,6 +4,8 @@
 //! macOS has no per-app volume, so an app's level is ours: kept in `State::desired`
 //! (keyed by app id, so it survives app restarts) and applied with a [`Tap`] while it
 //! is not 100%. At 100% and unmuted the tap is removed and the app plays natively.
+//! Taps only take what an app plays on the default output: audio it sends to another
+//! device keeps its native level and route.
 //!
 //! Outputs without a volume (or mute) control of their own get a software master:
 //! one tap of everything played to the device except OmniPanel and the apps that
@@ -12,7 +14,8 @@
 //!
 //! A worker thread, started on first use, keeps taps in sync with the system:
 //! re-attaches restarted apps, follows helper processes and default-output changes.
-//! It sleeps on CoreAudio change notifications and only polls while taps exist.
+//! It sleeps on CoreAudio change notifications and only polls while taps exist or
+//! wanted ones are missing (a failed build, permission not granted yet).
 
 mod ca;
 mod device;
@@ -44,8 +47,9 @@ use self::tap::{Source, Tap};
 use self::tcc::Permission;
 use crate::{AppAudio, AudioCapabilities, AudioError, Backend, Endpoint, Result, VolumeState, find_app};
 
-/// Health check / fallback poll while taps exist: dead or stalled devices, sample-rate
-/// switches, anything notifications miss. Cheap: cached identities, no tccd queries.
+/// Health check / fallback poll while taps exist or wanted ones are missing: dead or
+/// stalled devices, sample-rate switches, failed builds, anything notifications miss.
+/// Cheap: cached identities; tccd is only asked (per `PERMISSION_TTL`) until granted.
 const POLL: Duration = Duration::from_secs(1);
 /// Coalesces bursts of notifications (a device switch fires several).
 const DEBOUNCE: Duration = Duration::from_millis(80);
@@ -100,6 +104,9 @@ struct State {
     error: Option<String>,
     /// Taps that failed to build, and when to try again.
     backoff: HashMap<Key, Instant>,
+    /// The last pass left wanted taps missing (a build failed or waits out its backoff,
+    /// the system could not be read, permission is not granted): the worker polls.
+    retry: bool,
     /// The permission prompt was shown (once per run), and its answer.
     prompted: bool,
     prompt_granted: Arc<AtomicBool>,
@@ -235,14 +242,9 @@ impl State {
     fn sync(&mut self, device: ObjectId, groups: &[AppGroup], forced: Option<&Key>) -> Synced {
         let master = self.master_gain(device);
         let mut synced = Synced::default();
-        // Hand-over gains: a released app rejoins the master tap (fade out) or plays
-        // natively at full level (ramp to 1 so nothing jumps).
-        let released = if master < 1.0 { 0.0 } else { 1.0 };
         let State { desired, taps, master_tap, backoff, .. } = self;
-        for (_, tap) in taps.extract_if(|id, _| !desired.contains_key(id) || !groups.iter().any(|g| &g.id == id)) {
-            tap.set_gain(released);
-            synced.retired.push(tap);
-        }
+        let present = |id: &str| groups.iter().any(|g| g.id == id);
+        let released: Vec<(String, Tap)> = taps.extract_if(|id, _| !desired.contains_key(id) || !present(id)).collect();
         for (id, level) in desired.iter() {
             let Some(group) = groups.iter().find(|g| &g.id == id) else { continue };
             let key = Key::App(id.clone());
@@ -254,24 +256,48 @@ impl State {
         }
 
         // After the app taps, so a newly tapped app leaves the master only once its own
-        // tap is running, and a released one rejoins before its tap goes.
-        if master < 1.0 {
+        // tap is running, and a released one rejoins before its tap goes. An app whose
+        // tap is still on the previous output (its rebuild failed) stays in the master.
+        let rejoined = if master < 1.0 {
             match own_process() {
                 Some(own) => {
-                    let mut excluded: Vec<ObjectId> = taps.values().flat_map(|t| t.source.objects()).collect();
+                    let mut excluded: Vec<ObjectId> =
+                        taps.values().filter(|t| t.device == device).flat_map(|t| t.source.objects()).collect();
                     excluded.push(own);
                     excluded.sort_unstable();
                     excluded.dedup();
-                    let slot = Slot { key: &Key::Master, label: "master", source: Source::AllExcept(excluded) };
+                    let source = Source::AllExcept(excluded);
+                    let slot = Slot { key: &Key::Master, label: "master", source: source.clone() };
                     *master_tap = slot.ensure(master_tap.take(), device, master, forced, backoff, &mut synced);
+                    master_tap.as_ref().is_some_and(|t| t.device == device && t.source == source)
                 }
-                None => synced
-                    .failures
-                    .push((Key::Master, AudioError::Backend("OmniPanel's audio process is not registered".into()))),
+                None => {
+                    let e = AudioError::Backend("OmniPanel's audio process is not registered".into());
+                    synced.failures.push((Key::Master, e));
+                    false
+                }
             }
-        } else if let Some(old) = master_tap.take() {
-            old.set_gain(1.0); // everything plays natively at full level next
-            synced.retired.push(old);
+        } else {
+            if let Some(old) = master_tap.take() {
+                old.set_gain(1.0); // everything plays natively at full level next
+                synced.retired.push(old);
+            }
+            true
+        };
+
+        // Hand-over gains: a released app rejoins the master tap (fade out) or plays
+        // natively at full level (ramp to 1 so nothing jumps). While the master cannot
+        // take it back (failed, or waiting out its backoff), the app's tap stays on and
+        // carries the master gain instead: dropping it would play the app at full level.
+        let handover = if master < 1.0 { 0.0 } else { 1.0 };
+        for (id, tap) in released {
+            if rejoined || !present(&id) {
+                tap.set_gain(handover);
+                synced.retired.push(tap);
+            } else {
+                tap.set_gain(master);
+                taps.insert(id, tap);
+            }
         }
         synced
     }
@@ -285,20 +311,45 @@ impl State {
             self.controls = None; // re-check now and then; cheap at worker pace
             self.controls(device);
         }
-        let groups = if permitted && wanted { self.processes.groups(false).ok() } else { None };
-        let (Ok(device), Some(groups)) = (device, groups) else {
+        if !(permitted && wanted) {
+            // Access granted in System Settings sends no notification: keep checking.
+            self.retry = wanted;
             return self.take_taps();
+        }
+        let (device, groups) = match device.and_then(|device| Ok((device, self.processes.groups(false)?))) {
+            Ok(read) => read,
+            Err(e) => {
+                // Running taps keep their levels meanwhile. Logged once, not every poll.
+                let e = e.to_string();
+                if self.error.as_ref() != Some(&e) {
+                    tracing::warn!("audio devices unreadable: {e}");
+                }
+                self.error = Some(e);
+                self.retry = true;
+                return Vec::new();
+            }
         };
         let synced = self.sync(device, &groups, None);
         for (key, e) in &synced.failures {
-            tracing::warn!("{key:?}: {e}");
+            // A lasting failure comes back with every retry: logged when it changes.
+            let e = e.to_string();
+            if self.error.as_ref() != Some(&e) {
+                tracing::warn!("{key:?}: {e}");
+            }
         }
-        match synced.failures.last() {
-            Some((_, e)) => self.error = Some(e.to_string()),
-            None if !synced.skipped => self.error = None,
+        self.settle(synced.failures.last().map(|(_, e)| e), synced.skipped);
+        synced.retired
+    }
+
+    /// Records how a `sync` went: the failure for the mixer note (kept while a failed
+    /// tap waits out its backoff), and whether the worker has to try again.
+    fn settle(&mut self, failure: Option<&AudioError>, skipped: bool) {
+        match failure {
+            Some(e) => self.error = Some(e.to_string()),
+            None if !skipped => self.error = None,
             None => {}
         }
-        synced.retired
+        self.retry = failure.is_some() || skipped;
     }
 
     fn take_taps(&mut self) -> Vec<Tap> {
@@ -308,6 +359,12 @@ impl State {
 
     fn has_taps(&self) -> bool {
         !self.taps.is_empty() || self.master_tap.is_some()
+    }
+
+    /// The worker comes back by itself (`POLL`): running taps need health checks,
+    /// missing ones a retry. Otherwise it waits for notifications.
+    fn needs_poll(&self) -> bool {
+        self.has_taps() || self.retry
     }
 }
 
@@ -329,8 +386,10 @@ struct Slot<'a> {
 impl Slot<'_> {
     /// Returns the tap to keep: `current` retargeted, or a new one. Taps are never
     /// stacked on the same device: a process tapped twice while it starts up can stay
-    /// silent, so a broken tap goes before its replacement is built. Only a move to
-    /// another output crossfades (the old tap keeps playing there meanwhile).
+    /// silent, so a broken tap goes before its replacement is built. A working tap
+    /// whose retarget fails keeps its previous source until a retry succeeds, as
+    /// dropping it would play its audio at full level. Only a move to another output
+    /// crossfades (the old tap keeps playing there meanwhile).
     fn ensure(
         self,
         current: Option<Tap>,
@@ -342,8 +401,15 @@ impl Slot<'_> {
     ) -> Option<Tap> {
         let current = match current {
             Some(mut tap) if tap.device == device => {
-                if tap.healthy() && (tap.source == self.source || tap.set_source(&self.source).is_ok()) {
+                if tap.healthy() {
                     tap.set_gain(gain);
+                    // A cheap property write, so retried every pass (no backoff): a user
+                    // change hands over at once and nothing delays a later rebuild.
+                    if tap.source != self.source
+                        && let Err(e) = tap.set_source(&self.source)
+                    {
+                        synced.failures.push((self.key.clone(), e));
+                    }
                     return Some(tap);
                 }
                 drop(tap);
@@ -430,7 +496,10 @@ impl Platform {
 
     /// Applies a level change that needs taps created or removed. On failure the
     /// level is reverted, except while the permission prompt is pending: then it stays
-    /// and the worker applies it once the user allows access.
+    /// and the worker applies it once the user allows access. Another tap failing on
+    /// the way (the master, when an app joins or leaves it) fails the call too but
+    /// keeps the level: the taps it could not hand over stay as they were, and the
+    /// worker retries.
     fn commit(&self, mut state: MutexGuard<'_, State>, key: Key, revert: impl FnOnce(&mut State)) -> Result<()> {
         let device = match device::default_device(Endpoint::Output) {
             Ok(device) => device,
@@ -467,13 +536,19 @@ impl Platform {
             return Err(AudioError::AppNotFound(id.clone()));
         }
         let mut synced = state.sync(device, &groups, Some(&key));
-        let failure = synced.failures.iter().position(|(k, _)| *k == key).map(|i| synced.failures.swap_remove(i).1);
-        if failure.is_some() {
-            revert(&mut state);
-            state.apply_gains();
+        for (k, e) in &synced.failures {
+            tracing::warn!("{k:?}: {e}");
         }
-        state.error = failure.as_ref().map(|e| e.to_string());
-        let busy = state.has_taps();
+        let failure = match synced.failures.iter().position(|(k, _)| *k == key) {
+            Some(own) => {
+                revert(&mut state);
+                state.apply_gains();
+                Some(synced.failures.swap_remove(own).1)
+            }
+            None => synced.failures.pop().map(|(_, e)| e),
+        };
+        state.settle(failure.as_ref(), synced.skipped);
+        let busy = state.needs_poll();
         drop(state);
         retire(synced.retired);
         if busy {
@@ -539,11 +614,12 @@ impl Backend for Platform {
         if !tap::supported() {
             return AudioCapabilities { per_app_volume: false, note: Some(UNSUPPORTED_HINT.into()) };
         }
-        let device = device::default_device(Endpoint::Output).ok();
+        let device = device::default_device(Endpoint::Output).ok().map(|d| (d, device::name(d)));
         let mut state = self.shared.lock();
         let soft_master = device
-            .filter(|&d| !state.controls(d).volume)
-            .map(|d| format!("Master volume is applied in software ({} has no volume control).", device::name(d)));
+            .as_ref()
+            .filter(|(d, _)| !state.controls(*d).volume)
+            .map(|(_, name)| format!("Master volume is applied in software ({name} has no volume control)."));
         let (per_app_volume, note) = match state.permission() {
             Some(Permission::Denied) => (false, Some(format!("Per-app volume: {PERMISSION_HINT}."))),
             Some(Permission::Undetermined) => {
@@ -551,7 +627,12 @@ impl Backend for Platform {
             }
             _ => (true, state.error.clone()),
         };
-        let note = [note, soft_master].into_iter().flatten().collect::<Vec<_>>().join(" ");
+        // Taps follow the default output only (see the module docs).
+        let scope = device
+            .as_ref()
+            .filter(|_| per_app_volume)
+            .map(|(_, name)| format!("App volumes only affect audio played on {name}."));
+        let note = [note, scope, soft_master].into_iter().flatten().collect::<Vec<_>>().join(" ");
         AudioCapabilities { per_app_volume, note: (!note.is_empty()).then_some(note) }
     }
 
@@ -713,10 +794,8 @@ impl Worker {
 
 fn run(shared: &Shared, rx: &Receiver<Msg>) {
     loop {
-        // Health checks only matter for running taps; pending levels wait for notifications.
-        let active = shared.lock().has_taps();
-        let message =
-            if active { rx.recv_timeout(POLL) } else { rx.recv().map_err(|_| RecvTimeoutError::Disconnected) };
+        let poll = shared.lock().needs_poll();
+        let message = if poll { rx.recv_timeout(POLL) } else { rx.recv().map_err(|_| RecvTimeoutError::Disconnected) };
         match message {
             Ok(Msg::Wake) => {
                 thread::sleep(DEBOUNCE);
@@ -768,6 +847,20 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// A failed or postponed build leaves no tap to health-check, yet the worker must
+    /// come back for it instead of sleeping until the next CoreAudio notification.
+    #[test]
+    fn missing_taps_keep_the_worker_polling() {
+        let mut state = State::default();
+        state.settle(Some(&AudioError::Backend("tap failed".into())), false);
+        assert!(!state.has_taps() && state.needs_poll());
+        state.settle(None, true);
+        assert!(state.needs_poll(), "waiting out the backoff");
+        assert_eq!(state.error.as_deref(), Some("tap failed"), "the note keeps the failure meanwhile");
+        state.settle(None, false);
+        assert!(!state.needs_poll() && state.error.is_none());
     }
 
     /// Software master on an output without its own volume, alone and stacked with an
@@ -825,7 +918,7 @@ mod tests {
     }
 
     /// Persisted levels wait for their app and apply when it starts (notification
-    /// driven: nothing polls while no tap runs).
+    /// driven: nothing polls while the app is not running).
     #[test]
     #[ignore]
     fn restored_level_applies_when_app_starts() {

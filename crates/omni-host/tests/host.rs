@@ -1,6 +1,6 @@
 //! Host-level behaviour that doesn't need a deck connection.
 
-use omni_core::{Action, VoiceOp, new_id};
+use omni_core::{Action, ControlKind, NavTarget, Settings, VoiceOp, new_id};
 use omni_host::{Host, HostOptions};
 
 async fn start_host() -> Host {
@@ -47,11 +47,24 @@ async fn hotkeys_are_deduplicated_case_insensitively() {
     host.shutdown().await;
 }
 
+fn nav(to: NavTarget) -> Option<Action> {
+    Some(Action::Navigate { to })
+}
+
 #[tokio::test]
 async fn profiles_import_with_fresh_ids_and_last_profile_is_kept() {
     let host = start_host().await;
-    let original = host.config().profiles[0].clone();
+    let mut original = host.config().profiles[0].clone();
     assert!(host.delete_profile(&original.id).is_err());
+    // Buttons that go to its second page, to itself and to another profile.
+    let second_page = NavTarget::Page { page_id: original.pages[1].id.clone() };
+    let itself = NavTarget::Profile { profile_id: original.id.clone() };
+    let elsewhere = NavTarget::Profile { profile_id: "other-profile".into() };
+    let toggle = Action::Toggle { on: Box::new(nav(itself).unwrap()), off: Box::new(nav(elsewhere.clone()).unwrap()) };
+    let controls = &mut original.pages[0].controls;
+    controls[0].kind = ControlKind::Button { action: nav(second_page) };
+    controls[1].kind = ControlKind::Button { action: Some(toggle) };
+    host.save_profile(original.clone()).unwrap();
 
     let file = host.data_dir().join("export.json");
     host.export_profile(&original.id, &file).unwrap();
@@ -60,8 +73,40 @@ async fn profiles_import_with_fresh_ids_and_last_profile_is_kept() {
     assert_eq!(imported.name, "Default (imported)");
     assert_eq!(imported.pages.len(), original.pages.len());
     assert!(imported.pages[0].controls.iter().all(|c| original.pages[0].controls.iter().all(|o| o.id != c.id)));
+    // Its own navigation follows the new ids, other profiles stay.
+    let actions: Vec<_> = imported.pages[0].controls[..2]
+        .iter()
+        .map(|c| match &c.kind {
+            ControlKind::Button { action } => action.clone(),
+            ControlKind::Slider { .. } => None,
+        })
+        .collect();
+    let toggle = Action::Toggle {
+        on: Box::new(nav(NavTarget::Profile { profile_id: imported.id.clone() }).unwrap()),
+        off: Box::new(nav(elsewhere).unwrap()),
+    };
+    assert_eq!(actions, [nav(NavTarget::Page { page_id: imported.pages[1].id.clone() }), Some(toggle)]);
+
     host.delete_profile(&original.id).unwrap();
     assert_eq!(host.config().profiles.len(), 1);
+    host.shutdown().await;
+}
+
+/// A save that fails changes nothing, so the retry saves for real.
+#[tokio::test]
+async fn failed_saves_leave_the_config_alone() {
+    let host = start_host().await;
+    let path = omni_core::store::config_path(host.data_dir());
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap(); // the save can't replace a directory
+    let before = host.config().settings.clone();
+    let settings = Settings { host_name: "Studio".into(), ..before.clone() };
+    assert!(host.set_settings(settings.clone()).is_err());
+    assert_eq!(host.config().settings, before);
+
+    std::fs::remove_dir(&path).unwrap();
+    host.set_settings(settings).unwrap();
+    assert_eq!(omni_core::store::load(host.data_dir()).unwrap().settings.host_name, "Studio");
     host.shutdown().await;
 }
 
@@ -78,5 +123,63 @@ async fn settings_changes_work_from_threads_without_a_runtime() {
     settings.voice.enabled = true;
     let off_runtime = host.clone();
     std::thread::spawn(move || off_runtime.set_settings(settings)).join().expect("no panic").unwrap();
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn settings_patches_preserve_remote_fields_and_reject_invalid_changes_atomically() {
+    let host = start_host().await;
+    // A remote settings update lands after the UI prepared its host-name edit.
+    host.patch_settings(
+        serde_json::from_value(serde_json::json!({"startHidden": true, "ai": {"baseUrl": "http://127.0.0.1:9"}}))
+            .unwrap(),
+    )
+    .unwrap();
+    host.handle(omni_core::HostRequest::PatchSettings {
+        patch: omni_core::SettingsPatch { host_name: Some("Studio".into()), ..Default::default() },
+    })
+    .await
+    .unwrap();
+    assert!(host.config().settings.start_hidden);
+    assert_eq!(host.config().settings.host_name, "Studio");
+    assert_eq!(host.config().settings.ai.base_url.as_deref(), Some("http://127.0.0.1:9"));
+    host.patch_settings(serde_json::from_value(serde_json::json!({"ai": {"baseUrl": null}})).unwrap()).unwrap();
+    assert!(host.config().settings.ai.base_url.is_none());
+    assert!(
+        serde_json::from_value::<omni_core::HostRequest>(serde_json::json!({
+            "cmd": "patchSettings", "args": {"patch": {"hostName": "Lost", "port": "bad"}}
+        }))
+        .is_err()
+    );
+    assert_eq!(host.config().settings.host_name, "Studio");
+    assert_eq!(omni_core::store::load(host.data_dir()).unwrap().settings, host.config().settings);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn late_old_saves_cannot_overwrite_a_newer_snapshot() {
+    let host = start_host().await;
+    let mut profile = host.config().profiles[0].clone();
+    for (revision, label) in [(2, "LATEST"), (1, "FIRST"), (2, "duplicate")] {
+        profile.pages[0].controls[0].style.label = label.into();
+        host.handle(omni_core::HostRequest::Commit {
+            client: "test-window".into(),
+            revision,
+            request: Box::new(omni_core::HostRequest::SaveProfile { profile: profile.clone() }),
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(host.config().profiles[0].pages[0].controls[0].style.label, "LATEST");
+    // A new webview has its own revision sequence.
+    profile.pages[0].controls[0].style.label = "New window".into();
+    host.handle(omni_core::HostRequest::Commit {
+        client: "new-window".into(),
+        revision: 1,
+        request: Box::new(omni_core::HostRequest::SaveProfile { profile }),
+    })
+    .await
+    .unwrap();
+    assert_eq!(host.config().profiles[0].pages[0].controls[0].style.label, "New window");
     host.shutdown().await;
 }

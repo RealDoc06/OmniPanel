@@ -361,3 +361,16 @@ async fn inventory_lists_scenes_inputs_and_items() {
     let items: Vec<_> = inventory.scene_items.iter().map(|s| (s.scene.as_str(), s.sources.clone())).collect();
     assert_eq!(items, [("Live", vec!["Camera".to_owned(), "Logo".to_owned()]), ("BRB", vec![])]);
 }
+
+/// A connection that stopped sending keeps the queue full; requests still end at their deadline.
+#[tokio::test(start_paused = true)]
+async fn requests_time_out_while_the_queue_is_full() {
+    let client = client();
+    let (link, _session) = tokio::sync::mpsc::channel(1);
+    let (reply, _answer) = tokio::sync::oneshot::channel();
+    link.try_send(super::session::Call { id: "0".into(), kind: "GetVersion".into(), data: Value::Null, reply })
+        .unwrap();
+    client.shared.set_link(Some(link));
+    let result = tokio::time::timeout(Duration::from_secs(60), client.request("GetVersion", Value::Null)).await;
+    assert!(matches!(result, Ok(Err(ActionError::Timeout(10)))), "{result:?}");
+}

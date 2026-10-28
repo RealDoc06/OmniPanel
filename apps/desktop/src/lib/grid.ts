@@ -1,6 +1,9 @@
 // Grid placement rules for the deck editor: bounds, collisions, moves, swaps,
 // resizes and fitting controls into a smaller grid. Pure functions, unit tested.
 
+/** Largest rows or columns count. Mirrors omni_core::MAX_GRID. */
+export const MAX_GRID = 12;
+
 export interface Rect {
   x: number;
   y: number;

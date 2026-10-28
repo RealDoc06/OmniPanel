@@ -113,7 +113,7 @@ impl Mock {
 }
 
 fn client() -> AiClient {
-    AiClient::new(reqwest::Client::builder().no_proxy().build().unwrap())
+    AiClient::new(reqwest::Client::builder().no_proxy()).unwrap()
 }
 
 fn request() -> GenerateRequest {
@@ -440,6 +440,13 @@ async fn maps_http_errors_and_redacts_echoed_key_for_every_provider() {
     );
     mock.next().await;
     mock.done().await;
+    // A key straddling the length cut must not stay partly visible.
+    let mut mock = Mock::new(vec![(500, format!("{}test-key", "x".repeat(996)))]).await;
+    assert!(
+        matches!(client().test(&mock.settings(AiProvider::Custom)).await, Err(AiError::Provider { message, .. }) if !message.contains("test"))
+    );
+    mock.next().await;
+    mock.done().await;
 }
 
 #[tokio::test]
@@ -587,4 +594,27 @@ async fn detects_errors_in_successful_http_envelopes_and_bounds_response_size() 
     );
     mock.next().await;
     // The client may close the oversized response before the server finishes sending it.
+}
+
+#[tokio::test]
+async fn redirects_are_not_followed_so_the_key_stays_with_the_configured_origin() {
+    let mut target = Mock::json(vec![json!({"data": []})]).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let location = format!("{}/v1/models", target.url);
+    let redirect = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _ = stream.read(&mut [0; 4096]).await.unwrap();
+        let head =
+            format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(head.as_bytes()).await.unwrap();
+    });
+    let settings = AiSettings { base_url: Some(origin), ..target.settings(AiProvider::Anthropic) };
+    let result = client().list_models(&settings).await;
+    assert!(
+        matches!(&result, Err(AiError::Provider { status: 302, message }) if message.contains("redirects")),
+        "{result:?}"
+    );
+    redirect.await.unwrap();
+    assert!(target.requests.try_recv().is_err(), "the API key was sent to the redirect target");
 }

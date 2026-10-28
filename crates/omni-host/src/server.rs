@@ -1,19 +1,22 @@
 //! HTTP + WebSocket server for decks: the deck client, `/ws`, `/img/<id>`, `/api/info`.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
-use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, Path, Request, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
 use omni_core::{PROTOCOL_VERSION, ServerStatus};
 use rust_embed::RustEmbed;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::{Host, images, ws};
+use crate::{Host, images, net, ws};
 
 /// The deck client build (`pnpm build:deck`). Read from disk in debug builds.
 #[derive(RustEmbed)]
@@ -21,82 +24,124 @@ use crate::{Host, images, ws};
 #[allow_missing = true]
 struct DeckAssets;
 
+/// Largest WebSocket message or frame a deck may send; its messages are tiny.
+const MAX_MESSAGE: usize = 64 * 1024;
+/// How long a stopping server waits for in-flight HTTP requests.
+const STOP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The deck server's listener. Lives behind an async mutex so restarts and
+/// shutdown run one at a time, in order.
 #[derive(Default)]
-pub struct ServerHandle {
-    pub status: ServerStatus,
-    shutdown: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<()>>,
+pub struct ServerControl {
+    running: Option<Running>,
+    /// [`Host::shutdown`] ran: never listen again.
+    closed: bool,
 }
 
-impl ServerHandle {
-    pub fn stop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(task) = self.task.take() {
+struct Running {
+    port: u16,
+    /// Dropping it stops the listener and closes this server's WebSockets.
+    stop: watch::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+impl Running {
+    /// Stop accepting, close this server's sockets and wait until the
+    /// listener is gone, so its port can be bound again.
+    async fn stop(self) {
+        let Running { stop, mut task, .. } = self;
+        drop(stop);
+        if tokio::time::timeout(STOP_TIMEOUT, &mut task).await.is_err() {
             task.abort();
+            let _ = task.await;
         }
-        self.status.running = false;
     }
 }
 
 impl Host {
-    /// (Re)bind the deck server on `port`. Failures (port in use) end up in
+    /// (Re)bind the deck server on the configured port. Calls queue up and
+    /// each one binds the latest port, so quick port edits can't leave an
+    /// older one running. Failures (port in use) end up in
     /// `runtime.server.error` instead of stopping the app.
-    pub(crate) async fn restart_server(&self, port: u16) {
+    pub(crate) async fn restart_server(&self) {
+        let mut server = self.server.lock().await;
+        let port = self.config().settings.port;
+        if server.closed || server.running.as_ref().is_some_and(|r| r.port == port) {
+            return;
+        }
         self.close_all_sessions();
-        self.server.lock().unwrap().stop();
+        if let Some(running) = server.running.take() {
+            running.stop().await;
+        }
         let status = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
             Ok(listener) => {
-                let (tx, rx) = oneshot::channel::<()>();
-                let app = router(self.clone()).into_make_service_with_connect_info::<SocketAddr>();
+                let (stop, mut stopped) = watch::channel(());
+                let app = router(self.clone(), stopped.clone()).into_make_service_with_connect_info::<SocketAddr>();
                 let task = tokio::spawn(async move {
-                    let shutdown = async {
-                        let _ = rx.await;
+                    let shutdown = async move {
+                        let _ = stopped.changed().await;
                     };
                     if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
                         tracing::error!("deck server stopped: {e}");
                     }
                 });
-                let mut server = self.server.lock().unwrap();
-                server.shutdown = Some(tx);
-                server.task = Some(task);
+                server.running = Some(Running { port, stop, task });
+                self.log(omni_core::LogLevel::Info, format!("Ready for devices on port {port}"));
                 ServerStatus { running: true, port, urls: vec![], error: None }
             }
             Err(e) => {
                 let error = if e.kind() == std::io::ErrorKind::AddrInUse {
                     format!("Port {port} is already in use. Pick another port in Settings.")
                 } else {
-                    format!("Can't start the deck server on port {port}: {e}")
+                    format!("Devices can't connect on port {port}: {e}")
                 };
                 self.log(omni_core::LogLevel::Error, error.clone());
                 ServerStatus { running: false, port, urls: vec![], error: Some(error) }
             }
         };
-        self.server.lock().unwrap().status = status;
+        *self.server_status.lock().unwrap() = status;
         self.emit_runtime();
+    }
+
+    /// Stop the server for good: pending and later restarts do nothing.
+    pub(crate) async fn stop_server(&self) {
+        let mut server = self.server.lock().await;
+        server.closed = true;
+        if let Some(running) = server.running.take() {
+            running.stop().await;
+        }
+        self.server_status.lock().unwrap().running = false;
     }
 }
 
-fn router(host: Host) -> Router {
+/// `stop` resolves when this server instance stops; its WebSockets close then.
+fn router(host: Host, stop: watch::Receiver<()>) -> Router {
+    let names: Arc<[String]> = net::local_names().into();
     Router::new()
         .route("/ws", get(websocket))
         .route("/img/{id}", get(image))
         .route("/api/info", get(info))
         .fallback(get(asset))
+        .layer(Extension(stop))
+        .layer(middleware::from_fn_with_state(names, this_machine_only))
         .with_state(host)
 }
 
 async fn websocket(
     State(host): State<Host>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(stop): Extension<watch::Receiver<()>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     if !same_origin(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    upgrade.max_message_size(64 * 1024).on_upgrade(move |socket| ws::run(host, socket, addr)).into_response()
+    upgrade
+        .max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .on_upgrade(move |socket| ws::run(host, socket, addr, stop))
+        .into_response()
 }
 
 /// Blocks cross-site WebSocket hijacking: a page on another origin must not
@@ -107,6 +152,36 @@ fn same_origin(headers: &HeaderMap) -> bool {
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
     let origin_host = origin.split("://").nth(1).unwrap_or(origin);
     origin_host.eq_ignore_ascii_case(host)
+}
+
+/// Blocks DNS rebinding: a site that points its own name at this machine
+/// passes the Origin check, but its name is in the Host header. Decks use
+/// an IP address, `localhost` (USB) or this machine's name on a private domain.
+async fn this_machine_only(State(names): State<Arc<[String]>>, request: Request, next: Next) -> Response {
+    let host = request.headers().get(header::HOST).and_then(|h| h.to_str().ok());
+    let host = host.or_else(|| request.uri().authority().map(|a| a.as_str()));
+    if !host.is_some_and(|h| names_this_machine(h, &names)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+/// Accept IP literals, known names and this machine's short names on private domains.
+fn names_this_machine(host: &str, names: &[String]) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    if name.parse::<IpAddr>().is_ok() || names.contains(&name) {
+        return true;
+    }
+    let Some((short, domain)) = name.split_once('.') else { return false };
+    short != "localhost"
+        && names.iter().any(|n| n == short)
+        && ["ts.net", "local", "lan", "home", "home.arpa", "internal", "localdomain", "fritz.box"]
+            .iter()
+            .any(|suffix| domain == *suffix || domain.strip_suffix(suffix).is_some_and(|prefix| prefix.ends_with('.')))
 }
 
 async fn image(State(host): State<Host>, Path(id): Path<String>) -> Response {
@@ -166,6 +241,46 @@ async fn asset(uri: Uri, headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_this_machine_names_pass() {
+        let names = ["localhost", "studio", "studio.local", "bonjour-name", "bonjour-name.local"].map(String::from);
+        for host in [
+            "192.168.1.5:7710",
+            "10.0.0.2",
+            "[::1]:7710",
+            "localhost:7710",
+            "Studio.local:7710",
+            "studio.",
+            "studio.tailnet.ts.net:7710",
+            "Studio.Fritz.Box:7710",
+            "studio.home.arpa.",
+            "studio.lan",
+            "studio.home",
+            "studio.localdomain",
+            "studio.internal",
+            "bonjour-name.tailnet.ts.net",
+            "bonjour-name.home.arpa",
+        ] {
+            assert!(names_this_machine(host, &names), "{host}");
+        }
+        for host in [
+            "evil.example:7710",
+            "studio.evil.example",
+            "localhost.evil.example",
+            "",
+            "::1",
+            "192.168.1.5.nip.io",
+            "other.tailnet.ts.net",
+            "studio.evilts.net",
+            "studio.ts.net.evil.example",
+            "studio.evillan",
+            "localhost.tailnet.ts.net",
+            "bonjour-name.evil.example",
+        ] {
+            assert!(!names_this_machine(host, &names), "{host}");
+        }
+    }
 
     #[test]
     fn origin_check() {
