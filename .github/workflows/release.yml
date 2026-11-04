@@ -1,5 +1,7 @@
 name: Release
 
+# Publishes a draft prerelease named after the version in tauri.conf.json.
+# Review the draft and its assets before publishing it by hand.
 on:
   push:
     tags: ["v*"]
@@ -17,15 +19,18 @@ jobs:
             args: --target universal-apple-darwin
           - platform: windows-latest
             args: ""
+          # 22.04 keeps the glibc baseline low, so packages run on more distros.
           - platform: ubuntu-22.04
+            args: ""
+          - platform: ubuntu-22.04-arm
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,11 +40,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev libxkbcommon-dev libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev libxkbcommon-dev libssl-dev patchelf xdg-utils
       - run: pnpm install --frozen-lockfile
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Runners may lack FUSE, which Tauri's AppImage tools otherwise need.
+          APPIMAGE_EXTRACT_AND_RUN: 1
           # Optional signing / notarization (set these repository secrets to enable):
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -49,7 +56,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: OmniPanel ${{ github.ref_name }}
+          tauriScript: pnpm tauri
+          tagName: v__VERSION__
+          releaseName: OmniPanel v__VERSION__
+          releaseBody: See CHANGELOG.md. Alpha builds are unsigned; the README explains how to run them.
           releaseDraft: true
+          prerelease: true
           args: ${{ matrix.args }}

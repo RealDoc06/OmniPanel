@@ -98,7 +98,7 @@ export function Canvas({ profile, page, theme }: { profile: Profile; page: Page;
       <div className="flex min-h-0 flex-1 flex-col">
         <DeckGrid profile={profile} page={page} theme={theme} ghost={ghost} pitchRef={pitchRef} />
         {emptyCells(page.controls, grid).length === 0 && (
-          <div className="flex shrink-0 items-center justify-center gap-1 px-4 pb-4">
+          <div className="flex shrink-0 items-center justify-center gap-1.5 px-4 pb-4 text-muted">
             <span className="mr-1">This page is full.</span>
             {profile.rows < MAX_GRID && (
               <Button size="sm" onClick={() => setGrid(profile.rows + 1, profile.cols)}>
@@ -189,10 +189,10 @@ function DeckGrid({
   });
 
   return (
-    <div ref={wrapRef} className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-3 min-[1100px]:p-6">
+    <div ref={wrapRef} className="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-6 pt-3 pb-8 min-[1100px]:px-10">
       <div
         style={{ ...themeStyle(theme), padding: gap, borderRadius: theme.radius + gap / 2 }}
-        className="border border-line bg-bg"
+        className="bg-bg"
         onMouseDown={(e) => e.target === e.currentTarget && select([])}
       >
         <div
@@ -210,9 +210,9 @@ function DeckGrid({
                 type="button"
                 aria-label={`Add button at row ${y + 1}, column ${x + 1}`}
                 aria-pressed={targeted}
-                style={placement({ x, y, w: 1, h: 1 })}
                 onClick={() => pickAt(x, y)}
                 onContextMenu={(e) => cellMenu(e, x, y)}
+                style={{ ...placement({ x, y, w: 1, h: 1 }), borderRadius: "var(--radius)" }}
                 className={cx(
                   "group flex items-center justify-center border text-muted hover:border-solid hover:bg-surface focus-visible:bg-surface",
                   targeted ? "border-solid border-accent" : "border-dashed border-line",

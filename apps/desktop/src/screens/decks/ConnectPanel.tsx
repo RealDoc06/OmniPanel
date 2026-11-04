@@ -1,6 +1,7 @@
-// "Connect a device": the inline panel at the top of Devices. It shows one QR code with
-// its address, the 6-digit code (renewed by itself when it runs out) and a USB view for
-// Android. Pairing is on while the panel is mounted; it closes itself when a device connects.
+// "Connect a device": the panel at the top of Devices (or, as `hero`, the whole first-run
+// screen). It shows one QR code with its address, the 6-digit code (renewed by itself when it
+// runs out) and a USB view for Android. Pairing is on while the panel is mounted; it closes
+// itself when a device connects.
 import type { PairingInfo } from "@omni/protocol";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Disclosure, Notice, Section } from "../../components/ui";
@@ -24,7 +25,7 @@ function enqueue<T>(command: () => Promise<T>): Promise<T> {
   return result;
 }
 
-export function ConnectPanel({ onClose }: { onClose: () => void }) {
+export function ConnectPanel({ hero = false, onClose }: { hero?: boolean; onClose?: () => void }) {
   const [started, setStarted] = useState<PairingInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usb, setUsb] = useState(false);
@@ -61,9 +62,41 @@ export function ConnectPanel({ onClose }: { onClose: () => void }) {
   const lastPaired = useApp((s) => s.lastPaired);
   const pairedAtOpen = useRef(lastPaired);
   useEffect(() => {
-    if (lastPaired && lastPaired !== pairedAtOpen.current) onClose();
+    if (lastPaired && lastPaired !== pairedAtOpen.current) onClose?.();
   }, [lastPaired, onClose]);
 
+  const body = (
+    <div className="flex flex-col gap-4">
+      {error && <Notice tone="error">{error}</Notice>}
+      {usb ? (
+        <>
+          <Code info={info} />
+          <UsbSteps port={runtime.server.port} />
+          <TextLink onClick={() => setUsb(false)}>Use Wi-Fi instead</TextLink>
+        </>
+      ) : (
+        <>
+          <WifiSteps urls={runtime.server.urls} info={info} />
+          <p className="text-muted">
+            The phone or tablet must be on the same Wi-Fi as this computer.{" "}
+            <TextLink onClick={() => setUsb(true)}>Use a USB cable instead (Android)</TextLink>
+          </p>
+        </>
+      )}
+    </div>
+  );
+
+  if (hero) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-7 py-10">
+        <div className="w-full max-w-[640px]">
+          <h2 className="mb-1 text-[20px] font-semibold tracking-[-0.01em]">Connect a phone or tablet</h2>
+          <p className="mb-6 text-muted">It becomes a deck of buttons for this computer. Any browser works, even on old devices.</p>
+          {body}
+        </div>
+      </div>
+    );
+  }
   return (
     <Section
       title="Connect a phone or tablet"
@@ -73,47 +106,34 @@ export function ConnectPanel({ onClose }: { onClose: () => void }) {
         </Button>
       }
     >
-      <div className="flex flex-col gap-3">
-        {error && <Notice tone="error">{error}</Notice>}
-        {usb ? (
-          <>
-            <Code info={info} />
-            <UsbSteps port={runtime.server.port} />
-            <TextLink onClick={() => setUsb(false)}>Use Wi-Fi instead</TextLink>
-          </>
-        ) : (
-          <>
-            <WifiSteps urls={runtime.server.urls} info={info} />
-            <p>The phone or tablet must be on the same Wi-Fi as this computer.</p>
-            <TextLink onClick={() => setUsb(true)}>Use a USB cable instead (Android)</TextLink>
-          </>
-        )}
-      </div>
+      {body}
     </Section>
   );
 }
 
-/** Step 1 (QR code and address) and step 2 (the code). */
+/** Step 1 (address and QR code) and step 2 (the code). */
 function WifiSteps({ urls, info }: { urls: string[]; info: PairingInfo | null }) {
   const [first, ...others] = urls;
   return (
-    <div className="flex items-start gap-6">
-      <ol className="flex min-w-0 flex-1 flex-col gap-3">
+    <div className="flex items-start gap-8">
+      <ol className="flex min-w-0 flex-1 flex-col gap-5">
         <Step n={1}>
           {first ? (
             <>
-              <p>
-                On the phone or tablet, scan this code with the camera, or open{" "}
-                <span data-selectable className="font-mono">
-                  {hostOf(first)}
-                </span>{" "}
-                in its browser.
-                <Button size="sm" className="ml-2 align-middle" onClick={() => copyAddress(first)}>
+              <p className="flex min-h-7 flex-wrap items-center gap-x-2 gap-y-1">
+                <span>
+                  On the phone or tablet, open{" "}
+                  <span data-selectable className="font-mono font-medium">
+                    {hostOf(first)}
+                  </span>{" "}
+                  in its browser, or scan the code.
+                </span>
+                <Button size="sm" onClick={() => copyAddress(first)}>
                   Copy address
                 </Button>
               </p>
               {others.length > 0 && (
-                <div className="mt-2">
+                <div className="mt-1 max-w-sm">
                   <Disclosure label={`Other addresses (${others.length})`}>
                     <ul className="flex flex-col gap-1">
                       {others.map((url) => (
@@ -136,10 +156,8 @@ function WifiSteps({ urls, info }: { urls: string[]; info: PairingInfo | null })
           )}
         </Step>
         <Step n={2}>
-          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-            Type this code on it:
-            <Code info={info} />
-          </div>
+          <p className="min-h-7 leading-7">Type this code on it.</p>
+          <Code info={info} />
         </Step>
       </ol>
       {first && <QrCode text={first} />}
@@ -225,12 +243,12 @@ function Code({ info }: { info: PairingInfo | null }) {
   useNow(1000);
   const left = info ? Math.max(0, Math.ceil((info.expiresAt - Date.now()) / 1000)) : 0;
   return (
-    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-      <span data-selectable aria-live="polite" className="font-mono text-[40px] leading-none font-semibold tracking-[0.18em] tabular-nums">
+    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 pt-1">
+      <span data-selectable aria-live="polite" className="font-mono text-[36px] leading-none font-semibold tracking-[0.16em] tabular-nums">
         {info ? `${info.code.slice(0, 3)} ${info.code.slice(3)}` : "··· ···"}
       </span>
       {info && (
-        <span className="text-muted tabular-nums">
+        <span className="text-xs text-muted tabular-nums">
           New code in {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}
         </span>
       )}
@@ -241,7 +259,7 @@ function Code({ info }: { info: PairingInfo | null }) {
 function Step({ n, children }: { n: number; children: ReactNode }) {
   return (
     <li className="flex gap-3">
-      <span className="w-3 shrink-0 font-semibold tabular-nums">{n}</span>
+      <span className="w-3 shrink-0 leading-7 font-semibold tabular-nums">{n}</span>
       <div className="min-w-0 flex-1">{children}</div>
     </li>
   );
@@ -249,7 +267,7 @@ function Step({ n, children }: { n: number; children: ReactNode }) {
 
 function TextLink({ onClick, children }: { onClick: () => void; children: ReactNode }) {
   return (
-    <button type="button" className="w-fit text-accent hover:underline" onClick={onClick}>
+    <button type="button" className="w-fit text-fg hover:underline" onClick={onClick}>
       {children}
     </button>
   );
@@ -261,7 +279,7 @@ function QrCode({ text }: { text: string }) {
     <div
       role="img"
       aria-label={`QR code for ${hostOf(text)}`}
-      className="size-[168px] shrink-0 rounded-ui-sm bg-white p-2 [&>svg]:size-full"
+      className="size-[176px] shrink-0 rounded-ui bg-white p-2.5 [&>svg]:size-full"
       dangerouslySetInnerHTML={qr.data ? { __html: qr.data } : undefined}
     />
   );

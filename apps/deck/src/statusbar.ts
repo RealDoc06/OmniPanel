@@ -131,7 +131,7 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
     barHeight = Math.min(window.innerWidth, window.innerHeight) >= 600 ? 34 : 28;
     bar.style.height = barHeight + "px";
     bar.style.lineHeight = barHeight + "px";
-    bar.style.fontSize = (barHeight >= 34 ? 15 : 13) + "px";
+    bar.style.fontSize = (barHeight >= 34 ? 14 : 12) + "px";
     setVisible(bar, barVisible);
     // The gear's tap area is wider than the bar is tall (fingers); the icon itself stays small.
     const iconSize = barHeight >= 34 ? 20 : 18;
@@ -199,6 +199,7 @@ export function createStatusBar(parent: HTMLElement, actions: StatusBarActions):
       profileEl.textContent = next.profileName;
       pageEl.textContent = next.pageName;
       pageEl.style.color = theme.text;
+      pageEl.style.fontWeight = "600";
       gear.style.color = theme.textMuted;
       gear.style.opacity = barVisible ? "1" : "0.35";
       paintConn();

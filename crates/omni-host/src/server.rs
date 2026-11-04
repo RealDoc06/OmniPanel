@@ -73,7 +73,12 @@ impl Host {
         if let Some(running) = server.running.take() {
             running.stop().await;
         }
-        let status = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+        let bound = match port {
+            // The OS would pick a random port that the shown URLs can't name.
+            0 => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "pick a port from 1 to 65535")),
+            _ => tokio::net::TcpListener::bind(("0.0.0.0", port)).await,
+        };
+        let status = match bound {
             Ok(listener) => {
                 let (stop, mut stopped) = watch::channel(());
                 let app = router(self.clone(), stopped.clone()).into_make_service_with_connect_info::<SocketAddr>();
@@ -234,6 +239,9 @@ async fn asset(uri: Uri, headers: HeaderMap) -> Response {
         .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        // Another site framing a paired deck could trick the user into pressing its buttons.
+        .header(header::X_FRAME_OPTIONS, "DENY")
+        .header(header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'")
         .body(Body::from(file.data.into_owned()))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -241,6 +249,33 @@ async fn asset(uri: Uri, headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn port_zero_is_refused_instead_of_binding_a_random_port() {
+        let host = crate::tests::start_host().await;
+        host.restart_server().await;
+        let mut settings = host.config().settings.clone();
+        settings.port = 0;
+        host.set_settings(settings).unwrap();
+        let server = loop {
+            let server = host.runtime().server;
+            if !server.running {
+                break server;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(server.error.unwrap().contains("pick a port"));
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deck_pages_refuse_framing() {
+        let response = asset(Uri::from_static("/"), HeaderMap::new()).await;
+        // Without `pnpm build:deck` there is no page to protect.
+        if response.status() == StatusCode::OK {
+            assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+        }
+    }
 
     #[test]
     fn only_this_machine_names_pass() {

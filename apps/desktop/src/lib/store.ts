@@ -14,7 +14,7 @@ import type {
   Theme,
   VoicePreset,
 } from "@omni/protocol";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { create } from "zustand";
 import { api, imageUrl, onHostEvent } from "./backend";
 import { createSaver, drainSavers, emptyPatch, quitAfterFlush, rebase, settlePatch, type SettingsPatch, type SettingsSection } from "./saver";
@@ -24,11 +24,11 @@ import { upsert } from "./util";
 
 export type { SettingsSection };
 
-export type Screen = "decks" | "profiles" | "audio" | "voice" | "settings" | "log";
+export type Screen = "decks" | "profiles" | "sound" | "settings" | "log";
 
 export interface AppStore extends AppState {
   screen: Screen;
-  /** Section to scroll to after navigating (e.g. "ai" in Settings). */
+  /** Section to scroll to after navigating: the element with id `${screen}-${anchor}` (e.g. "ai" in Settings). */
   anchor: string | null;
   logs: LogEntry[];
   /** Warnings and errors logged since the Activity log was last open. */
@@ -202,6 +202,29 @@ export function unpairDevice(id: string) {
 
 export function navigate(screen: Screen, anchor: string | null = null) {
   useApp.setState((s) => ({ screen, anchor, unreadErrors: screen === "log" ? 0 : s.unreadErrors }));
+}
+
+/**
+ * Scrolls to the section `navigate(screen, anchor)` asked for, once the screen is mounted.
+ * Content above it can still be loading (the mixer above the voice section), so the scroll
+ * follows size changes of the scrolling content for a moment, then stops.
+ */
+export function useAnchor(screen: Screen) {
+  const anchor = useApp((s) => s.anchor);
+  useEffect(() => {
+    const el = anchor ? document.getElementById(`${screen}-${anchor}`) : null;
+    if (!el?.parentElement) return;
+    const scroll = () => el.scrollIntoView({ block: "start" });
+    scroll();
+    // The scroll container keeps its size; its sections are what grow as they load.
+    const observer = new ResizeObserver(scroll);
+    for (const section of el.parentElement.children) observer.observe(section);
+    const stop = setTimeout(() => observer.disconnect(), 2000);
+    return () => {
+      clearTimeout(stop);
+      observer.disconnect();
+    };
+  }, [screen, anchor]);
 }
 
 export const clearLogs = () => useApp.setState({ logs: [], unreadErrors: 0 });

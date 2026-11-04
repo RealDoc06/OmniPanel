@@ -119,7 +119,8 @@ impl AiClient {
                 "v1/messages",
                 json!({
                     "model": model, "system": system, "messages": messages,
-                    "max_tokens": if generation { 4096 } else { 8 }, "stream": false,
+                    // Current models think by default, and that counts against max_tokens.
+                    "max_tokens": if generation { 16000 } else { 8 }, "stream": false,
                 }),
             ),
             AiProvider::Ollama => {
@@ -135,7 +136,8 @@ impl AiClient {
             AiProvider::Openrouter | AiProvider::Custom => {
                 let mut body = json!({
                     "model": model, "messages": chat, "stream": false,
-                    "max_tokens": if generation { 4096 } else { 16 },
+                    // Reasoning models count their reasoning against max_tokens.
+                    "max_tokens": if generation { 8192 } else { 16 },
                 });
                 if generation {
                     body["response_format"] = json!({"type": "json_object"});
@@ -143,9 +145,8 @@ impl AiClient {
                 ("chat/completions", body)
             }
         };
-        let send = |body: &Value| {
-            config.request(&self.http, Method::POST, path, None).timeout(Duration::from_secs(60)).json(body)
-        };
+        let limit = Duration::from_secs(if generation { 120 } else { 60 });
+        let send = |body: &Value| config.request(&self.http, Method::POST, path, None).timeout(limit).json(body);
         let response = match self.json(config, send(&body)).await {
             Err(AiError::Provider { status, ref message })
                 if generation

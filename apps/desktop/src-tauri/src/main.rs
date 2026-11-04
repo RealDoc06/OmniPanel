@@ -26,6 +26,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 struct QuitState {
     requested: AtomicBool,
     ready: AtomicBool,
+    /// No tray to come back from, so closing the window quits.
+    no_tray: AtomicBool,
 }
 
 fn main() {
@@ -35,6 +37,12 @@ fn main() {
                 .unwrap_or_else(|_| "warn,omni=info,omnipanel=info".into()),
         )
         .init();
+    // GTK aborts the app without a display (SSH, a service started before login).
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("OmniPanel needs a graphical session: neither DISPLAY nor WAYLAND_DISPLAY is set.");
+        std::process::exit(1);
+    }
     // `args_os`: `args` panics on an argument that isn't valid Unicode.
     let launched_hidden = std::env::args_os().any(|a| a == HIDDEN_ARG);
 
@@ -78,7 +86,9 @@ fn main() {
         RunEvent::ExitRequested { code, api, .. } => {
             if code.is_none() {
                 // Last window closed: keep running in the tray on every platform.
-                api.prevent_exit();
+                if !app.state::<QuitState>().no_tray.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                }
             } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::Relaxed) {
                 // An explicit exit must use the same handshake as the menus.
                 api.prevent_exit();
@@ -127,10 +137,17 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     app.manage(host.clone());
     #[cfg(target_os = "macos")]
     install_app_menu(app)?;
-    tray::create(app)?;
+    // Desktops without a tray still get the app, as a normal window.
+    let tray = tray::create(app);
+    if let Err(e) = &tray {
+        app.state::<QuitState>().no_tray.store(true, Ordering::Relaxed);
+        host.log(omni_core::LogLevel::Warn, format!("No tray icon, so closing the window quits OmniPanel: {e}"));
+    }
     sync_with_config(app, &host);
     forward_events(app.clone(), host.clone());
-    if launched_hidden || host.config().settings.start_hidden {
+    #[cfg(unix)]
+    quit_on_signal(app.clone());
+    if tray.is_ok() && (launched_hidden || host.config().settings.start_hidden) {
         window::set_dock_visible(app, false);
     } else {
         window::show(app);
@@ -157,6 +174,29 @@ fn forward_events(app: AppHandle, host: Host) {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+        }
+    });
+}
+
+/// Logging out and `kill` end the app through the same handshake as Quit, so
+/// the UI saves pending edits and the engine closes decks and audio. A second
+/// signal exits at once, in case that handshake is stuck.
+#[cfg(unix)]
+fn quit_on_signal(app: AppHandle) {
+    use tokio::signal::unix::{SignalKind, signal};
+    tauri::async_runtime::spawn(async move {
+        let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
+            return;
+        };
+        for signals in 0.. {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+            if signals > 0 {
+                std::process::exit(1);
+            }
+            request_quit(&app);
         }
     });
 }

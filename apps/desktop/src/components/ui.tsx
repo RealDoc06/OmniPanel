@@ -1,5 +1,5 @@
 // Form and layout primitives. Flat and dense: hairline borders, no card chrome.
-import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import type { IconName } from "../lib/icons";
 import { isHexColor } from "../lib/theme";
 import { clamp, cx } from "../lib/util";
@@ -42,7 +42,7 @@ export function Button({ variant = "default", size = "md", icon, className, chil
   );
 }
 
-interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+interface IconButtonProps extends ComponentProps<"button"> {
   icon: IconName;
   /** Accessible name, also shown as tooltip. */
   label: string;
@@ -284,13 +284,13 @@ export function Switch({
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cx(
-        "relative h-[18px] w-[30px] shrink-0 rounded-full border disabled:opacity-40",
+        "relative h-4 w-7 shrink-0 rounded-full border disabled:opacity-40",
         checked ? "border-accent bg-accent" : "border-line bg-hover",
       )}
     >
       <span
         className={cx(
-          "absolute top-[1px] size-[14px] rounded-full",
+          "absolute top-[1px] size-3 rounded-full",
           checked ? "left-[13px] bg-on-accent" : "left-[1px] bg-muted",
         )}
       />
@@ -366,7 +366,7 @@ export function ColorField({
         aria-label={label}
         value={isHexColor(shown) ? shown : "#000000"}
         onChange={(e) => onChange(e.target.value)}
-        className="h-7 w-9 shrink-0 rounded-ui-sm"
+        className="h-7 w-8 shrink-0 rounded-ui-sm"
       />
       <input
         type="text"
@@ -403,7 +403,7 @@ export function Segmented<T extends string>({
   label: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex h-8 w-fit shrink-0 rounded-ui-sm border border-line p-0.5">
+    <div role="radiogroup" aria-label={label} className="inline-flex h-7 w-fit shrink-0 rounded-ui-sm border border-line p-0.5">
       {options.map((o) => (
         <button
           key={o.value}
@@ -443,12 +443,12 @@ export function Field({
   compact?: boolean;
 }) {
   return (
-    <div className={cx("grid items-start gap-x-3 py-1", compact ? "grid-cols-[88px_minmax(0,1fr)] @max-[320px]:grid-cols-1" : "grid-cols-[200px_minmax(0,1fr)]")}>
-      <label htmlFor={htmlFor} className="flex min-h-8 items-center leading-tight text-fg">
+    <div className={cx("grid items-start gap-x-4 py-0.5", compact ? "grid-cols-[84px_minmax(0,1fr)] @max-[320px]:grid-cols-1" : "grid-cols-[160px_minmax(0,1fr)]")}>
+      <label htmlFor={htmlFor} className="flex min-h-7 items-center leading-tight text-muted">
         {label}
       </label>
       <div className="min-w-0">
-        <div className="grid min-h-8 grid-cols-[minmax(0,1fr)] items-center">{children}</div>
+        <div className="grid min-h-7 grid-cols-[minmax(0,1fr)] items-center">{children}</div>
         {hint && <div className="mt-1 text-xs text-muted">{hint}</div>}
       </div>
     </div>
@@ -457,20 +457,35 @@ export function Field({
 
 export function Section({ title, actions, children, id }: { title: string; actions?: ReactNode; children: ReactNode; id?: string }) {
   return (
-    <section id={id} className="border-b border-line px-6 py-4">
-      <div className="mb-2 flex min-h-7 items-center gap-2">
-        <h2 className="text-[13px] font-semibold">{title}</h2>
-        <div className="ml-auto flex items-center gap-1.5">{actions}</div>
+    <section id={id} className="border-b border-line px-7 py-5">
+      <div className="mb-3 flex min-h-7 items-center gap-2">
+        <h2 className="text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
+        <div className="ml-auto flex items-center gap-2">{actions}</div>
       </div>
       {children}
     </section>
   );
 }
 
+/** Collapsible inspector group: bold title row with a chevron, hairline below. `padded: false`
+ * lets the content manage its own horizontal padding (the action picker's sticky search). */
+export function Group({ title, children, open = true, aside, padded = true }: { title: string; children: ReactNode; open?: boolean; aside?: ReactNode; padded?: boolean }) {
+  return (
+    <details open={open} className="group border-b border-line">
+      <summary className="flex h-10 items-center gap-1.5 px-5 font-semibold hover:bg-hover">
+        {title}
+        <span className="ml-auto text-xs font-normal text-muted">{aside}</span>
+        <I name="chevron-down" className="size-3.5 text-muted group-open:rotate-180" />
+      </summary>
+      <div className={cx("flex flex-col pb-3", padded && "px-5")}>{children}</div>
+    </details>
+  );
+}
+
 export function ScreenHeader({ title, children }: { title: string; children?: ReactNode }) {
   return (
-    <header data-tauri-drag-region className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-6">
-      <h1 className="text-[15px] font-semibold">{title}</h1>
+    <header data-tauri-drag-region className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-7">
+      <h1 className="text-[16px] font-semibold tracking-[-0.01em]">{title}</h1>
       <div className="ml-auto flex items-center gap-2">{children}</div>
     </header>
   );
@@ -478,9 +493,9 @@ export function ScreenHeader({ title, children }: { title: string; children?: Re
 
 export function EmptyState({ icon, title, children }: { icon: IconName; title: string; children?: ReactNode }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
-      <I name={icon} className="size-7 text-muted" />
-      <p className="max-w-sm text-fg">{title}</p>
+    <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
+      <I name={icon} className="size-6 text-muted" />
+      <p className="max-w-sm text-[15px] text-fg">{title}</p>
       {children}
     </div>
   );
@@ -526,9 +541,9 @@ export function Disclosure({
 }) {
   return (
     <details open={defaultOpen} className="border-t border-line">
-      <summary className="flex min-h-8 items-center gap-1.5 hover:bg-hover">
+      <summary className="flex min-h-8 items-center gap-1.5 text-muted hover:text-fg">
         {/* Rotates only for its own <details>, so nested disclosures don't follow an open parent. */}
-        <I name="chevron-right" className="size-3.5 shrink-0 text-muted [[open]>summary>&]:rotate-90" />
+        <I name="chevron-right" className="size-3.5 shrink-0 [[open]>summary>&]:rotate-90" />
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {aside && <span className="shrink-0 text-xs text-muted">{aside}</span>}
       </summary>
@@ -577,7 +592,7 @@ export function Modal({
     >
       <div className="flex max-h-[calc(100vh-50px)] flex-col">
         <div className="flex h-11 shrink-0 items-center border-b border-line pr-2 pl-4">
-          <h2 className="text-[13px] font-semibold">{title}</h2>
+          <h2 className="text-[14px] font-semibold">{title}</h2>
           <IconButton icon="x" label="Close" className="ml-auto" onClick={onClose} />
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>

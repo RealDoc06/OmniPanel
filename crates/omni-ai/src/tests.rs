@@ -280,7 +280,7 @@ async fn generation_wire_format_for_every_provider() {
                 (received.body["instructions"].as_str().unwrap(), &received.body["input"])
             }
             AiProvider::Anthropic => {
-                assert_eq!(received.body["max_tokens"], 4096);
+                assert_eq!(received.body["max_tokens"], 16000);
                 (received.body["system"].as_str().unwrap(), &received.body["messages"])
             }
             _ => {

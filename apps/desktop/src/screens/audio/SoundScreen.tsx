@@ -1,24 +1,30 @@
-// Volume screen: computer sound, microphone and per-app mixer.
+// Sound screen: the mixer (computer sound, microphone, per-app volume) followed by the
+// voice changer section (`sound-voice` anchor).
 import type { AppAudio, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
 import { useRef, useState } from "react";
 import { I } from "../../components/Icon";
-import { Button, IconButton, Notice, ScreenHeader } from "../../components/ui";
+import { Button, IconButton, Notice, ScreenHeader, Section } from "../../components/ui";
 import type { IconName } from "../../lib/icons";
 import { api } from "../../lib/backend";
 import { usePolling, useThrottled } from "../../lib/hooks";
-import { run, useIsMac } from "../../lib/store";
+import { run, useAnchor, useIsMac } from "../../lib/store";
 import { toastError } from "../../lib/toast";
 import { cx, errorMessage } from "../../lib/util";
+import { VoiceChangerSection } from "./VoiceChanger";
 
 /** macOS privacy pane for "Screen & System Audio Recording", which per-app volume needs. */
 const AUDIO_PERMISSION_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
-export function AudioScreen() {
+export function SoundScreen() {
+  useAnchor("sound");
   return (
     <>
-      <ScreenHeader title="Volume" />
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        <Mixer />
+      <ScreenHeader title="Sound" />
+      <div className="flex-1 overflow-y-auto">
+        <Section title="Volume" id="sound-volume">
+          <Mixer />
+        </Section>
+        <VoiceChangerSection />
       </div>
     </>
   );
@@ -98,9 +104,7 @@ function Mixer() {
           <div className="my-2 border-t border-line" />
           {note && (
             <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-              <Notice tone="warn">
-                {note}
-              </Notice>
+              <Notice tone="warn">{note}</Notice>
               {needsPermission && (
                 <Button size="sm" onClick={() => void run(api.runAction({ type: "open", target: AUDIO_PERMISSION_PANE }))}>
                   Open System Settings
@@ -109,7 +113,7 @@ function Mixer() {
             </div>
           )}
           {mixer.apps.length === 0 ? (
-            <p className="py-2">Apps show up here while they play sound.</p>
+            <p className="py-2 text-muted">Apps show up here while they play sound.</p>
           ) : (
             mixer.apps.map((app) => row({ type: "app", app: app.id }, app.name, "app-window", app, app))
           )}
@@ -119,6 +123,7 @@ function Mixer() {
   );
 }
 
+/** One line: mute toggle (doubles as the row's icon), name, slider, percentage. */
 function MixerRow({
   name,
   icon,
@@ -136,23 +141,28 @@ function MixerRow({
   onVolume: (value: number) => void;
   onMute: (muted: boolean) => void;
 }) {
+  const muteIcon: IconName = icon === "mic" ? (state.muted ? "mic-off" : "mic") : state.muted ? "volume-x" : icon;
   return (
     <div
-      className={cx("flex h-10 items-center gap-3", disabled && "opacity-40")}
+      className={cx("flex h-8 items-center gap-3", disabled && "opacity-40")}
       title={disabled ? "App sliders and mute controls are unavailable." : undefined}
     >
-      <I name={icon} className="size-4 text-muted" />
-      <span className="flex w-44 min-w-0 items-baseline gap-2">
-        <span className="truncate">{name}</span>
-        {playing && <span className="shrink-0 text-xs text-muted">playing</span>}
-      </span>
       <IconButton
-        icon={icon === "mic" ? (state.muted ? "mic-off" : "mic") : (state.muted ? "volume-x" : "volume-2")}
+        icon={muteIcon}
         label={state.muted ? `Unmute ${name}` : `Mute ${name}`}
         tone={state.muted ? "danger" : "default"}
         disabled={disabled}
         onClick={() => onMute(!state.muted)}
+        className={cx(!state.muted && "text-muted")}
       />
+      <span className="flex w-44 min-w-0 items-baseline gap-2">
+        <span className="truncate">{name}</span>
+        {playing && (
+          <span role="img" aria-label="Playing" title="Playing" className="shrink-0 text-muted">
+            <I name="activity" className="inline size-3 align-[-2px]" />
+          </span>
+        )}
+      </span>
       <input
         type="range"
         disabled={disabled}
@@ -162,7 +172,7 @@ function MixerRow({
         step={0.01}
         value={state.volume}
         onChange={(e) => onVolume(Number(e.target.value))}
-        className={cx("h-4 max-w-[420px] min-w-0 flex-1", state.muted && "opacity-40")}
+        className={cx("max-w-[420px] min-w-0 flex-1", state.muted && "opacity-40")}
       />
       <span className="w-10 text-right text-xs text-muted tabular-nums">{Math.round(state.volume * 100)}%</span>
     </div>

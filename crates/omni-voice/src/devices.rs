@@ -207,6 +207,7 @@ pub(crate) mod linux {
     //! opens the sink by name, no ALSA routing tricks or helper processes.
 
     use std::process::Command;
+    use std::time::Duration;
 
     use crate::{Result, VoiceError};
 
@@ -241,7 +242,13 @@ pub(crate) mod linux {
     }
 
     fn pactl(args: &[&str]) -> Result<String> {
-        let out = Command::new("pactl").args(args).output().map_err(|e| {
+        let mut command = Command::new("pactl");
+        command.args(args);
+        // pactl waits forever on a stuck sound server.
+        let out = omni_core::proc::output_within(&mut command, Duration::from_secs(10)).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                return VoiceError::Backend("the sound server isn't responding (pactl timed out)".into());
+            }
             VoiceError::Unsupported(format!("pactl not available ({e}); install pulseaudio-utils (or pipewire-pulse)"))
         })?;
         if !out.status.success() {

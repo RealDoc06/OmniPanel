@@ -9,6 +9,7 @@ pub mod ai;
 pub mod api;
 pub mod defaults;
 pub mod model;
+pub mod proc;
 pub mod protocol;
 pub mod runtime;
 pub mod store;

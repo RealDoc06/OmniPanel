@@ -21,8 +21,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    // WebView2 on Windows, WebKit elsewhere. Both support top-level await.
-    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari15",
+    // WebView2 on Windows, WebKit elsewhere. Tailwind 4 needs Safari 16.4 / Chrome 111 (and the
+    // UI uses color-mix() and container queries), so nothing older is supported anyway.
+    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome111" : "safari16.4",
     minify: debug ? false : undefined,
     sourcemap: debug,
     chunkSizeWarningLimit: 1200,

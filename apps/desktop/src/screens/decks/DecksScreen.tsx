@@ -1,12 +1,14 @@
-// Devices: the connect panel (open by default while there are none), then one row per
-// paired device with its connection, the layout it shows, Edit buttons, Options and Remove.
+// Devices. First run (no devices): the connect panel fills the screen. Otherwise one row per
+// paired device (connection, name, the layout it shows); clicking a row opens its options,
+// Edit buttons and Remove. While the connect panel is closed, a quiet line under the list
+// offers to connect another.
 import type { DeckSession, Device } from "@omni/protocol";
-import { useEffect, useId, useState } from "react";
-import { Button, EmptyState, Notice, Range, ScreenHeader, Select, StatusDot, Switch, TextInput } from "../../components/ui";
+import { useEffect, useId, useState, type MouseEvent } from "react";
+import { Button, IconButton, Notice, Range, ScreenHeader, Select, StatusDot, Switch, TextInput } from "../../components/ui";
 import { confirm } from "../../lib/confirm";
 import { useNow } from "../../lib/hooks";
-import { navigate, saveDevice, unpairDevice, useApp, useProfiles, useRuntime } from "../../lib/store";
-import { relativeTime } from "../../lib/util";
+import { navigate, saveDevice, unpairDevice, useAnchor, useApp, useProfiles, useRuntime } from "../../lib/store";
+import { cx, relativeTime } from "../../lib/util";
 import { createProfile, openProfile } from "../profiles/editor";
 import { ConnectPanel } from "./ConnectPanel";
 
@@ -17,28 +19,26 @@ export function DecksScreen() {
   const devices = useApp((s) => s.config.devices);
   const runtime = useRuntime();
   const lastPairedId = useApp((s) => s.lastPaired?.id);
-  const [connecting, setConnecting] = useState(devices.length === 0);
-  const [optionsFor, setOptionsFor] = useState<string | null>(null);
+  const anchor = useApp((s) => s.anchor);
+  const [connecting, setConnecting] = useState(anchor === "connect");
+  const [openId, setOpenId] = useState<string | null>(null);
+  useAnchor("decks");
+  const firstRun = devices.length === 0;
 
   // "Connected. It shows …" is only for the device that connected while Devices was open.
   useEffect(() => () => useApp.setState({ lastPaired: null }), []);
 
-  const connect = (
-    <Button variant="primary" icon="plus" onClick={() => setConnecting(true)}>
-      Connect a device
-    </Button>
-  );
   return (
     <>
-      <ScreenHeader title="Devices">{!connecting && connect}</ScreenHeader>
-      <div className="flex-1 overflow-y-auto">
+      <ScreenHeader title="Devices" />
+      <div className="flex flex-1 flex-col overflow-y-auto">
         {runtime.server.error && (
-          <div className="px-6 pt-4">
+          <div className="px-7 pt-4">
             <Notice tone="error">Devices can't connect: {runtime.server.error}</Notice>
           </div>
         )}
-        {connecting && <ConnectPanel onClose={() => setConnecting(false)} />}
-        {devices.length > 0 ? (
+        {(firstRun || connecting) && <ConnectPanel hero={firstRun} onClose={firstRun ? undefined : () => setConnecting(false)} />}
+        {devices.length > 0 && (
           <ul>
             {devices.map((device) => (
               <DeviceRow
@@ -46,35 +46,39 @@ export function DecksScreen() {
                 device={device}
                 session={runtime.sessions.find((s) => s.deviceId === device.id)}
                 justConnected={device.id === lastPairedId}
-                optionsOpen={optionsFor === device.id}
-                onToggleOptions={() => setOptionsFor((id) => (id === device.id ? null : device.id))}
+                open={openId === device.id}
+                onToggle={() => setOpenId((id) => (id === device.id ? null : device.id))}
               />
             ))}
           </ul>
-        ) : (
-          !connecting && (
-            <EmptyState icon="tablet-smartphone" title="No devices yet. Any phone, tablet or browser on the same Wi-Fi can be one.">
-              {connect}
-            </EmptyState>
-          )
+        )}
+        {!firstRun && !connecting && (
+          <p className="px-7 py-4 text-muted">
+            Any phone, tablet or browser on this Wi-Fi can be a deck.{" "}
+            <button type="button" className="text-fg hover:underline" onClick={() => setConnecting(true)}>
+              Connect another device
+            </button>
+          </p>
         )}
       </div>
     </>
   );
 }
 
+const isInteractive = (target: EventTarget) => target instanceof Element && target.closest("input, select, button, label, a") !== null;
+
 function DeviceRow({
   device,
   session,
   justConnected,
-  optionsOpen,
-  onToggleOptions,
+  open,
+  onToggle,
 }: {
   device: Device;
   session: DeckSession | undefined;
   justConnected: boolean;
-  optionsOpen: boolean;
-  onToggleOptions: () => void;
+  open: boolean;
+  onToggle: () => void;
 }) {
   const profiles = useProfiles();
   const optionsId = useId();
@@ -112,57 +116,56 @@ function DeviceRow({
   };
 
   const status = session
-    ? `Connected ${session.transport === "usb" ? "by USB cable" : "over Wi-Fi"}${device.platform ? ` · ${device.platform}` : ""}`
+    ? `Connected ${session.transport === "usb" ? "by USB" : "over Wi-Fi"}${device.platform ? ` · ${device.platform}` : ""}`
     : `Not connected · last seen ${relativeTime(device.lastSeen, now)}`;
 
+  // The whole row toggles the options, except its own controls.
+  const onRowClick = (e: MouseEvent<HTMLDivElement>) => {
+    if (!isInteractive(e.target)) onToggle();
+  };
+
   return (
-    <li className="border-b border-line px-6 py-3">
-      <div className="flex flex-wrap items-center gap-3">
+    <li className="border-b border-line">
+      <div className={cx("flex min-h-14 flex-wrap items-center gap-x-4 gap-y-1 py-2 pr-4 pl-7", !open && "hover:bg-surface")} onClick={onRowClick}>
         <StatusDot tone={session ? "ok" : "off"} label={session ? "Connected" : "Not connected"} />
-        <TextInput
-          aria-label="Device name"
-          value={device.name}
-          onChange={(e) => update({ name: e.target.value }, 500)}
-          onBlur={(e) => !e.target.value.trim() && update({ name: "Device" })}
-          className="h-7 w-36 shrink-0 border-transparent bg-transparent px-1 text-[14px] font-semibold hover:border-line focus:border-line"
-        />
-        <span title={session ? session.address : device.platform} className="min-w-56 flex-1 text-muted">
-          {status}
-        </span>
-        <label className="flex max-w-full items-center gap-3">
-          <span className="shrink-0">Shows</span>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <TextInput
+            aria-label="Device name"
+            value={device.name}
+            onChange={(e) => update({ name: e.target.value }, 500)}
+            onBlur={(e) => !e.target.value.trim() && update({ name: "Device" })}
+            className="-ml-1.5 h-6 w-48 border-transparent px-1.5 text-[14px] font-semibold hover:border-line focus:border-line"
+          />
+          <span title={session ? session.address : device.platform} className="truncate text-xs text-muted">
+            {status}
+          </span>
+        </div>
+        <label className="flex items-center gap-2 text-muted">
+          Shows
           <Select
             ariaLabel="Shows"
-            className="h-7 w-64 min-w-0"
+            className="w-52"
             value={own?.id ?? ""}
             options={[
-              { value: "", label: `Same as new devices (${fallback?.name ?? "none"})` },
+              { value: "", label: fallback ? `${fallback.name} (for new devices)` : "Default" },
               ...profiles.map((p) => ({ value: p.id, label: p.name })),
               { value: NEW_LAYOUT, label: "New layout…" },
             ]}
             onChange={onShows}
           />
         </label>
-        <Button size="sm" disabled={!shown} onClick={editButtons}>
-          Edit buttons
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          icon={optionsOpen ? "chevron-down" : "chevron-right"}
-          aria-expanded={optionsOpen}
+        <IconButton
+          icon="chevron-down"
+          label={open ? "Hide options" : "Show options"}
+          aria-expanded={open}
           aria-controls={optionsId}
-          onClick={onToggleOptions}
-        >
-          Options
-        </Button>
-        <Button size="sm" variant="ghost" className="text-danger" onClick={remove}>
-          Remove
-        </Button>
+          className={cx(open && "rotate-180")}
+          onClick={onToggle}
+        />
       </div>
-      {justConnected && shown && <p className="mt-1 pl-5">Connected. It shows the {shown.name} layout.</p>}
-      <div id={optionsId} hidden={!optionsOpen}>
-        <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-2 pl-5">
+      {justConnected && shown && <p className="px-7 pb-3 text-success">Connected. It shows the {shown.name} layout.</p>}
+      <div id={optionsId} hidden={!open} className="pr-4 pb-4 pl-[52px]">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
           <Toggle label="Vibrate on press" checked={device.deck.haptics} onChange={(haptics) => deck({ haptics })} />
           <Toggle label="Keep screen on" checked={device.deck.keepAwake} onChange={(keepAwake) => deck({ keepAwake })} />
           <Toggle label="Show top bar" checked={device.deck.showStatusBar} onChange={(showStatusBar) => deck({ showStatusBar })} />
@@ -171,7 +174,7 @@ function DeviceRow({
             Dim screen
             <Range
               label="Dim screen"
-              className="w-44"
+              className="w-40"
               min={0}
               max={0.8}
               step={0.05}
@@ -180,6 +183,14 @@ function DeviceRow({
               onChange={(dim) => deck({ dim }, 250)}
             />
           </label>
+        </div>
+        <div className="mt-3 flex gap-2">
+          <Button size="sm" icon="layout-grid" disabled={!shown} onClick={editButtons}>
+            Edit buttons
+          </Button>
+          <Button size="sm" variant="danger" onClick={() => void remove()}>
+            Remove device
+          </Button>
         </div>
       </div>
     </li>

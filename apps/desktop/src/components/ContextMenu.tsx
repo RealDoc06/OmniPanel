@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
 import type { IconName } from "../lib/icons";
 import { I } from "./Icon";
-import { Button, Kbd } from "./ui";
+import { Button, IconButton, Kbd } from "./ui";
 
 export interface MenuItem {
   label: string;
@@ -35,28 +35,26 @@ export function useContextMenu(trigger?: RefObject<HTMLElement | null>) {
   return { open, openAt, close, menu };
 }
 
-/** Text button with a chevron that opens a menu under itself. Pass a function for `items`
- * to build them when the menu opens. */
-export function MenuButton({ label, items }: { label: string; items: MenuItem[] | (() => MenuItem[]) }) {
+/** Button that opens a menu under itself: text with a chevron, or an icon only (`icon`, with
+ * `label` as its accessible name). Pass a function for `items` to build them when the menu opens. */
+export function MenuButton({ label, items, icon }: { label: string; items: MenuItem[] | (() => MenuItem[]); icon?: IconName }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const { openAt, close, menu } = useContextMenu(trigger);
+  const onClick = (e: MouseEvent<HTMLButtonElement>) => {
+    if (menu) return close();
+    const { left, bottom } = e.currentTarget.getBoundingClientRect();
+    openAt(left, bottom + 4, typeof items === "function" ? items() : items);
+  };
   return (
     <>
-      <Button
-        ref={trigger}
-        size="sm"
-        variant="ghost"
-        aria-haspopup="menu"
-        aria-expanded={menu !== null}
-        onClick={(e) => {
-          if (menu) return close();
-          const { left, bottom } = e.currentTarget.getBoundingClientRect();
-          openAt(left, bottom + 4, typeof items === "function" ? items() : items);
-        }}
-      >
-        {label}
-        <I name="chevron-down" className="size-3.5 text-muted" />
-      </Button>
+      {icon ? (
+        <IconButton ref={trigger} icon={icon} label={label} aria-haspopup="menu" aria-expanded={menu !== null} onClick={onClick} />
+      ) : (
+        <Button ref={trigger} size="sm" variant="ghost" aria-haspopup="menu" aria-expanded={menu !== null} onClick={onClick}>
+          {label}
+          <I name="chevron-down" className="size-3.5 text-muted" />
+        </Button>
+      )}
       {menu}
     </>
   );

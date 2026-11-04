@@ -7,7 +7,12 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 
 use crate::window;
 
-pub fn create(app: &AppHandle) -> tauri::Result<()> {
+/// Fails when this desktop can't show one; never panics.
+pub fn create(app: &AppHandle) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if !indicator_library_installed() {
+        anyhow::bail!("install libayatana-appindicator3 to get one");
+    }
     let open = MenuItem::with_id(app, "open", "Open OmniPanel", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit OmniPanel", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
@@ -33,6 +38,25 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     }
     tray.build(app)?;
     Ok(())
+}
+
+/// The tray crate loads this library at runtime and panics when it's missing,
+/// which would abort the app (`panic = "abort"`). Same names it tries.
+#[cfg(target_os = "linux")]
+fn indicator_library_installed() -> bool {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+    const RTLD_LAZY: c_int = 1;
+    unsafe extern "C" {
+        fn dlopen(file: *const c_char, flags: c_int) -> *mut c_void;
+    }
+    let names: [&CStr; 4] = [
+        c"libayatana-appindicator3.so.1",
+        c"libappindicator3.so.1",
+        c"libayatana-appindicator3.so",
+        c"libappindicator3.so",
+    ];
+    // SAFETY: the names are NUL-terminated. The handle stays open, the tray crate uses the same library.
+    names.iter().any(|name| !unsafe { dlopen(name.as_ptr(), RTLD_LAZY) }.is_null())
 }
 
 /// The logo's 3x3 key grid as a 44x44 macOS template image (alpha only).

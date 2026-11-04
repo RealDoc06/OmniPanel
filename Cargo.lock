@@ -3066,7 +3066,7 @@ dependencies = [
 
 [[package]]
 name = "omni-actions"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.23.1",
  "enigo",
@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "omni-ai"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "omni-core",
  "regex",
@@ -3102,7 +3102,7 @@ dependencies = [
 
 [[package]]
 name = "omni-audio"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "block2",
  "libc",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "omni-core"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rand 0.9.5",
  "schemars 1.2.3",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "omni-host"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "omni-voice"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "cpal",
  "futures",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "omnipanel"
-version = "1.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "omni-core",

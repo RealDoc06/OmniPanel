@@ -4,8 +4,7 @@ import { ConfirmHost, Toasts } from "./components/Overlays";
 import { Sidebar, SCREENS } from "./components/Sidebar";
 import { navigate, useApp, useAppTheme, type Screen } from "./lib/store";
 import { applyTheme } from "./lib/theme";
-import { AudioScreen } from "./screens/audio/AudioScreen";
-import { VoiceChangerScreen } from "./screens/audio/VoiceChanger";
+import { SoundScreen } from "./screens/audio/SoundScreen";
 import { DecksScreen } from "./screens/decks/DecksScreen";
 import { LogScreen } from "./screens/log/LogScreen";
 import { ProfilesScreen } from "./screens/profiles/ProfilesScreen";
@@ -16,7 +15,7 @@ export function App() {
   const theme = useAppTheme();
   useLayoutEffect(() => applyTheme(theme), [theme]);
 
-  // Cmd/Ctrl + 1..5 switches between the sidebar screens.
+  // Cmd/Ctrl + 1..4 switches between the sidebar screens.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
@@ -48,10 +47,8 @@ function ScreenView({ screen }: { screen: Screen }) {
       return <DecksScreen />;
     case "profiles":
       return <ProfilesScreen />;
-    case "audio":
-      return <AudioScreen />;
-    case "voice":
-      return <VoiceChangerScreen />;
+    case "sound":
+      return <SoundScreen />;
     case "settings":
       return <SettingsScreen />;
     case "log":

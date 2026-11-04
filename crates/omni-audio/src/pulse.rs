@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -14,6 +15,8 @@ use crate::{AppAudio, AudioCapabilities, AudioError, Backend, Endpoint, Result, 
 
 const NORM: f32 = 65536.0;
 const MISSING: &str = "pactl not found: install pulseaudio-utils (works with PipeWire via pipewire-pulse)";
+/// pactl waits forever on a stuck sound server.
+const PACTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct Platform {
     installed: bool,
@@ -23,8 +26,13 @@ pub(crate) struct Platform {
 
 fn pactl(args: &[&str]) -> Result<String> {
     // C locale: pactl translates its text output.
-    let output = Command::new("pactl").args(args).env("LC_ALL", "C").output().map_err(|e| match e.kind() {
+    let mut command = Command::new("pactl");
+    command.args(args).env("LC_ALL", "C");
+    let output = omni_core::proc::output_within(&mut command, PACTL_TIMEOUT).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => AudioError::Unsupported(MISSING.into()),
+        std::io::ErrorKind::TimedOut => {
+            AudioError::Backend("the sound server isn't responding (pactl timed out)".into())
+        }
         _ => AudioError::Backend(format!("pactl: {e}")),
     })?;
     if !output.status.success() {
