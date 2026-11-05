@@ -1,17 +1,19 @@
-// Left navigation. Arrow keys move between items, Cmd/Ctrl+1..5 jump directly (App.tsx).
-// The footer shows who is connected and, when there are unread warnings or errors, a link to the Activity log.
+// Left navigation: the four screens, with the layouts listed under Buttons once there are
+// several. The Devices row carries a dot while a device is connected. Arrow keys move between
+// items, Cmd/Ctrl+1..4 jump directly (App.tsx). The footer only appears for unread warnings
+// or errors and opens the Activity log.
 import type { KeyboardEvent } from "react";
 import type { IconName } from "../lib/icons";
-import { navigate, useApp, type Screen } from "../lib/store";
+import { navigate, useApp, useProfiles, type Screen } from "../lib/store";
 import { cx } from "../lib/util";
+import { createProfile, openProfile, useEditor } from "../screens/profiles/editor";
 import { I } from "./Icon";
-import { StatusDot } from "./ui";
+import { IconButton, StatusDot } from "./ui";
 
 export const SCREENS: { screen: Screen; label: string; icon: IconName }[] = [
   { screen: "decks", label: "Devices", icon: "tablet-smartphone" },
   { screen: "profiles", label: "Buttons", icon: "layout-grid" },
-  { screen: "audio", label: "Volume", icon: "sliders-horizontal" },
-  { screen: "voice", label: "Voice changer", icon: "audio-waveform" },
+  { screen: "sound", label: "Sound", icon: "sliders-horizontal" },
   { screen: "settings", label: "Settings", icon: "settings" },
 ];
 
@@ -22,6 +24,8 @@ export function Sidebar() {
   // The Activity log is reached from Settings, so Settings stays highlighted there.
   const current = screen === "log" ? "settings" : screen;
   const problems = useApp((s) => s.unreadErrors);
+  // With several layouts listed, the open layout's row is the current page, not "Buttons" itself.
+  const layoutRows = useProfiles().length > 1;
 
   const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -32,72 +36,95 @@ export function Sidebar() {
   };
 
   return (
-    <nav aria-label="Main" onKeyDown={onKeyDown} className="flex w-[188px] shrink-0 flex-col border-r border-line bg-surface">
-      <div data-tauri-drag-region className="flex h-12 items-center gap-2 px-4">
-        <img src="/logo.svg" alt="" className="size-5" draggable={false} />
-        <span className="font-semibold tracking-tight">OmniPanel</span>
+    <nav aria-label="Main" onKeyDown={onKeyDown} className="flex w-[184px] shrink-0 flex-col border-r border-line">
+      <div data-tauri-drag-region className="flex h-12 items-center gap-2 px-5">
+        <img src="/logo.svg" alt="" className="size-[18px]" draggable={false} />
+        <span className="text-[14px] font-semibold tracking-[-0.01em]">OmniPanel</span>
       </div>
-      <ul className="flex flex-1 flex-col gap-px px-2">
+      <ul className="flex flex-1 flex-col gap-px px-3 pt-2">
         {SCREENS.map((item, i) => (
-          <li key={item.screen}>
+          <li key={item.screen} className="relative">
             <button
               type="button"
               data-nav
-              aria-current={current === item.screen ? "page" : undefined}
+              aria-current={current === item.screen && !(item.screen === "profiles" && layoutRows) ? "page" : undefined}
               title={`${item.label} (${MOD}${i + 1})`}
               onClick={() => navigate(item.screen)}
               className={cx(
-                "flex h-8 w-full items-center gap-2.5 rounded-ui-sm px-2.5 text-left",
-                current === item.screen ? "bg-hover text-fg" : "text-muted hover:bg-hover hover:text-fg",
+                "flex h-7 w-full items-center gap-2.5 rounded-ui-sm px-2 text-left",
+                current === item.screen ? "bg-hover text-fg" : "text-muted hover:text-fg",
               )}
             >
               <I name={item.icon} className="size-4" />
               <span className="flex-1 truncate">{item.label}</span>
+              {item.screen === "decks" && <OnlineDot />}
             </button>
+            {item.screen === "profiles" && <Layouts active={current === "profiles"} />}
           </li>
         ))}
       </ul>
-      <div className="m-2 flex flex-col text-xs">
-        <ConnectionStatus />
-        {problems > 0 && (
-          <button
-            type="button"
-            onClick={() => navigate("log")}
-            className="rounded-ui-sm px-2.5 py-1.5 text-left text-danger hover:bg-hover"
-          >
+      {problems > 0 && (
+        <button
+          type="button"
+          onClick={() => navigate("log")}
+          className="m-3 flex h-7 items-center gap-2 rounded-ui-sm px-2 text-left text-xs text-muted hover:bg-hover hover:text-fg"
+        >
+          <StatusDot tone="warn" />
+          <span className="truncate">
             {problems} {problems === 1 ? "problem" : "problems"}
-          </button>
-        )}
-      </div>
+          </span>
+        </button>
+      )}
     </nav>
   );
 }
 
-/** Footer line 1: whether devices can connect, and who is connected. Opens Devices. */
-function ConnectionStatus() {
+/** Green while any device is connected, red when the server can't start. Details live on Devices. */
+function OnlineDot() {
   const server = useApp((s) => s.runtime.server);
-  const sessions = useApp((s) => s.runtime.sessions);
-  const devices = useApp((s) => s.config.devices);
-  // A device can have several sessions (two tabs); count devices, not sessions.
-  const online = new Set(sessions.map((x) => x.deviceId));
-  const only = online.size === 1 ? devices.find((d) => online.has(d.id)) : undefined;
-  const text = server.error
-    ? "Devices can't connect"
-    : !server.running
-      ? "Starting…"
-      : online.size === 0
-        ? "No device connected"
-        : online.size === 1
-          ? `${only?.name || "Device"} connected`
-          : `${online.size} devices connected`;
+  const online = useApp((s) => s.runtime.sessions.length > 0);
+  if (server.error) return <StatusDot tone="error" label="Devices can't connect" />;
+  return online ? <StatusDot tone="ok" label="A device is connected" /> : null;
+}
+
+/** "New layout" on the Buttons row, plus one row per layout while there are several. */
+function Layouts({ active }: { active: boolean }) {
+  const profiles = useProfiles();
+  const openId = useEditor((s) => s.profileId) ?? profiles[0]?.id;
   return (
-    <button
-      type="button"
-      onClick={() => navigate("decks")}
-      className="flex items-center gap-2 rounded-ui-sm px-2.5 py-1.5 text-left text-muted hover:bg-hover"
-    >
-      <StatusDot tone={server.error ? "error" : !server.running ? "warn" : online.size ? "ok" : "off"} />
-      <span className="truncate">{text}</span>
-    </button>
+    <>
+      <IconButton
+        icon="plus"
+        label="New layout"
+        className="absolute top-0 right-0 size-7"
+        onClick={() => {
+          createProfile();
+          navigate("profiles");
+        }}
+      />
+      {profiles.length > 1 && (
+        <ul className="my-0.5 flex flex-col gap-px">
+          {profiles.map((p) => {
+            const open = active && p.id === openId;
+            return (
+              <li key={p.id}>
+                <button
+                  type="button"
+                  data-nav
+                  aria-current={open ? "page" : undefined}
+                  onClick={() => {
+                    openProfile(p.id);
+                    navigate("profiles");
+                  }}
+                  className={cx("flex h-6 w-full items-center rounded-ui-sm pr-2 pl-[34px] text-left", open ? "text-fg" : "text-muted hover:text-fg")}
+                >
+                  <span className="truncate">{p.name}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
   );
 }

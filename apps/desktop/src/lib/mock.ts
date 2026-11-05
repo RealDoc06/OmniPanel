@@ -271,7 +271,9 @@ function initialConfig(): Config {
   };
 }
 
+// `?fresh` starts with no devices paired, like a first launch.
 let config = initialConfig();
+if (new URLSearchParams(location.search).has("fresh")) config = { ...config, devices: [] };
 let pairing: PairingInfo | null = null;
 let pairTimer: ReturnType<typeof setTimeout> | undefined;
 const images = new Map<string, string>();
@@ -312,7 +314,7 @@ function runtime(): RuntimeState {
       urls: [`http://192.168.1.24:${settings.port}`, `http://10.10.10.182:${settings.port}`],
       error: settings.port < 1024 ? `Port ${settings.port} needs admin rights. Pick a port above 1024.` : null,
     },
-    sessions: [
+    sessions: config.devices.length === 0 ? [] : [
       {
         deviceId: "dev-pixel",
         transport: "wifi",

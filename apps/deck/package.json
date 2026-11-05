@@ -1,7 +1,7 @@
 {
   "name": "@omni/deck",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0-alpha.1",
   "type": "module",
   "description": "Deck web client served by the OmniPanel host. Runs on old phones/tablets (ES5 output).",
   "scripts": {

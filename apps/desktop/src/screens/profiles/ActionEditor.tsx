@@ -13,6 +13,7 @@ import {
   Disclosure,
   EnumSelect,
   Field,
+  Group,
   IconButton,
   NumberField,
   Range,
@@ -90,12 +91,11 @@ export function WhatItDoes({ control, onChange }: { control: Control; onChange: 
   };
 
   return (
-    <section className="border-b border-line">
-      <h3 className="flex h-9 items-center px-4 font-semibold">What it does</h3>
+    <Group title="What it does" padded={false}>
       {picking ? (
         <ActionPicker current={control} onPick={pick} onCancel={() => setPicking(false)} />
       ) : (
-        <div className="flex flex-col gap-0.5 px-4 pb-3">
+        <div className="flex flex-col px-5">
           {kind.type === "button" && !kind.action ? (
             <div className="flex items-center gap-2">
               <span>Does nothing yet.</span>
@@ -134,7 +134,7 @@ export function WhatItDoes({ control, onChange }: { control: Control; onChange: 
           )}
         </div>
       )}
-    </section>
+    </Group>
   );
 }
 
@@ -490,7 +490,7 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
       )}
       {!ready && (
         <p className={hintClass}>
-          The voice changer needs a one-time setup. <SetUpLink onClick={() => navigate("voice")}>Set up</SetUpLink>
+          The voice changer needs a one-time setup. <SetUpLink onClick={() => navigate("sound", "voice")}>Set up</SetUpLink>
         </p>
       )}
     </>

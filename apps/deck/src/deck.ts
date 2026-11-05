@@ -209,7 +209,7 @@ export function createDeck(frame: HTMLElement, stage: HTMLElement, events: DeckE
     const width = stage.clientWidth;
     const height = stage.clientHeight;
     if (width < 20 || height < 20) return;
-    gap = clamp(Math.round(Math.min(width / Math.max(1, layout.cols), height / Math.max(1, layout.rows)) * 0.07), 4, 14);
+    gap = clamp(Math.round(Math.min(width / Math.max(1, layout.cols), height / Math.max(1, layout.rows)) * 0.09), 6, 16);
     // DOM (and so Tab) order is reading order: rows top to bottom, then columns.
     const ordered = layout.controls.slice().sort(function (a, b) {
       return a.y - b.y || a.x - b.x;

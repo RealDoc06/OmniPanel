@@ -1,7 +1,7 @@
 {
   "name": "@omni/icons",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0-alpha.1",
   "description": "Lucide icon markup (ISC, see LICENSE-lucide). icons.json: name -> inner SVG for a 24x24 viewBox; tags.json: name -> keywords",
   "exports": { "./icons.json": "./icons.json", "./tags.json": "./tags.json" }
 }

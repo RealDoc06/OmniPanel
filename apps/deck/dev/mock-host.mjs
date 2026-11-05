@@ -26,10 +26,11 @@ const icons = JSON.parse(readFileSync(join(root, "../../../packages/icons/icons.
 
 // ---- layout model -----------------------------------------------------------------------
 
+// Same values as the built-in "midnight" theme (omni_core::defaults), so the mock looks like a real host.
 const theme = {
-  background: "#000000", surface: "#141414", surfaceHover: "#1d1d1d", border: "#262626",
-  text: "#ffffff", textMuted: "#8a8a8a", accent: "#4f8cff", accentText: "#ffffff",
-  success: "#22c55e", warning: "#f59e0b", danger: "#ef4444", button: "#1d1d1d", buttonText: "#ffffff",
+  background: "#000000", surface: "#0b0b0b", surfaceHover: "#161616", border: "#1f1f1f",
+  text: "#ffffff", textMuted: "#8c8c8c", accent: "#4f8cff", accentText: "#ffffff",
+  success: "#22c55e", warning: "#f59e0b", danger: "#ef4444", button: "#121212", buttonText: "#ffffff",
 };
 const settings = { haptics: true, keepAwake: true, dim: 0, showStatusBar: true };
 let pageLimit = Infinity; // /__mock/pages?v=1 pretends the profile has a single page
@@ -158,7 +159,7 @@ function layoutFor(session) {
   return {
     profileId: "demo", profileName: "Streaming", pageId: page.id, pageName: page.name,
     pageIndex: Math.min(session.page, pageLimit - 1), pageCount: Math.min(pages.length, pageLimit),
-    pages: pages.slice(0, pageLimit).map((p) => ({ id: p.id, name: p.name })), rows, cols, theme, radius: 14, settings,
+    pages: pages.slice(0, pageLimit).map((p) => ({ id: p.id, name: p.name })), rows, cols, theme, radius: 10, settings,
     controls: pack(page.controls, cols, rows).map(deckControl),
   };
 }

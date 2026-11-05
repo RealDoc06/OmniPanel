@@ -63,17 +63,15 @@ pub fn sync(app: &AppHandle, host: &Host) {
             .filter(|label| !label.is_empty());
         let button = label.map(|label| format!(" for \"{label}\"")).unwrap_or_default();
         match accelerator.parse::<Shortcut>() {
-            Ok(shortcut) => {
-                match shortcuts.register(shortcut) {
-                    Ok(()) => {
-                        registered.lock().unwrap().insert(shortcut.id(), accelerator.clone());
-                    }
-                    Err(e) => {
-                        tracing::warn!("shortcut {accelerator}: {e}");
-                        host.log(LogLevel::Warn, format!("The keyboard shortcut {display}{button} is used by another app. Choose a different one."));
-                    }
+            Ok(shortcut) => match shortcuts.register(shortcut) {
+                Ok(()) => {
+                    registered.lock().unwrap().insert(shortcut.id(), accelerator.clone());
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("shortcut {accelerator}: {e}");
+                    host.log(LogLevel::Warn, format!("The keyboard shortcut {display}{button} couldn't be set up (another app may be using it). Choose a different one."));
+                }
+            },
             Err(e) => {
                 tracing::warn!("shortcut {accelerator}: {e}");
                 host.log(

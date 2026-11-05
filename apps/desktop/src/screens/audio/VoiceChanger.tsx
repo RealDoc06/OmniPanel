@@ -1,9 +1,10 @@
-// Voice changer screen: status and switch, one-time setup per OS, the voice grid,
-// microphone and monitor rows, level meters, Advanced gains and the voice editor.
+// Voice changer section of the Sound screen: status and switch in the title row, one-time
+// setup per OS, the voice list, microphone and monitor rows, level meters, Advanced gains
+// and the voice editor.
 import type { AudioDeviceInfo, Effect, VoiceLevels, VoiceSettings, VoiceStatus } from "@omni/protocol";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { I } from "../../components/Icon";
-import { Button, Disclosure, Field, Notice, Range, ScreenHeader, Section, Select, Switch } from "../../components/ui";
+import { Button, Disclosure, Field, IconButton, Notice, Range, Section, Select, Switch } from "../../components/ui";
 import { EFFECT_LABELS } from "../../lib/actions";
 import { api } from "../../lib/backend";
 import { usePolling, useResource } from "../../lib/hooks";
@@ -67,7 +68,7 @@ function voiceState(voice: VoiceSettings, status: VoiceStatus): keyof typeof STA
 
 const openLink = (url: string) => void run(api.runAction({ type: "open", target: url }));
 
-export function VoiceChangerScreen() {
+export function VoiceChangerSection() {
   const { voice } = useSettings();
   const status = useRuntime().voice;
   const presets = useVoicePresets();
@@ -88,124 +89,114 @@ export function VoiceChangerScreen() {
   };
 
   return (
-    <>
-      <ScreenHeader title="Voice changer">
-        <span className={cx("text-xs", STATE_TONES[state])}>{state}</span>
-        <Switch label="Voice changer" checked={voice.enabled} onChange={(enabled) => set({ enabled })} />
-      </ScreenHeader>
-      <div className="flex-1 overflow-y-auto">
-        <p className="px-6 pt-4">Changes how your microphone sounds in calls and recordings.</p>
-        {state === "Stopped" && (
-          <div className="px-6 pt-4">
-            <Notice tone="error">The voice changer stopped{status.error ? `: ${status.error}` : "."}</Notice>
-          </div>
-        )}
-        {state === "On" && status.error && (
-          <div className="px-6 pt-4">
-            <Notice tone="warn">Hear yourself is unavailable: {status.error.replace(/^monitor unavailable:\s*/, "")}</Notice>
-          </div>
-        )}
+    <Section
+      title="Voice changer"
+      id="sound-voice"
+      actions={
+        <>
+          <span className={cx("text-xs", STATE_TONES[state])}>{state}</span>
+          <Switch label="Voice changer" checked={voice.enabled} onChange={(enabled) => set({ enabled })} />
+        </>
+      }
+    >
+      <p className="mb-2 text-muted">Changes how your microphone sounds in calls and recordings.</p>
+      {state === "Stopped" && (
+        <div className="py-1">
+          <Notice tone="error">The voice changer stopped{status.error ? `: ${status.error}` : "."}</Notice>
+        </div>
+      )}
+      {state === "On" && status.error && (
+        <div className="py-1">
+          <Notice tone="warn">Hear yourself is unavailable: {status.error.replace(/^monitor unavailable:\s*/, "")}</Notice>
+        </div>
+      )}
 
-        <Setup voice={voice} status={status} outputs={devices.data?.outputs} reload={devices.reload} />
+      <Setup voice={voice} status={status} outputs={devices.data?.outputs} reload={devices.reload} />
 
-        <Section title="Voices">
-          <div role="radiogroup" aria-label="Voice" className="grid grid-cols-[repeat(auto-fill,minmax(132px,1fr))] gap-x-2">
-            {presets.map((p) => {
-              const on = p.id === voice.presetId;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={on}
-                  title={p.effects.map((e) => EFFECT_LABELS[e.type]).join(", ") || "No effects"}
-                  onClick={() => set({ presetId: p.id })}
-                  className={cx("flex h-8 min-w-0 items-center gap-1.5 rounded-ui-sm px-2 text-left hover:bg-hover", on && "font-medium text-accent")}
-                >
-                  <span className="w-3.5 shrink-0">{on && <I name="check" className="size-3.5" />}</span>
-                  <span className="truncate">{p.name}</span>
-                </button>
-              );
-            })}
-            <Button variant="ghost" icon="plus" className="h-8 justify-self-stretch justify-start px-2" onClick={() => addVoice("My voice", [])}>
-              New voice
-            </Button>
-          </div>
-        </Section>
+      <Field label="Voice" hint={selected && (selected.effects.map((e) => EFFECT_LABELS[e.type]).join(", ") || "No effects: your voice is unchanged.")}>
+        <div className="flex items-center gap-2">
+          <Select
+            ariaLabel="Voice"
+            className="max-w-xs"
+            value={voice.presetId}
+            options={presets.map((p) => ({ value: p.id, label: p.name }))}
+            onChange={(presetId) => set({ presetId })}
+          />
+          <Button size="sm" variant="ghost" icon="plus" className="text-muted hover:text-fg" onClick={() => addVoice("My voice", [])}>
+            New voice
+          </Button>
+        </div>
+      </Field>
+      <Field label="Your microphone">
+        <Select
+          ariaLabel="Your microphone"
+          className="max-w-xs"
+          value={voice.inputDevice ?? ""}
+          options={[{ value: "", label: "System default" }, ...deviceOptions(devices.data?.inputs ?? [])]}
+          onChange={(id) => set({ inputDevice: id || null })}
+        />
+      </Field>
+      <Field label="Hear yourself">
+        <div className="flex items-center gap-3">
+          <Switch label="Hear yourself" checked={voice.monitor} onChange={(monitor) => set({ monitor })} />
+          <Select
+            ariaLabel="Hear yourself on"
+            className="max-w-xs"
+            value={voice.monitorDevice ?? ""}
+            options={[{ value: "", label: "System default" }, ...deviceOptions(devices.data?.outputs ?? [])]}
+            onChange={(id) => set({ monitorDevice: id || null })}
+          />
+        </div>
+      </Field>
+      {voice.enabled && status.running && <Meters />}
+      {devices.error && <Notice tone="error">{devices.error}</Notice>}
 
-        <div className="px-6 py-4">
-          <Field label="Your microphone">
-            <Select
-              ariaLabel="Your microphone"
+      <div className="mt-2">
+        <Disclosure label="Advanced">
+          <Field label="Mic boost">
+            <Range label="Mic boost" className="max-w-xs" min={-24} max={24} step={1} value={voice.inputGainDb} format={db} onChange={(inputGainDb) => set({ inputGainDb }, 150)} />
+          </Field>
+          <Field label="Changed voice volume">
+            <Range
+              label="Changed voice volume"
               className="max-w-xs"
-              value={voice.inputDevice ?? ""}
-              options={[{ value: "", label: "System default" }, ...deviceOptions(devices.data?.inputs ?? [])]}
-              onChange={(id) => set({ inputDevice: id || null })}
+              min={-24}
+              max={24}
+              step={1}
+              value={voice.outputGainDb}
+              format={db}
+              onChange={(outputGainDb) => set({ outputGainDb }, 150)}
             />
           </Field>
-          <Field label="Hear yourself">
-            <div className="flex items-center gap-3">
-              <Switch label="Hear yourself" checked={voice.monitor} onChange={(monitor) => set({ monitor })} />
-              <Select
-                ariaLabel="Hear yourself on"
-                className="max-w-xs"
-                value={voice.monitorDevice ?? ""}
-                options={[{ value: "", label: "System default" }, ...deviceOptions(devices.data?.outputs ?? [])]}
-                onChange={(id) => set({ monitorDevice: id || null })}
-              />
-            </div>
+          <Field label="Cut background noise">
+            <Switch label="Cut background noise" checked={voice.noiseGate} onChange={(noiseGate) => set({ noiseGate })} />
           </Field>
-          {voice.enabled && status.running && <Meters />}
-          {devices.error && <Notice tone="error">{devices.error}</Notice>}
-
-          <div className="mt-3">
-            <Disclosure label="Advanced">
-              <Field label="Mic boost">
-                <Range label="Mic boost" className="max-w-xs" min={-24} max={24} step={1} value={voice.inputGainDb} format={db} onChange={(inputGainDb) => set({ inputGainDb }, 150)} />
-              </Field>
-              <Field label="Changed voice volume">
-                <Range
-                  label="Changed voice volume"
-                  className="max-w-xs"
-                  min={-24}
-                  max={24}
-                  step={1}
-                  value={voice.outputGainDb}
-                  format={db}
-                  onChange={(outputGainDb) => set({ outputGainDb }, 150)}
-                />
-              </Field>
-              <Field label="Cut background noise">
-                <Switch label="Cut background noise" checked={voice.noiseGate} onChange={(noiseGate) => set({ noiseGate })} />
-              </Field>
-              <Field label="Cut sounds below">
-                <Range
-                  label="Cut sounds below"
-                  className="max-w-xs"
-                  min={-90}
-                  max={-20}
-                  step={1}
-                  disabled={!voice.noiseGate}
-                  value={voice.gateThresholdDb}
-                  format={db}
-                  onChange={(gateThresholdDb) => set({ gateThresholdDb }, 150)}
-                />
-              </Field>
-            </Disclosure>
-            {selected && (
-              <Disclosure key={editorKey} label={`Customize ${selected.name}`} defaultOpen={editorKey > 0}>
-                <PresetEditor
-                  key={selected.id}
-                  preset={selected}
-                  custom={custom.some((p) => p.id === selected.id)}
-                  onDuplicate={() => addVoice(`${selected.name} copy`, structuredClone(selected.effects))}
-                />
-              </Disclosure>
-            )}
-          </div>
-        </div>
+          <Field label="Cut sounds below">
+            <Range
+              label="Cut sounds below"
+              className="max-w-xs"
+              min={-90}
+              max={-20}
+              step={1}
+              disabled={!voice.noiseGate}
+              value={voice.gateThresholdDb}
+              format={db}
+              onChange={(gateThresholdDb) => set({ gateThresholdDb }, 150)}
+            />
+          </Field>
+        </Disclosure>
+        {selected && (
+          <Disclosure key={editorKey} label={`Customize ${selected.name}`} defaultOpen={editorKey > 0}>
+            <PresetEditor
+              key={selected.id}
+              preset={selected}
+              custom={custom.some((p) => p.id === selected.id)}
+              onDuplicate={() => addVoice(`${selected.name} copy`, structuredClone(selected.effects))}
+            />
+          </Disclosure>
+        )}
       </div>
-    </>
+    </Section>
   );
 }
 
@@ -250,75 +241,75 @@ function Setup({
   if (voice.outputDevice !== null && !changing) {
     const output = selectedOutput?.name ?? voice.outputDevice;
     return (
-      <div className="flex items-center gap-3 border-b border-line px-6 py-3">
-        <p className="min-w-0 flex-1">
-          Apps hear you through <span className="font-semibold">{output}</span>. In Discord, Zoom or OBS, choose{" "}
-          <span className="font-semibold">{status.virtualMic ?? micFor(output)}</span> as your microphone.
-        </p>
-        <Button size="sm" onClick={() => setChanging(true)}>
-          Change
-        </Button>
-      </div>
+      <Field label="Output">
+        <div className="flex items-center gap-3">
+          <p className="min-w-0 flex-1">
+            <span className="font-medium">{output}</span>
+            <span className="text-muted">
+              {" "}
+              · pick <span className="text-fg">{status.virtualMic ?? micFor(output)}</span> as the microphone in Discord, Zoom or OBS
+            </span>
+          </p>
+          <Button size="sm" variant="ghost" className="text-muted hover:text-fg" onClick={() => setChanging(true)}>
+            Change
+          </Button>
+        </div>
+      </Field>
     );
   }
 
   return (
-    <Section
-      title="Setup"
-      actions={
-        changing && (
-          <Button size="sm" variant="ghost" onClick={() => setChanging(false)}>
-            Done
-          </Button>
-        )
-      }
-    >
-      <ol className="flex flex-col gap-1">
-        <li className="flex min-h-8 flex-wrap items-center gap-3">
-          <span className="w-4 shrink-0 text-muted tabular-nums">
-            {prerequisite ? <I name="check" className="size-4 text-success" /> : "1"}
-          </span>
+    <Field label="Setup">
+      <ol className="flex flex-col py-0.5">
+        <SetupStep n={1} done={!!prerequisite}>
           <span>{!outputs ? "Checking audio devices…" : prerequisite ? installed : install}</span>
           {outputs && !prerequisite && (download ? (
-            <Button size="sm" icon="external-link" onClick={() => openLink(download.url)}>
+            <Button size="sm" variant={suggested ? "default" : "primary"} icon="external-link" onClick={() => openLink(download.url)}>
               {download.label}
             </Button>
           ) : (
-            <Button size="sm" icon="plus" onClick={() => void createMic()}>
+            <Button size="sm" variant={suggested ? "default" : "primary"} icon="plus" onClick={() => void createMic()}>
               Create virtual mic
             </Button>
           ))}
-        </li>
-        <li className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="w-4 shrink-0 text-muted tabular-nums">
-            {selectedOutput ? <I name="check" className="size-4 text-success" /> : "2"}
-          </span>
-          <label className="flex max-w-full items-center gap-3">
-            <span className="shrink-0">Send your changed voice to</span>
-            <Select
-              ariaLabel="Send your changed voice to"
-              className="w-64 min-w-0"
-              value={voice.outputDevice ?? ""}
-              placeholder="Choose…"
-              options={deviceOptions(outputs ?? [])}
-              onChange={setOutput}
-            />
-          </label>
-          <Button size="sm" onClick={reload}>
-            Refresh
-          </Button>
+        </SetupStep>
+        <SetupStep n={2} done={!!selectedOutput}>
+          <span className="shrink-0">Send your changed voice to</span>
+          <Select
+            ariaLabel="Send your changed voice to"
+            className="w-56 min-w-0"
+            value={voice.outputDevice ?? ""}
+            placeholder="Choose…"
+            options={deviceOptions(outputs ?? [])}
+            onChange={setOutput}
+          />
           {suggested && (
             <Button size="sm" variant="primary" onClick={() => setOutput(suggested.id)}>
-              Use {suggested.name} for your changed voice
+              Use {suggested.name}
             </Button>
           )}
-        </li>
-        <li className="flex min-h-8 items-center gap-3">
-          <span className="w-4 shrink-0 text-muted tabular-nums">3</span>
+          <IconButton icon="refresh-cw" label="Refresh devices" onClick={reload} />
+          {changing && (
+            <Button size="sm" variant="ghost" onClick={() => setChanging(false)}>
+              Done
+            </Button>
+          )}
+        </SetupStep>
+        <SetupStep n={3} done={false}>
           <span>In Discord, Zoom or OBS, choose "{status.virtualMic ?? (selectedOutput ? micFor(selectedOutput.name) : mic)}" as your microphone.</span>
-        </li>
+        </SetupStep>
       </ol>
-    </Section>
+    </Field>
+  );
+}
+
+/** Numbered (or checked) setup step; its content wraps while the number stays put. */
+function SetupStep({ n, done, children }: { n: number; done: boolean; children: ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className="flex h-8 w-4 shrink-0 items-center text-muted tabular-nums">{done ? <I name="check" className="size-4 text-success" /> : n}</span>
+      <div className="flex min-h-8 min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">{children}</div>
+    </li>
   );
 }
 

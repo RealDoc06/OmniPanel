@@ -5,3 +5,4 @@ dist/
 *.log
 .vite/
 apps/desktop/src-tauri/gen/
+release-artifacts/

@@ -1,13 +1,13 @@
-// Right panel of the Buttons screen. Nothing selected: layout size and theme, plus the
-// editor shortcuts. Empty square targeted: the action picker for a new button. One
+// Right panel of the Buttons screen. Nothing selected: the layout's name, size and theme,
+// plus the editor shortcuts. Empty square targeted: the action picker for a new button. One
 // control: header and actions, What it does, Look, the live ("While …") look and its
 // keyboard shortcut. Several: bulk actions only.
 import type { Control, Icon, LabelPosition, Page, Profile, Style, Theme } from "@omni/protocol";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { DeckControlView } from "../../components/DeckControl";
 import { HotkeyInput } from "../../components/HotkeyInput";
 import { ControlIcon, I } from "../../components/Icon";
-import { Button, ColorField, Field, Kbd, Notice, Segmented, Select, Switch, TextInput } from "../../components/ui";
+import { Button, ColorField, Field, Group, IconButton, Kbd, Notice, Segmented, Select, Switch, TextInput } from "../../components/ui";
 import { formatAccelerator, normalizeAccelerator } from "../../lib/accelerator";
 import { describeAction, liveStateTitle, type NameLookup } from "../../lib/actions";
 import { api } from "../../lib/backend";
@@ -86,6 +86,9 @@ async function resizeGrid(rows: number, cols: number) {
   setGrid(rows, cols);
 }
 
+/** Id of the layout name field, so the header's Rename can focus it. */
+export const LAYOUT_NAME_ID = "layout-name";
+
 /** Shown with nothing selected: layout-wide settings and the editor shortcuts. */
 function ProfilePanel({ profile }: { profile: Profile }) {
   const themes = useThemes();
@@ -104,6 +107,24 @@ function ProfilePanel({ profile }: { profile: Profile }) {
   return (
     <div>
       <Group title="Layout">
+        <Field label="Name" compact htmlFor={LAYOUT_NAME_ID}>
+          {/* Saved on blur or Enter, never empty; Escape puts the saved name back. Remounts when the
+              saved name changes from elsewhere (undo, redo). */}
+          <TextInput
+            key={profile.name}
+            id={LAYOUT_NAME_ID}
+            defaultValue={profile.name}
+            onBlur={(e) => {
+              const name = e.target.value.trim();
+              if (name && name !== profile.name) editProfile((p) => ({ ...p, name }));
+              else e.target.value = profile.name;
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") e.currentTarget.value = profile.name;
+              if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+            }}
+          />
+        </Field>
         <Field label="Size" compact>
           <SizeFields
             w={profile.cols}
@@ -122,7 +143,6 @@ function ProfilePanel({ profile }: { profile: Profile }) {
           />
         </Field>
       </Group>
-      <p className="border-b border-line px-4 py-3">Click a button to change it, or an empty square to add one.</p>
       <Group title="Keyboard shortcuts" open={false}>
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
           {rows.map(([key, what]) => (
@@ -143,8 +163,8 @@ function ProfilePanel({ profile }: { profile: Profile }) {
 function NewControl({ target, profile, page }: { target: { x: number; y: number }; profile: Profile; page: Page }) {
   return (
     <div>
-      <div className="flex h-11 items-center gap-2 border-b border-line px-4">
-        <p className="font-semibold">New button</p>
+      <div className="flex h-12 items-center gap-2 border-b border-line px-5">
+        <p className="text-[14px] font-semibold">New button</p>
         <Button size="sm" variant="ghost" className="ml-auto" onClick={clearTarget}>
           Cancel
         </Button>
@@ -160,8 +180,8 @@ function NewControl({ target, profile, page }: { target: { x: number; y: number 
 
 function MultiSelection({ count }: { count: number }) {
   return (
-    <div className="flex flex-col gap-3 p-4">
-      <p className="font-semibold">{count} selected</p>
+    <div className="flex flex-col gap-3 p-5">
+      <p className="text-[14px] font-semibold">{count} selected</p>
       <div className="flex gap-2">
         <Button size="sm" onClick={duplicateSelected}>
           Duplicate
@@ -172,20 +192,6 @@ function MultiSelection({ count }: { count: number }) {
       </div>
       <p>Drag or use the arrow keys to move them together.</p>
     </div>
-  );
-}
-
-/** Collapsible inspector group. */
-function Group({ title, children, open = true, aside }: { title: string; children: ReactNode; open?: boolean; aside?: ReactNode }) {
-  return (
-    <details open={open} className="group border-b border-line">
-      <summary className="flex h-9 items-center gap-1.5 px-4 font-semibold hover:bg-hover">
-        <I name="chevron-right" className="size-3.5 text-muted group-open:rotate-90" />
-        {title}
-        <span className="ml-auto text-xs font-normal text-muted">{aside}</span>
-      </summary>
-      <div className="flex flex-col gap-0.5 px-4 pt-0.5 pb-3">{children}</div>
-    </details>
   );
 }
 
@@ -239,27 +245,18 @@ function ControlInspector({ control, profile }: { control: Control; profile: Pro
 
   return (
     <div>
-      <div className="flex flex-col gap-2.5 border-b border-line px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="size-10 shrink-0" style={themeStyle(theme)}>
-            <DeckControlView control={control} active={previewActive} truncateLabel />
-          </div>
-          <div className="min-w-0">
-            <p className="truncate font-semibold">{style.label || (kind.type === "slider" ? "Slider" : "Button")}</p>
-          </div>
+      <div className="flex items-center gap-3 border-b border-line px-5 py-4">
+        <div className="size-12 shrink-0" style={themeStyle(theme)}>
+          <DeckControlView control={control} active={previewActive} truncateLabel />
         </div>
-        <div className="flex gap-2">
-          {kind.type === "button" && (
-            <Button size="sm" icon="play" disabled={!kind.action} onClick={() => void runNow()}>
-              Run now
-            </Button>
-          )}
-          <Button size="sm" onClick={duplicateSelected}>
-            Duplicate
-          </Button>
-          <Button size="sm" variant="danger" onClick={deleteSelected}>
-            Delete
-          </Button>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[14px] font-semibold">{style.label || (kind.type === "slider" ? "Slider" : "Button")}</p>
+          <p className="truncate text-xs text-muted">{summary}</p>
+        </div>
+        <div className="flex shrink-0">
+          {kind.type === "button" && <IconButton icon="play" label="Run now" disabled={!kind.action} onClick={() => void runNow()} />}
+          <IconButton icon="copy" label="Duplicate" onClick={duplicateSelected} />
+          <IconButton icon="trash-2" label="Delete" tone="danger" onClick={deleteSelected} />
         </div>
       </div>
 
@@ -278,7 +275,7 @@ function ControlInspector({ control, profile }: { control: Control; profile: Pro
           <IconChooser value={style.icon} onChange={(icon) => setStyle({ icon })} />
         </Field>
         <div className="flex flex-col gap-1 py-1 [&>[role=radiogroup]]:w-full [&_[role=radio]]:min-w-0 [&_[role=radio]]:flex-1 [&_[role=radio]]:justify-center [&_[role=radio]]:px-1">
-          <span>Label position</span>
+          <span className="text-muted">Label position</span>
           <Segmented label="Label position" value={style.labelPosition} options={LABEL_POSITIONS} onChange={(labelPosition) => setStyle({ labelPosition })} />
         </div>
         <Field label="Background" compact>
@@ -363,7 +360,7 @@ function IconChooser({ value, onChange }: { value: Icon | null; onChange: (icon:
   const [open, setOpen] = useState(false);
   return (
     <div className="flex items-center gap-1.5">
-      <div aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-ui-sm border border-line bg-bg">
+      <div aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-ui-sm border border-line">
         {value ? <ControlIcon icon={value} size="18px" /> : <I name="image" className="size-4 text-muted" />}
       </div>
       <Button size="sm" onClick={() => setOpen(true)}>

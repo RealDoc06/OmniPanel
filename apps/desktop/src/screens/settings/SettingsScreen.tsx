@@ -7,7 +7,7 @@ import { Button, ComboInput, Disclosure, EnumSelect, Field, inputClass, Notice, 
 import { api } from "../../lib/backend";
 import { confirm, type ConfirmRequest } from "../../lib/confirm";
 import { useResource } from "../../lib/hooks";
-import { flushSettings, navigate, patchSection, patchSettings, quit, run, useApp, useIsMac, useProfiles, useRuntime, useSettings } from "../../lib/store";
+import { flushSettings, navigate, patchSection, patchSettings, quit, run, useAnchor, useApp, useIsMac, useProfiles, useRuntime, useSettings } from "../../lib/store";
 import { cx, errorMessage } from "../../lib/util";
 import { HaSettings, ObsSettings } from "./Connections";
 import { ThemeSettings } from "./Themes";
@@ -28,11 +28,7 @@ function Link({ url, children }: { url: string; children: string }) {
 }
 
 export function SettingsScreen() {
-  const anchor = useApp((s) => s.anchor);
-  useEffect(() => {
-    if (anchor) document.getElementById(`settings-${anchor}`)?.scrollIntoView({ block: "start" });
-  }, [anchor]);
-
+  useAnchor("settings");
   return (
     <>
       <ScreenHeader title="Settings" />
@@ -59,7 +55,7 @@ function GeneralSettings() {
   const ids = { name: useId(), layout: useId() };
   return (
     <Section title="General" id="settings-general">
-      <Field label="Computer name shown on devices" htmlFor={ids.name}>
+      <Field label="Name on devices" htmlFor={ids.name} hint="How this computer appears on your phone or tablet.">
         <TextInput
           id={ids.name}
           className="max-w-xs"
@@ -321,8 +317,8 @@ function AdvancedSettings() {
   const { usb } = settings;
   return (
     <Section title="Advanced" id="settings-advanced">
-      <Field label="Network port" htmlFor={ids.port} hint={`Change only if another app uses ${settings.port}.`}>
-        <PortField id={ids.port} value={settings.port} min={1024} max={65535} confirmChange={PORT_CONFIRM} onChange={(port) => patchSettings({ port })} />
+      <Field label="Network port" htmlFor={ids.port} hint={`Change only if another app uses ${settings.port}. Ports below 1024 need admin rights.`}>
+        <PortField id={ids.port} value={settings.port} min={1} max={65535} confirmChange={PORT_CONFIRM} onChange={(port) => patchSettings({ port })} />
       </Field>
       <div id="settings-usb">
         <Field label="USB connection (Android)" hint="Lets Android devices connect with a cable.">

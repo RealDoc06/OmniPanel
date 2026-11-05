@@ -85,7 +85,7 @@ export function AiAssist({
   const steps = result?.action.type === "multi" ? result.action.steps : [];
 
   return (
-    <div className="flex flex-col gap-2 px-4 py-3">
+    <div className="flex flex-col gap-2 px-5 py-3">
       <TextArea
         ref={inputRef}
         autoFocus

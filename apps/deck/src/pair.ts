@@ -50,7 +50,7 @@ export function createPairScreen(
   logo.alt = "";
   const title = el("div", "pair-title", root);
   const hint = el("div", "pair-hint", root);
-  hint.textContent = "Enter the 6-digit code shown in the OmniPanel desktop app.";
+  hint.textContent = "Enter the code shown in OmniPanel on your computer.";
   const codeRow = el("div", "pair-code", root);
   const boxes: HTMLElement[] = [];
   for (let i = 0; i < CODE_LENGTH; i++) boxes.push(el("div", "pair-digit", codeRow));
@@ -291,7 +291,7 @@ export function createPairScreen(
       place(key, { x: area.x + col * (keyW + gap), y: area.y + row * (keyH + gap), w: keyW, h: keyH });
       key.style.lineHeight = Math.round(keyH) + "px";
       key.style.fontSize = KEY_ORDER[i] === "clear" ? "15px" : Math.round(clamp(keyH * 0.44, 18, 34)) + "px";
-      key.style.borderRadius = Math.round(clamp(keyH * 0.2, 8, 16)) + "px";
+      key.style.borderRadius = Math.round(clamp(keyH * 0.16, 8, 12)) + "px";
     }
   }
 

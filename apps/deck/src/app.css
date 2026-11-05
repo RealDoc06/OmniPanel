@@ -118,7 +118,7 @@ input {
   top: 50%;
   padding: 0 24px;
   font-size: 15px;
-  font-weight: 500;
+  font-weight: 400;
   line-height: 20px;
   text-align: center;
   -webkit-transform: translateY(-50%);
@@ -170,7 +170,8 @@ svg {
 .lbl, .val {
   position: absolute;
   text-align: center;
-  font-weight: 700;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   white-space: pre;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -210,8 +211,8 @@ svg {
   top: 0;
   right: 0;
   height: 28px;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -242,16 +243,16 @@ svg {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 6px;
-  height: 6px;
-  margin: -3px 0 0 -3px;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
   border-radius: 50%;
 }
 
 .bar-dot.current {
-  width: 8px;
-  height: 8px;
-  margin: -4px 0 0 -4px;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
 }
 
 .bar-right {
@@ -264,8 +265,8 @@ svg {
 
 .bar-conn {
   display: inline-block;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   margin-right: 6px;
   border-radius: 50%;
   vertical-align: middle;
@@ -340,7 +341,7 @@ svg {
   padding: 0 28px;
   font-size: 14px;
   line-height: 20px;
-  color: #8a8a8a;
+  color: #8c8c8c;
 }
 
 /* ---- pairing ---- */
@@ -370,8 +371,8 @@ svg {
 }
 
 .pair-title {
-  font-size: 22px;
-  font-weight: 700;
+  font-size: 21px;
+  font-weight: 600;
 }
 
 .pair-hint {
@@ -379,7 +380,7 @@ svg {
   text-align: center;
   font-size: 14px;
   font-weight: 500;
-  color: #8a8a8a;
+  color: #8c8c8c;
   overflow: hidden;
 }
 
@@ -388,7 +389,7 @@ svg {
   text-align: center;
   font-size: 14px;
   font-weight: 600;
-  color: #8a8a8a;
+  color: #8c8c8c;
   overflow: hidden;
 }
 
@@ -399,14 +400,14 @@ svg {
 .pair-digit {
   position: absolute;
   text-align: center;
-  font-weight: 700;
-  background: #0d0d0d;
-  border: 2px solid #2a2a2a;
+  font-weight: 600;
+  background: #0b0b0b;
+  border: 1px solid #2a2a2a;
   border-radius: 10px;
 }
 
 .pair-digit.filled {
-  border-color: #808080;
+  border-color: #8c8c8c;
 }
 
 .pair-digit.next {
@@ -423,13 +424,13 @@ svg {
 }
 
 .pair-name.down {
-  background: #151515;
+  background: #161616;
 }
 
 .pair-name-label {
   margin-right: 8px;
   font-weight: 500;
-  color: #8a8a8a;
+  color: #8c8c8c;
 }
 
 .pair-name-value {
@@ -442,23 +443,23 @@ svg {
   height: 16px;
   margin-left: 8px;
   vertical-align: -3px;
-  color: #8a8a8a;
+  color: #8c8c8c;
 }
 
 .pair-key {
   position: absolute;
   text-align: center;
-  font-weight: 700;
+  font-weight: 600;
   color: #fff;
-  background: #171717;
+  background: #121212;
 }
 
 .pair-key.small {
-  color: #9a9a9a;
+  color: #8c8c8c;
 }
 
 .pair-key.down {
-  background: #333;
+  background: #2a2a2a;
 }
 
 .pair-key-icon {
@@ -468,7 +469,7 @@ svg {
   width: 28px;
   height: 28px;
   margin: -14px 0 0 -14px;
-  color: #cfcfcf;
+  color: #8c8c8c;
 }
 
 .pair-edit {
@@ -490,7 +491,7 @@ svg {
 .pair-edit-label {
   margin-bottom: 8px;
   font-size: 14px;
-  color: #8a8a8a;
+  color: #8c8c8c;
 }
 
 .pair-input {
@@ -502,9 +503,9 @@ svg {
   font-size: 18px;
   font-weight: 600;
   color: #fff;
-  background: #151515;
+  background: #0b0b0b;
   border: 2px solid #4f8cff;
-  border-radius: 12px;
+  border-radius: 10px;
   outline: none;
   -webkit-appearance: none;
   appearance: none;
@@ -519,7 +520,7 @@ svg {
   text-align: center;
   color: #fff;
   background: #4f8cff;
-  border-radius: 12px;
+  border-radius: 10px;
 }
 
 .pair-done.down {
@@ -556,7 +557,7 @@ svg {
 
 .sheet-title {
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .sheet-close {
@@ -570,10 +571,11 @@ svg {
 }
 
 .sheet-row {
-  height: 54px;
+  height: 52px;
   padding: 0 16px;
-  font-size: 17px;
-  line-height: 54px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 52px;
   white-space: nowrap;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -649,11 +651,11 @@ svg {
 .toast {
   display: inline-block;
   max-width: 90%;
-  padding: 10px 18px;
-  font-size: 16px;
-  font-weight: 700;
+  padding: 9px 16px;
+  font-size: 15px;
+  font-weight: 600;
   line-height: 20px;
-  border-radius: 12px;
+  border-radius: 10px;
   opacity: 0;
   -webkit-transform: translateY(-8px);
   transform: translateY(-8px);

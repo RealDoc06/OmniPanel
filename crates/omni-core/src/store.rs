@@ -11,10 +11,23 @@ use crate::model::Config;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("config io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("config is not valid json: {0}")]
-    Json(#[from] serde_json::Error),
+    // The reason is part of the message, so these have no `source`: `{e:#}` would repeat it.
+    #[error("can't read or write the settings file: {0}")]
+    Io(std::io::Error),
+    #[error("the settings file is not valid JSON: {0}")]
+    Json(serde_json::Error),
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for StoreError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
 }
 
 pub const CONFIG_FILE: &str = "config.json";
@@ -271,10 +284,26 @@ pub fn save(data_dir: &Path, config: &Config) -> Result<(), StoreError> {
     let path = config_path(data_dir);
     let tmp = path.with_extension(format!("json.{}.tmp", crate::new_id()));
     let bytes = serde_json::to_vec_pretty(config)?;
-    write_private(&tmp, &bytes).and_then(|()| fs::rename(&tmp, &path)).inspect_err(|_| {
+    write_private(&tmp, &bytes).and_then(|()| replace(&tmp, &path)).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })?;
     Ok(())
+}
+
+/// Rename `from` over `to`. Windows refuses to replace a file that another
+/// process holds open (antivirus, the search indexer, a concurrent save) with
+/// "access denied", so retry briefly there instead of failing the save.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(from, to) {
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * attempt));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Create `path` readable by the owner only: the config holds API keys and tokens.

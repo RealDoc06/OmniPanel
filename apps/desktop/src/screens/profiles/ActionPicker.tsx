@@ -63,7 +63,7 @@ export function ActionPicker({
 
   return (
     <div className="flex flex-col pb-3">
-      <div className="sticky top-0 z-10 bg-surface px-4 pt-3 pb-2">
+      <div className="sticky top-0 z-10 bg-bg px-5 pt-1 pb-2">
         <input
           type="search"
           role="combobox"
@@ -100,7 +100,7 @@ export function ActionPicker({
         {results.map((recipe, i) => (
           <div key={recipe.id} role="presentation">
             {grouped && recipe.group !== results[i - 1]?.group && (
-              <div role="presentation" className="flex h-7 items-center gap-2 px-4 pt-1 font-semibold">
+              <div role="presentation" className="flex h-8 items-center gap-2 px-5 pt-2 text-xs font-semibold text-muted">
                 {recipe.group}
                 <span className="ml-auto text-xs font-normal">{status[recipe.group]}</span>
               </div>
@@ -122,7 +122,7 @@ export function ActionPicker({
           </Row>
         </div>
       </div>
-      <div className="flex justify-end px-4 pt-2">
+      <div className="flex justify-end px-5 pt-2">
         <Button size="sm" variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
@@ -155,7 +155,7 @@ function Row({
       // Keep focus in the search field so the keyboard keeps working.
       onMouseDown={(e) => e.preventDefault()}
       onClick={onPick}
-      className={cx("flex h-7 cursor-default items-center gap-2 px-4", active && "bg-hover")}
+      className={cx("flex h-7 cursor-default items-center gap-2.5 px-5", active && "bg-hover")}
     >
       <I name={icon} className="size-4 shrink-0" />
       <span className="min-w-0 truncate">{children}</span>
@@ -172,7 +172,7 @@ function useGroupStatus(): Partial<Record<ActionGroup, ReactNode>> {
   return {
     "OBS Studio": connection(runtime.obs.state, "obs"),
     "Home Assistant": connection(runtime.homeAssistant.state, "ha"),
-    "Voice changer": voiceReady ? null : <SetUp text="Needs setup" onClick={() => navigate("voice")} />,
+    "Voice changer": voiceReady ? null : <SetUp text="Needs setup" onClick={() => navigate("sound", "voice")} />,
   };
 }
 

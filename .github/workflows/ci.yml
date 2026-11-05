@@ -13,11 +13,11 @@ jobs:
         os: [macos-latest, windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -29,6 +29,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:deck
       - run: pnpm typecheck
-      - run: pnpm --filter @omni/deck test
       - run: pnpm build:ui
+      - run: pnpm -r test
       - run: cargo test --workspace

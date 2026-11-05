@@ -1,7 +1,7 @@
 {
   "name": "omnipanel",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0-alpha.1",
   "license": "MIT",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
@@ -11,6 +11,7 @@
     "build:ui": "pnpm --filter @omni/desktop build",
     "dev": "pnpm --filter @omni/desktop tauri dev",
     "build": "pnpm --filter @omni/desktop tauri build",
+    "build:release": "bash scripts/build-release.sh",
     "typecheck": "pnpm -r typecheck",
     "test": "cargo test --workspace && pnpm -r test"
   }

@@ -1,7 +1,8 @@
-// Theme picker (built-in + custom), "Customize" to make an editable copy, and the
-// custom theme editor with a live preview.
+// Theme picker (built-in + custom) as a dense list with three swatches per theme,
+// "Customize" to make an editable copy, and the custom theme editor with a live preview.
 import type { Theme, ThemeColors } from "@omni/protocol";
 import { DeckControlView } from "../../components/DeckControl";
+import { I } from "../../components/Icon";
 import { Button, ColorField, Field, Range, TextInput } from "../../components/ui";
 import { confirm } from "../../lib/confirm";
 import { newButton } from "../../lib/controls";
@@ -29,39 +30,38 @@ export function ThemeSettings() {
   };
 
   return (
-    <div className="flex flex-col gap-3">
-      <div role="radiogroup" aria-label="Theme" className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-2">
-        {themes.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="radio"
-            aria-checked={t.id === activeId}
-            onClick={() => patchSettings({ themeId: t.id })}
-            style={themeStyle(t)}
-            className={cx(
-              "flex flex-col gap-2 rounded-ui border border-line bg-bg p-2.5 text-left text-fg",
-              t.id === activeId && "outline-2 outline-offset-2 outline-accent",
-            )}
-          >
-            <span className="flex gap-1">
-              {[t.colors.surface, t.colors.button, t.colors.accent, t.colors.success, t.colors.danger].map((c, i) => (
-                <span key={i} className="h-4 flex-1 rounded-sm border border-line" style={{ background: c }} />
-              ))}
-            </span>
-            <span className="flex items-center justify-between text-xs">
-              <span className="truncate font-medium">{t.name}</span>
-              {custom.some((c) => c.id === t.id) && <span className="text-muted">custom</span>}
-            </span>
-          </button>
-        ))}
+    <div className="flex flex-col gap-2">
+      <div role="radiogroup" aria-label="Theme" className="grid grid-cols-[repeat(auto-fill,minmax(168px,1fr))] gap-x-2">
+        {themes.map((t) => {
+          const on = t.id === activeId;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => patchSettings({ themeId: t.id })}
+              className={cx("flex h-8 min-w-0 items-center gap-2 rounded-ui-sm px-1.5 text-left hover:bg-hover", on ? "font-medium text-accent" : "text-fg")}
+            >
+              <span className="w-3.5 shrink-0">{on && <I name="check" className="size-3.5" />}</span>
+              <span className="flex shrink-0 gap-0.5">
+                {[t.colors.background, t.colors.button, t.colors.accent].map((c, i) => (
+                  <span key={i} className="size-3 rounded-full border border-line" style={{ background: c }} />
+                ))}
+              </span>
+              <span className="truncate">{t.name}</span>
+            </button>
+          );
+        })}
       </div>
-      <p className="text-xs text-muted">Devices use this theme too, unless a layout picks its own.</p>
-      {active && (
-        <Button size="sm" icon="copy" className="self-start" onClick={duplicate}>
-          {editing ? "Make a copy" : `Customize ${active.name}`}
-        </Button>
-      )}
+      <div className="flex items-center gap-3">
+        {active && (
+          <Button size="sm" icon="copy" onClick={duplicate}>
+            {editing ? "Make a copy" : `Customize ${active.name}`}
+          </Button>
+        )}
+        <span className="text-xs text-muted">Devices use this theme too, unless a layout picks its own.</span>
+      </div>
       {editing && <ThemeEditor key={editing.id} theme={editing} />}
     </div>
   );
@@ -79,7 +79,7 @@ function ThemeEditor({ theme }: { theme: Theme }) {
   };
 
   return (
-    <div className="grid grid-cols-1 gap-6 border-t border-line pt-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+    <div className="mt-1 grid grid-cols-1 gap-6 border-t border-line pt-3 lg:grid-cols-[minmax(0,1fr)_300px]">
       <div>
         <Field label="Name">
           <TextInput aria-label="Theme name" className="max-w-xs" value={theme.name} onChange={(e) => save({ ...theme, name: e.target.value })} />
