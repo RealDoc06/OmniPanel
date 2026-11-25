@@ -1,0 +1,73 @@
+name: Rust
+
+# Rust tests on every OS OmniPanel ships for. Runs unless a change only touches
+# files the debug build never reads: docs, web sources and other workflows.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "!apps/deck/**"
+      - "!apps/desktop/**"
+      - "apps/desktop/src-tauri/**"
+      - "!**/package.json"
+      - "!pnpm-*.yaml"
+      - "!.github/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+# A new push to a pull request replaces its running checks. Pushes to main each run to the end.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  # Tests need no debug info: compiling and linking get faster and the cache smaller.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Dependencies only. A pull request starts from the cache main saved and
+      # saves its own only when its dependencies differ.
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        # A slow mirror once held this step for 29 minutes.
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev libxkbcommon-dev libssl-dev pulseaudio-utils
+      - run: cargo test --workspace --locked
+      - name: Generated TypeScript types are up to date
+        if: runner.os == 'Linux'
+        run: |
+          node scripts/gen-types.mjs
+          git add --all packages/protocol
+          git diff --cached --exit-code
+
+  # TEMPORARY: measures the same Windows job with full debug info. Removed before merge.
+  test-debuginfo:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked

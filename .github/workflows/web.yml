@@ -1,0 +1,45 @@
+name: Web
+
+# Type checks, builds and tests the desktop UI and the deck client. Runs unless
+# a change only touches files these checks never read: docs, Rust sources and
+# other workflows. One OS is enough: none of this is platform-specific.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "!crates/**"
+      - "!apps/desktop/src-tauri/**"
+      - "!Cargo.*"
+      - "!.cargo/**"
+      - "!.github/**"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+# A new push to a pull request replaces its running checks. Pushes to main each run to the end.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build:ui
+      # The deck test builds the deck client and checks that the output is ES5.
+      - run: pnpm -r test
