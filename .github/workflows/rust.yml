@@ -1,0 +1,68 @@
+name: Rust
+
+# Rust tests on every OS OmniPanel ships for. Skipped when a change only touches
+# root Markdown, docs/, web sources or other workflows. Any other path runs
+# them: a wasted run costs less than a skipped one.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      - "!*.md"
+      - "!docs/**"
+      - "!apps/deck/**"
+      - "!apps/desktop/**"
+      - "apps/desktop/src-tauri/**"
+      - "!package.json"
+      - "!pnpm-*.yaml"
+      - "!.github/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+# A new run for a pull request cancels that pull request's previous run of this
+# workflow. Runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # Tests need no debug info: compiling and linking get faster and the cache smaller.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Caches Rust dependencies between runs.
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        # A slow mirror once held this step for 29 minutes.
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev libxkbcommon-dev libssl-dev pulseaudio-utils
+      # omni-host's tests only check the deck page's headers when a page exists
+      # at compile time. The real client is built and tested in web.yml.
+      - name: Placeholder deck page
+        shell: bash
+        run: mkdir -p apps/deck/dist && echo '<!doctype html>' > apps/deck/dist/index.html
+      - run: cargo test --workspace --locked
+      # The script has no dependencies, so the runner's own Node is enough.
+      - name: Generated TypeScript types are up to date
+        if: runner.os == 'Linux'
+        run: |
+          node scripts/gen-types.mjs
+          git add --all packages/protocol
+          git diff --cached --exit-code || { echo "::error::packages/protocol is stale: run pnpm gen:types and commit the result"; exit 1; }

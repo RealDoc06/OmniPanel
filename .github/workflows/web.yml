@@ -1,0 +1,49 @@
+name: Web
+
+# Type checks, builds and tests the desktop UI and the deck client. Linux is
+# enough for source changes; web-other-os.yml covers what differs per OS.
+# Skipped when a change only touches root Markdown, docs/, Rust sources or
+# other workflows. Any other path runs them: a wasted run costs less than a
+# skipped one.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      - "!*.md"
+      - "!docs/**"
+      - "!crates/**"
+      - "!apps/desktop/src-tauri/**"
+      - "!Cargo.*"
+      - "!.cargo/**"
+      - "!.github/**"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+# A new run for a pull request cancels that pull request's previous run of this
+# workflow. Runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:deck
+      - run: pnpm typecheck
+      - run: pnpm build:ui
+      # The deck test checks that the built deck client is ES5.
+      - run: pnpm -r test
