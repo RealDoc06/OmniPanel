@@ -25,22 +25,23 @@ impl AppCapture {
     }
 
     /// Capture exactly the apps in `apps` that run now; a new tap's feed goes to
-    /// `port`. Returns the apps that are not running.
-    /// (`_superseded` is for captures that take several requests; a tap is one.)
+    /// `port`. Returns the apps that are not running. Once `superseded` holds, no
+    /// permission is asked for and no tap is made.
     pub fn sync(
         &mut self,
         apps: &[String],
         port: &mut MixerPort,
-        _superseded: &dyn Fn() -> bool,
+        superseded: &dyn Fn() -> bool,
     ) -> Result<Vec<String>> {
         let rate = self.rate;
         // The mixer takes feeds every microphone callback; a full queue means it stalled.
         let mut stalled = false;
-        let waiting = self.capture.sync(apps, &mut |capture_rate| {
+        let mut open = |capture_rate| -> omni_audio::capture::Sink {
             let (mut writer, feed) = feed(capture_rate, rate);
             stalled |= !port.add(feed);
             Box::new(move |mono| writer.write(mono.len(), mono.iter().copied()))
-        });
+        };
+        let waiting = self.capture.sync(apps, &mut open, superseded);
         port.drop_retired();
         match waiting {
             Ok(_) if stalled => Err(VoiceError::Backend("the microphone stream stalled".into())),

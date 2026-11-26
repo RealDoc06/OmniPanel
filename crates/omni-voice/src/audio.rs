@@ -620,7 +620,7 @@ impl Session {
         // not play what was mixed before.
         let committed = shared.clone();
         let reader = Reader::new(rx, rate, out_cfg.sample_rate(), in_block.clone())
-            .starting_over_behind(move || committed.shares_committed.load(Ordering::Relaxed));
+            .starting_over_after_a_stall(move || committed.shares_committed.load(Ordering::Relaxed));
         let on_error = stream_error_handler(events.clone(), generation, "output");
         let stream = output_stream(output, out_cfg, fixed, reader, on_error)?;
 

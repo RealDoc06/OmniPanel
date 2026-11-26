@@ -86,8 +86,15 @@ impl AppCapture {
     /// Capture exactly the apps in `apps` (their exact names, ignoring case) that
     /// run now, keeping a healthy tap going. A new tap asks `open` for a sink,
     /// telling it the sample rate; the sink of a replaced or stopped tap is dropped.
-    /// Returns the apps that are not running.
-    pub fn sync(&mut self, apps: &[String], open: &mut dyn FnMut(u32) -> Sink) -> Result<Vec<String>> {
+    /// Returns the apps that are not running. Once `superseded` says the caller no
+    /// longer wants this (the share was taken back meanwhile), no permission is
+    /// asked for and no tap is made.
+    pub fn sync(
+        &mut self,
+        apps: &[String],
+        open: &mut dyn FnMut(u32) -> Sink,
+        superseded: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>> {
         let (objects, waiting) = self.objects_of(apps)?;
         // Another list of apps gets a new tap (and sink): the old one may still be
         // delivering sound of an app that is no longer wanted.
@@ -107,6 +114,10 @@ impl AppCapture {
             return Ok(waiting);
         }
         self.running = None;
+        // Finding the processes took a moment; asked here, right before the prompt.
+        if superseded() {
+            return Ok(waiting);
+        }
         self.permit()?;
         self.running = Some(Running::start(objects, open)?);
         Ok(waiting)
