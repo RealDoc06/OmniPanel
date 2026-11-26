@@ -647,7 +647,7 @@ function labelFor(kind: Control["kind"], names: LabelNames): string | null {
         action.op.type === "step" ? (action.op.delta < 0 ? "Volume down" : "Volume up") :
           `${action.op.type === "unmute" ? "Unmute" : "Mute"} ${soundName(action.target)}`;
     case "appDevice":
-      return action.device === null ? (action.direction === "output" ? "Speaker" : "Microphone") : names.device?.(action.device) ?? action.device;
+      return action.device === null ? (action.direction === "output" ? "Speaker" : "Microphone") : names.device?.(action.device, action.direction) ?? action.device;
     case "voice":
       return action.op.type === "setPreset" ? names.preset?.(action.op.presetId) ?? action.op.presetId : null;
     case "obs":

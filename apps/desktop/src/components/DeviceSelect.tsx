@@ -1,6 +1,6 @@
 // Picks an audio device for one app (`appDevice` actions and the Sound screen's app
 // rows), plus the id-to-name lookup action summaries use.
-import type { Action, AppRoute, AudioDeviceInfo } from "@omni/protocol";
+import type { Action, AppRoute, AudioDeviceInfo, AudioDirection } from "@omni/protocol";
 import { findDevice, usesAppDevice } from "../lib/actions";
 import { api } from "../lib/backend";
 import { useResource } from "../lib/hooks";
@@ -38,9 +38,9 @@ export function DeviceSelect({
 }
 
 /** Device names for action summaries, by id or as written. Asks the mixer only when `action` chooses a device. */
-export function useDeviceName(action: Action | null): (device: string) => string | undefined {
+export function useDeviceName(action: Action | null): (device: string, direction: AudioDirection) => string | undefined {
   const needed = usesAppDevice(action);
   const mixer = useResource(() => (needed ? api.getMixer() : Promise.resolve(null)), [needed]);
   const devices = mixer.data?.devices;
-  return (device) => findDevice([...(devices?.outputs ?? []), ...(devices?.inputs ?? [])], device)?.name;
+  return (device, direction) => findDevice((direction === "output" ? devices?.outputs : devices?.inputs) ?? [], device)?.name;
 }

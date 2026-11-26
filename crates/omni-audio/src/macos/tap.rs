@@ -197,7 +197,7 @@ impl Tap {
         if [from, device].iter().any(|&d| device::transport(d) == kAudioDeviceTransportTypeAggregate) {
             // Aggregates cannot nest; flattening multi-output devices is not supported yet.
             return Err(AudioError::Unsupported(
-                "per-app volume does not work with aggregate or multi-output devices".into(),
+                "per-app volume and speakers do not work with aggregate or multi-output devices".into(),
             ));
         }
         let mut tap = Tap {

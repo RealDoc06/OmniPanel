@@ -107,7 +107,8 @@ function Mixer() {
   /** Sends an app to a device. A failure is toasted and the next poll shows where the app really is. */
   const setDevice = (app: AppAudio, direction: AudioDirection, device: string | null) => {
     const route: AppRoute = device === null ? { type: "default" } : { type: "device", id: device };
-    touchedAt.current = Date.now();
+    // Polls stay out a second longer than for a level: a move can take that long to settle.
+    touchedAt.current = Date.now() + 1000;
     setMixer((m) => m && { ...m, apps: m.apps.map((a) => (a.id === app.id ? { ...a, [direction]: route } : a)) });
     api.runAction({ type: "appDevice", app: app.id, direction, device }).catch(toastError);
   };

@@ -456,7 +456,7 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
   return (
     <>
       <Field label="App" compact>
-        <AppField value={action.app} recorders onChange={(app) => onChange({ ...action, app })} />
+        <AppField value={action.app} recorders={!output} onChange={(app) => onChange({ ...action, app })} />
       </Field>
       <Field label="Change its" compact>
         <EnumSelect

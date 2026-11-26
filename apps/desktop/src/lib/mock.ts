@@ -26,6 +26,7 @@ import type {
   VolumeState,
   VolumeTarget,
 } from "@omni/protocol";
+import { findDevice } from "./actions";
 import type { Api } from "./api";
 import type { Backend, UpdateStatus } from "./backend";
 import { emptyStyle } from "./controls";
@@ -662,7 +663,7 @@ const api: Api = {
         const app = mixer.apps.find((a) => a.id === action.app || a.name.toLowerCase() === action.app.toLowerCase());
         if (!app) throw `no audio app matches "${action.app}"`;
         const devices = output ? audioDevices.outputs : audioDevices.inputs;
-        const device = devices.find((d) => d.id === action.device || d.name === action.device);
+        const device = action.device === null ? undefined : findDevice(devices, action.device);
         if (action.device !== null && !device) throw `no audio device matches "${action.device}"`;
         if (app[action.direction] === null) throw `${app.name} is not ${output ? "playing" : "recording"} anything`;
         app[action.direction] = device ? on(device.id) : FOLLOWS;

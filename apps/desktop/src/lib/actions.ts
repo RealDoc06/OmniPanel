@@ -239,8 +239,8 @@ export interface NameLookup {
   profile?: (id: string) => string | undefined;
   preset?: (id: string) => string | undefined;
   entity?: (id: string) => string | undefined;
-  /** Audio device (speaker or microphone) by id. */
-  device?: (id: string) => string | undefined;
+  /** Speaker (`output`) or microphone (`input`) by id, or as it was written. */
+  device?: (device: string, direction: AudioDirection) => string | undefined;
 }
 
 /** An app that records without playing anything: it has a microphone but no volume or speaker. */
@@ -311,7 +311,7 @@ export function describeAction(action: Action | null, names: NameLookup = {}): s
       return volumeSummary(action.target, action.op);
     case "appDevice": {
       const app = action.app || "an app";
-      const device = action.device === null ? null : short(names.device?.(action.device) ?? action.device);
+      const device = action.device === null ? null : short(names.device?.(action.device, action.direction) ?? action.device);
       return action.direction === "output"
         ? `Play ${app} on ${device ?? "the default speaker"}`
         : `Use ${device ?? "the default microphone"} for ${app}`;

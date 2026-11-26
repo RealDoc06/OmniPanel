@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 
 use objc2_core_audio::{
     AudioObjectAddPropertyListener, AudioObjectID, AudioObjectPropertyAddress, AudioObjectRemovePropertyListener,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices, kAudioHardwarePropertyProcessObjectList,
-    kAudioHardwarePropertyTranslatePIDToProcessObject,
+    kAudioDeviceTransportTypeAggregate, kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
+    kAudioHardwarePropertyProcessObjectList, kAudioHardwarePropertyTranslatePIDToProcessObject,
 };
 use omni_core::AppLevel;
 
@@ -75,6 +75,8 @@ const PERMISSION_HINT: &str = "allow OmniPanel under System Settings > Privacy &
      Screen & System Audio Recording (System Audio Recording Only)";
 const UNSUPPORTED_HINT: &str = "per-app volume needs macOS 14.2 or later";
 const OUTPUT_UNSUPPORTED_HINT: &str = "Choosing a speaker per app needs macOS 14.2 or later.";
+const AGGREGATE_HINT: &str =
+    "Apps cannot be sent to a speaker while the default output is an aggregate or multi-output device.";
 const MICROPHONE_HINT: &str = "macOS has no way to change another app's microphone. Pick it in the app's own settings.";
 
 pub(crate) struct Platform {
@@ -532,6 +534,11 @@ impl Slot<'_> {
     }
 }
 
+/// An aggregate or multi-output device: a tap can neither listen to one nor play on one.
+fn aggregate(device: ObjectId) -> bool {
+    device::transport(device) == kAudioDeviceTransportTypeAggregate
+}
+
 /// This process's HAL object (excluded from the master tap: our own output is the
 /// re-rendered audio, tapping it would feed back).
 fn own_process() -> Option<ObjectId> {
@@ -730,9 +737,13 @@ impl Backend for Platform {
             .map(|(_, name)| format!("Master volume is applied in software ({name} has no volume control)."));
         let (per_app_volume, note) = match state.permission() {
             Some(Permission::Denied) => (false, Some(format!("Per-app volume and speakers: {PERMISSION_HINT}."))),
-            Some(Permission::Undetermined) => {
-                (true, Some("macOS asks for System Audio Recording permission the first time a volume changes.".into()))
-            }
+            Some(Permission::Undetermined) => (
+                true,
+                Some(
+                    "macOS asks for System Audio Recording permission the first time a volume or speaker changes."
+                        .into(),
+                ),
+            ),
             _ => (true, state.error.clone()),
         };
         // Taps listen to the default output only (see the module docs).
@@ -741,12 +752,15 @@ impl Backend for Platform {
             .filter(|_| per_app_volume)
             .map(|(_, name)| format!("App volumes and speakers only affect audio played on {name}."));
         // Both are taps: what stops per-app volume (the permission) stops per-app outputs.
-        let output_note = note.clone().filter(|_| !per_app_volume);
+        // So does a default output a tap cannot listen to.
+        let aggregate = device.as_ref().is_some_and(|(d, _)| aggregate(*d));
+        let output_note =
+            note.clone().filter(|_| !per_app_volume).or_else(|| aggregate.then(|| AGGREGATE_HINT.to_string()));
         let note = [note, scope, soft_master].into_iter().flatten().collect::<Vec<_>>().join(" ");
         AudioCapabilities {
             per_app_volume,
             note: (!note.is_empty()).then_some(note),
-            per_app_output: per_app_volume,
+            per_app_output: per_app_volume && !aggregate,
             output_note,
             per_app_input: false,
             input_note: Some(MICROPHONE_HINT.into()),
@@ -846,6 +860,10 @@ impl Backend for Platform {
             return Err(AudioError::Unsupported(OUTPUT_UNSUPPORTED_HINT.into()));
         }
         let output = match device {
+            // Going back to the default output stays possible.
+            Some(_) if device::default_device(Endpoint::Output).is_ok_and(aggregate) => {
+                return Err(AudioError::Unsupported(AGGREGATE_HINT.into()));
+            }
             Some(query) => Some(find_device(&device::outputs()?, query)?.id.clone()),
             None => None,
         };
