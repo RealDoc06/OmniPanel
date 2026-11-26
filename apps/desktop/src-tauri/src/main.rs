@@ -92,14 +92,19 @@ fn main() {
     app.run(|app, event| match event {
         RunEvent::ExitRequested { code, api, .. } => {
             if code.is_none() {
-                // Last window closed: keep running in the tray on every platform.
-                if !app.state::<QuitState>().no_tray.load(Ordering::Relaxed) {
+                // Last window closed: keep running in the tray on every platform,
+                // and without a tray while an update is replacing the app's files.
+                if !app.state::<QuitState>().no_tray.load(Ordering::Relaxed) || updater::is_replacing(app) {
                     api.prevent_exit();
                 }
             } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::Relaxed) {
                 // An explicit exit must use the same handshake as the menus.
                 api.prevent_exit();
                 request_quit(app);
+            } else if updater::is_replacing(app) {
+                // An update is replacing the app's files (and may need this thread for
+                // the macOS admin prompt). `end_after_install` finishes this quit.
+                api.prevent_exit();
             }
         }
         RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == window::MAIN => {
@@ -150,10 +155,13 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
         // Locking unsupported by the file system: run unguarded.
         Err(e) => tracing::warn!("can't lock {}: {e}", data_dir.display()),
     }
-    let show_after_update = updater::take_show_after_update(&data_dir);
     let version = app.package_info().version.to_string();
     let host = tauri::async_runtime::block_on(Host::start(HostOptions { data_dir, version }))?;
     app.manage(host.clone());
+    let after_update = updater::take_after_update_note(host.data_dir());
+    if let Some(problem) = after_update.as_deref().filter(|note| !note.is_empty()) {
+        host.log(omni_core::LogLevel::Error, problem);
+    }
     #[cfg(target_os = "macos")]
     install_app_menu(app)?;
     // Desktops without a tray still get the app, as a normal window.
@@ -168,7 +176,8 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     #[cfg(unix)]
     quit_on_signal(app.clone());
     let hidden = launched_hidden || host.config().settings.start_hidden;
-    if tray.is_ok() && hidden && !show_after_update {
+    // After an update the window comes back, so the user sees the app return.
+    if tray.is_ok() && hidden && after_update.is_none() {
         window::set_dock_visible(app, false);
     } else {
         window::show(app);
@@ -266,6 +275,16 @@ fn request_quit(app: &AppHandle) {
 fn finish_quit(app: &AppHandle) {
     app.state::<QuitState>().ready.store(true, Ordering::Relaxed);
     app.exit(0);
+}
+
+/// An update has replaced the app's files: restart into it, or finish the quit
+/// that was held back meanwhile.
+fn end_after_install(app: &AppHandle) {
+    if app.state::<QuitState>().ready.load(Ordering::Relaxed) {
+        app.exit(0);
+    } else {
+        app.request_restart();
+    }
 }
 
 fn sync_with_config(app: &AppHandle, host: &Host) {

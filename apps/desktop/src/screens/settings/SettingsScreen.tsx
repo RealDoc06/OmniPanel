@@ -365,14 +365,7 @@ function UpdateSettings() {
   const settings = useSettings();
   const status = useUpdate((s) => s.status);
   const current = useApp((s) => s.info.version);
-  // From the click until the shell reports progress, and between its steps.
-  const [starting, setStarting] = useState(false);
-  const install = async () => {
-    setStarting(true);
-    await run(installUpdate());
-    setStarting(false);
-  };
-  const busy = starting || status.state === "downloading" || status.state === "installing";
+  const busy = useUpdate((s) => s.installing) || status.state === "downloading" || status.state === "installing";
   // deb and rpm installs, which the package manager owns.
   const manual = status.state === "available" && !status.canInstall;
   return (
@@ -386,7 +379,7 @@ function UpdateSettings() {
                 Download
               </Button>
             ) : (
-              <Button size="sm" variant="primary" icon="download" disabled={busy} onClick={() => void install()}>
+              <Button size="sm" variant="primary" icon="download" disabled={busy} onClick={() => void run(installUpdate())}>
                 Install and restart
               </Button>
             )}

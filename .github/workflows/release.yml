@@ -13,8 +13,29 @@ on:
     types: [published]
 
 jobs:
-  build:
+  # New packages would no longer match the signatures in a published manifest, so a
+  # published version is never built again.
+  unpublished:
     if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # drafts are only visible with write access
+    steps:
+      - uses: actions/checkout@v7
+      - name: Refuse to rebuild a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>&1)"; then
+            [ "$draft" = true ] || { echo "::error::$tag is already published. Bump the version to release again."; exit 1; }
+          elif [[ "$draft" != *"release not found"* ]]; then
+            echo "::error::Can't tell whether $tag is published: $draft"
+            exit 1
+          fi
+
+  build:
+    needs: unpublished
     permissions:
       contents: write
     strategy:
@@ -33,17 +54,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
-      # New packages would no longer match the signatures in the published manifest.
-      - name: Refuse to rebuild a published release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="v$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
-          if [ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" = false ]; then
-            echo "::error::$tag is already published. Bump the version to release again."
-            exit 1
-          fi
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -98,6 +108,9 @@ jobs:
           version="$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
           gh release download "v$version" --pattern latest.json
           scripts/check-update-manifest.sh latest.json "$version"
+          # Published while it was still building: the builds may have replaced its packages.
+          [ "$(gh release view "v$version" --json isDraft --jq .isDraft)" = true ] ||
+            { echo "::error::v$version was published before its build finished. Release a new version."; exit 1; }
 
   # Installed apps read https://raw.githubusercontent.com/<repo>/updater/latest.json.
   # GitHub's /releases/latest/download/ link can't serve it: it skips prereleases, and
@@ -105,30 +118,33 @@ jobs:
   publish-update:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
-    # One at a time: the newest release must be the last one to write the branch.
+    # One at a time, so two releases can't write the branch at once.
     concurrency: publish-update
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      # The release's tag: its copy of the check script and of the public key.
-      - uses: actions/checkout@v7
-      - name: Point the updater branch at this release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+      # Whichever release started this run, apps should get the newest one. A rerun or
+      # a late run for an older release then can't put an old manifest back.
+      - name: Find the newest published release
+        id: newest
         run: |
-          releases="repos/$GITHUB_REPOSITORY/releases"
-          # A rerun, or a job that was queued behind a newer release, must not put an older manifest back.
-          newest="$(gh api "$releases?per_page=100" --jq '[.[] | select(.draft | not)] | max_by(.published_at) | .tag_name')"
-          if [ "$newest" != "$TAG" ]; then
-            echo "::notice::$newest was published after $TAG, so the update manifest stays as it is."
-            exit 0
-          fi
+          tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.draft | not)] | max_by(.published_at) | .tag_name')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # That release's copy of the check script and of the public key.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.newest.outputs.tag }}
+      - name: Point the updater branch at it
+        env:
+          TAG: ${{ steps.newest.outputs.tag }}
+        run: |
           mkdir manifest
           # tauri-action links packages by API asset id. Swap in the release's own download
           # links: no API rate limit for the apps, and nothing tied to an id.
           gh release download "$TAG" --pattern latest.json --output draft.json
-          gh api "$releases/tags/$TAG" --jq '[.assets[] | {key: .url, value: .browser_download_url}] | from_entries' > links.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '[.assets[] | {key: .url, value: .browser_download_url}] | from_entries' > links.json
           jq --slurpfile links links.json \
             '.platforms |= map_values(.url = ($links[0][.url] // error("no release asset for " + .url)))' draft.json > manifest/latest.json
           # Same check as on the draft, now without a token: exactly what the apps will download.

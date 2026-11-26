@@ -4,7 +4,11 @@ import { create } from "zustand";
 import { updater, type UpdateStatus } from "./backend";
 import { flushAll } from "./store";
 
-export const useUpdate = create<{ status: UpdateStatus }>()(() => ({ status: { state: "idle" } }));
+export const useUpdate = create<{ status: UpdateStatus; installing: boolean }>()(() => ({
+  status: { state: "idle" },
+  /** `installUpdate` is running: from the click until the shell reports progress, and between its steps. */
+  installing: false,
+}));
 
 // A status pushed while the first one is being fetched is the newer of the two.
 let pushed = false;
@@ -24,7 +28,13 @@ export const useUpdateVersion = () => useUpdate(({ status }) => ("version" in st
  * for the next try.
  */
 export async function installUpdate() {
-  if (useUpdate.getState().status.state !== "ready") await updater.download();
-  await flushAll();
-  await updater.install();
+  if (useUpdate.getState().installing) return;
+  useUpdate.setState({ installing: true });
+  try {
+    if (useUpdate.getState().status.state !== "ready") await updater.download();
+    await flushAll();
+    await updater.install();
+  } finally {
+    useUpdate.setState({ installing: false });
+  }
 }

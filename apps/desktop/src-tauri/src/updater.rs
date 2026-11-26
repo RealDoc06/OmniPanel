@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use omni_host::Host;
 use serde::Serialize;
@@ -18,14 +18,17 @@ use tauri_plugin_updater::{Error, Update, Updater, UpdaterExt};
 use crate::{tray, window};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-/// After a failed check (offline at login), and while checks are turned off.
-const RECHECK_SOON: Duration = Duration::from_secs(60 * 60);
+/// How often the loop looks whether a check is due. Also the wait after a
+/// failed check (offline at login) and after checks are turned on.
+const CHECK_TICK: Duration = Duration::from_secs(60 * 60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// Empty file in the data folder, written before an install: the next start
-/// shows the window even when it would start hidden, so the user sees the
-/// app come back.
-const SHOW_AFTER_UPDATE: &str = "show-after-update";
+/// File in the data folder, written before an install: the next start shows
+/// the window even when it would start hidden, so the user sees the app come
+/// back. Empty, or what went wrong when the app restarted without updating.
+const AFTER_UPDATE_NOTE: &str = "after-update";
+/// How long an exit that can't be held back waits for a running install.
+const EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// Pushed to the UI as `update-status`; `UpdateStatus` in `lib/backend.ts` mirrors it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -60,9 +63,9 @@ pub enum Status {
 #[derive(Default)]
 pub struct Updates {
     inner: Mutex<Inner>,
-    /// Held while the app's files are being replaced. `wait_for_install` takes
-    /// it, so quitting can't cut a half-written app short.
-    replacing: Mutex<()>,
+    /// True while the app's files are being replaced: quitting is held back
+    /// (`is_replacing`), so it can't cut a half-written app short.
+    replacing: AtomicBool,
     /// Windows: the engine was shut down for an installer (see `updater`).
     engine_stopped: AtomicBool,
 }
@@ -77,25 +80,45 @@ struct Inner {
 }
 
 /// Checks at launch, then once a day while `settings.check_for_updates` is on.
+/// The day is wall-clock time: timers stand still while the computer sleeps.
 pub fn start(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut checked_at: Option<SystemTime> = None;
         loop {
+            let due = checked_at.and_then(|at| at.elapsed().ok()).is_none_or(|age| age >= CHECK_INTERVAL);
             let enabled = app.state::<Host>().config().settings.check_for_updates;
-            let checked = enabled && check_for_update(app.clone()).await.is_ok();
-            tokio::time::sleep(if checked { CHECK_INTERVAL } else { RECHECK_SOON }).await;
+            if due && enabled && check_for_update(app.clone()).await.is_ok() {
+                checked_at = Some(SystemTime::now());
+            }
+            tokio::time::sleep(CHECK_TICK).await;
         }
     });
 }
 
-/// True once after an update was installed: this start must show the window.
-pub fn take_show_after_update(data_dir: &Path) -> bool {
-    std::fs::remove_file(data_dir.join(SHOW_AFTER_UPDATE)).is_ok()
+/// `Some` once after an install was started: this start must show the window.
+/// The note is empty, or says why the app is back without the update.
+pub fn take_after_update_note(data_dir: &Path) -> Option<String> {
+    let path = data_dir.join(AFTER_UPDATE_NOTE);
+    let note = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(path);
+    Some(note)
 }
 
-/// Blocks until no install is replacing the app's files. Called before the process exits.
+/// True while an install is replacing the app's files. Exits wait for it.
+pub fn is_replacing(app: &AppHandle) -> bool {
+    app.state::<Updates>().replacing.load(Ordering::Relaxed)
+}
+
+/// For an exit that can't be held back (macOS Dock Quit goes straight to
+/// `RunEvent::Exit`): gives a running install a moment to finish. Bounded,
+/// because an install that needs the macOS admin prompt waits for this thread,
+/// and at that point it has not touched the installed app yet.
 pub fn wait_for_install(app: &AppHandle) {
-    drop(app.state::<Updates>().replacing.lock());
+    let deadline = Instant::now() + EXIT_WAIT;
+    while is_replacing(app) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The window that would finish the install is gone: let go of the downloaded
@@ -111,7 +134,22 @@ pub fn on_window_closed(app: &AppHandle) {
 /// deb and rpm installs belong to the package manager (root, dependencies), and a
 /// dev build has no installed app to replace. Those are told about the update only.
 fn can_install() -> bool {
-    !tauri::is_dev() && matches!(bundle_type(), Some(BundleType::AppImage | BundleType::Nsis | BundleType::App))
+    !tauri::is_dev()
+        && match bundle_type() {
+            Some(BundleType::AppImage | BundleType::Nsis) => true,
+            // Reported for every macOS build. Outside a bundle the updater would
+            // replace the folder the binary sits in.
+            Some(BundleType::App) => in_app_bundle(),
+            _ => false,
+        }
+}
+
+/// The executable is `<name>.app/Contents/MacOS/<binary>`.
+fn in_app_bundle() -> bool {
+    let exe = tauri::utils::platform::current_exe().ok();
+    exe.as_deref()
+        .and_then(|exe| exe.ancestors().nth(3))
+        .is_some_and(|bundle| bundle.extension() == Some("app".as_ref()))
 }
 
 fn updater(app: &AppHandle) -> Result<Updater, Error> {
@@ -151,12 +189,13 @@ pub fn update_status(app: AppHandle) -> Status {
 }
 
 /// Asks the update server once. On failure the status goes back to what it was
-/// and the error is a message for the user. Does nothing while busy.
+/// and the error is a message for the user. Does nothing while busy, or while an
+/// update is already on offer: that offer stays until it is installed or fails.
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
     let previous = {
         let mut inner = state(&app);
-        if !matches!(inner.status, Status::Idle | Status::UpToDate | Status::Available { .. }) {
+        if !matches!(inner.status, Status::Idle | Status::UpToDate) {
             return Ok(());
         }
         // Claimed under the lock, so two checks can't both start.
@@ -273,32 +312,30 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
             return Err("There is no update to install.".into());
         };
         inner.status = Status::Installing { version: version.clone() };
+        // With the claim, before the worker starts: no exit slips in between.
+        app.state::<Updates>().replacing.store(true, Ordering::Relaxed);
         (update, package, version)
     };
     publish(&app, &Status::Installing { version: version.clone() });
-    let marker = app.state::<Host>().data_dir().join(SHOW_AFTER_UPDATE);
-    let _ = std::fs::write(&marker, "");
-    let handle = app.clone();
-    let installed = tauri::async_runtime::spawn_blocking(move || {
-        let updates = handle.state::<Updates>();
-        let _replacing = updates.replacing.lock().unwrap();
-        update.install(package)
-    })
-    .await;
+    let note = app.state::<Host>().data_dir().join(AFTER_UPDATE_NOTE);
+    let _ = std::fs::write(&note, "");
+    let installed = tauri::async_runtime::spawn_blocking(move || update.install(package)).await;
+    app.state::<Updates>().replacing.store(false, Ordering::Relaxed);
     let Err(error) = installed.map_err(|e| e.to_string()).and_then(|result| result.map_err(|e| e.to_string())) else {
-        app.request_restart();
+        crate::end_after_install(&app);
         return Ok(());
     };
+    let problem = format!("Couldn't install the update: {error}");
     if app.state::<Updates>().engine_stopped.load(Ordering::Relaxed) {
-        // Windows: the installer didn't start, after the engine was shut down for it.
-        // This version comes back whole by restarting (and shows its window).
-        tracing::error!("the update installer didn't start, restarting: {error}");
+        // Windows: the installer didn't start, after the engine was shut down for
+        // it. Restarting brings this version back whole, and it shows the note.
+        let _ = std::fs::write(&note, &problem);
         app.request_restart();
-    } else {
-        let _ = std::fs::remove_file(&marker);
-        set_status(&app, Status::Available { version, can_install: true });
+        return Ok(());
     }
-    Err(format!("Couldn't install the update: {error}"))
+    let _ = std::fs::remove_file(&note);
+    set_status(&app, Status::Available { version, can_install: true });
+    Err(problem)
 }
 
 #[cfg(test)]
