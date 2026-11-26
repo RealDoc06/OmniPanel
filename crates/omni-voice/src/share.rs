@@ -137,9 +137,11 @@ pub(crate) struct Mixer {
     retired: Producer<Feed>,
     /// Microphone callbacks, which come in bursts like the captures'.
     burst: Burst,
-    /// Gain at the end of the previous callback and its per-frame change in this one.
+    /// Gain while mixing a callback, its per-frame change, and where it ends (taken
+    /// over exactly at the next callback: summed up steps do not land on it).
     gain: f32,
     step: f32,
+    target: f32,
     /// The feeds' sum for one piece of a callback.
     apps: Box<[f32]>,
 }
@@ -161,6 +163,7 @@ pub(crate) fn mixer(rate: u32) -> (Mixer, MixerPort) {
         burst: Burst::new(rate),
         gain: 0.0,
         step: 0.0,
+        target: 0.0,
         apps: vec![0.0; 1024].into_boxed_slice(),
     };
     (mixer, MixerPort { feeds, retired })
@@ -203,6 +206,7 @@ impl Mixer {
                 Err(_) => break,
             }
         }
+        self.gain = std::mem::replace(&mut self.target, gain);
         self.step = (gain - self.gain) / frames.max(1) as f32;
         let block = self.burst.grow(now, frames);
         let mut any = false;
@@ -218,6 +222,12 @@ impl Mixer {
             self.gain = gain;
         }
         any
+    }
+
+    /// Throw away what every feed holds. For when an app stops being shared: what
+    /// was captured of it so far must not be heard any more.
+    pub fn flush(&mut self) {
+        self.feeds.iter_mut().flatten().for_each(|feed| feed.0.flush());
     }
 
     /// Add the callback's next `buf.len()` frames of every feed onto `buf`. Where an
@@ -421,6 +431,53 @@ mod tests {
         let open = run(0.4, 1.0, 20);
         assert!(open.iter().all(|&s| s < 0.41), "max {}", open.iter().fold(0.0f32, |m, s| m.max(*s)));
         assert!(open.ends_with(&[0.4]));
+    }
+
+    #[test]
+    fn an_app_that_stops_being_shared_is_cut_at_once() {
+        // Two apps; in callbacks of 1323 frames, whose 1024-frame pieces do not sum
+        // up to the gain exactly.
+        let (mut mixer, mut port) = mixer(48_000);
+        let (mut spotify, feed_a) = feed(48_000, 48_000);
+        let (mut firefox, feed_b) = feed(48_000, 48_000);
+        assert!(port.add(feed_a) && port.add(feed_b));
+        let (mut mic_clock, mut app_clock) = (clock(1323, 1), clock(1323, 1));
+        let mut callback = |mixer: &mut Mixer, gain: f32| {
+            let mut buf = vec![0.0; 1323];
+            if mixer.begin(mic_clock(), 1323, gain) {
+                buf.chunks_mut(1024).for_each(|part| mixer.add(part));
+            }
+            buf
+        };
+        let mut heard = Vec::new();
+        for _ in 0..20 {
+            let at = app_clock();
+            spotify.write_at(at, 1323, std::iter::repeat_n(0.5, 1323));
+            firefox.write_at(at, 1323, std::iter::repeat_n(0.2, 1323));
+            heard = callback(&mut mixer, 0.7);
+        }
+        assert!(heard.iter().all(|s| (s - 0.49).abs() < 1e-3), "both apps at the share level: {}", heard[0]);
+
+        // Spotify is unshared between two callbacks: its capture ends, the mixer is flushed.
+        drop(spotify);
+        mixer.flush();
+        for _ in 0..20 {
+            firefox.write_at(app_clock(), 1323, std::iter::repeat_n(0.2, 1323));
+            heard = callback(&mut mixer, 0.7);
+            assert!(
+                heard.iter().all(|&s| s < 0.141),
+                "nothing of Spotify is left: {:?}",
+                heard.iter().find(|s| **s >= 0.141)
+            );
+        }
+        assert!(heard.ends_with(&[0.2 * 0.7]));
+
+        // Shut, the gain lands on zero exactly, so the feeds are emptied while shut.
+        for _ in 0..3 {
+            firefox.write_at(app_clock(), 1323, std::iter::repeat_n(0.2, 1323));
+            heard = callback(&mut mixer, 0.0);
+        }
+        assert!(heard.iter().all(|&s| s == 0.0) && mixer.gain == 0.0);
     }
 
     #[test]

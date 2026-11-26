@@ -61,6 +61,8 @@ pub fn unsupported() -> Option<&'static str> {
 pub struct AppCapture {
     processes: Processes,
     running: Option<Running>,
+    /// The apps the running tap was made for.
+    apps: Vec<String>,
     changed: Changed,
     _listening: Listening,
 }
@@ -72,7 +74,13 @@ impl AppCapture {
     /// capture meanwhile finds the answer at its next `sync` of a new one.)
     pub fn new(changed: impl Fn() + Send + Sync + 'static) -> Self {
         let changed: Changed = Arc::new(changed);
-        Self { processes: Processes::default(), running: None, _listening: Listening::start(changed.clone()), changed }
+        Self {
+            processes: Processes::default(),
+            running: None,
+            apps: Vec::new(),
+            _listening: Listening::start(changed.clone()),
+            changed,
+        }
     }
 
     /// Capture exactly the apps in `apps` (their exact names, ignoring case) that
@@ -81,6 +89,12 @@ impl AppCapture {
     /// Returns the apps that are not running.
     pub fn sync(&mut self, apps: &[String], open: &mut dyn FnMut(u32) -> Sink) -> Result<Vec<String>> {
         let (objects, waiting) = self.objects_of(apps)?;
+        // Another list of apps gets a new tap (and sink): the old one may still be
+        // delivering sound of an app that is no longer wanted.
+        if self.apps != apps {
+            self.running = None;
+            self.apps = apps.to_vec();
+        }
         if objects.is_empty() {
             self.running = None;
             return Ok(waiting);
@@ -107,7 +121,7 @@ impl AppCapture {
         let (mut objects, mut waiting) = (Vec::new(), Vec::new());
         for app in apps {
             let query = app.trim().to_lowercase();
-            let named = groups.iter().filter(|g| g.name.to_lowercase() == query);
+            let named = groups.iter().filter(|g| g.name.trim().to_lowercase() == query);
             let before = objects.len();
             objects.extend(named.flat_map(|g| g.objects.iter().copied()));
             if objects.len() == before {

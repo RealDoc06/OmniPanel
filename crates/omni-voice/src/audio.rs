@@ -87,6 +87,9 @@ pub(crate) struct Shared {
     /// see [`crate::VoiceEngine::commit_shares`].
     pub shares_committed: AtomicU64,
     pub shares_applied: AtomicU64,
+    /// Counts the times an app stopped being shared: the input callback then
+    /// throws away what its mixer holds, so nothing captured of it is still heard.
+    pub shares_removed: AtomicU32,
     /// Whether a general-purpose virtual cable output exists, once known.
     pub has_cable: Mutex<Option<bool>>,
 }
@@ -526,6 +529,8 @@ struct Session {
     /// A [`Command::SharesChanged`] is on its way: the capture reports bursts of
     /// changes (every volume step of any app is one), a single sync answers them all.
     shares_changed: Arc<AtomicBool>,
+    /// The apps the capture was last lined up with.
+    shares_synced: Vec<String>,
 }
 
 /// The microphone actually open, with a delay before retrying a failed switch.
@@ -586,6 +591,7 @@ impl Session {
             monitor_rings: monitor_in,
             retired_rings: retired_rings_tx,
             mixer,
+            removed: 0,
             in_block: in_block.clone(),
             callbacks: callbacks.clone(),
             shared: shared.clone(),
@@ -614,6 +620,7 @@ impl Session {
             capture: None,
             output_virtual: false,
             shares_changed: Arc::default(),
+            shares_synced: Vec::new(),
         })
     }
 
@@ -647,9 +654,15 @@ impl Session {
             }
             status.share_error = error;
             status.share_waiting = waiting;
+            // The capture of an app that is no longer shared has ended above; what the
+            // mixer still holds of it goes too, before the mix may open for the new list.
+            if self.shares_synced.iter().any(|app| !shares.contains(app)) {
+                shared.shares_removed.fetch_add(1, Ordering::Relaxed);
+            }
             // From here on the feeds in the mixer belong to exactly this list.
             shared.shares_applied.store(share::key(shares), Ordering::Relaxed);
         });
+        self.shares_synced = shares.to_vec();
     }
 
     /// Returns the shared apps with nothing to capture right now.
@@ -816,8 +829,10 @@ pub(crate) struct InputSide {
     /// Monitor rings from the audio thread, and the replaced ones going back to be freed.
     monitor_rings: rtrb::Consumer<rtrb::Producer<f32>>,
     retired_rings: rtrb::Producer<rtrb::Producer<f32>>,
-    /// Shared app sound, added for the main output only.
+    /// Shared app sound, added for the main output only, and the count of
+    /// [`Shared::shares_removed`] it is up to date with.
     mixer: Mixer,
+    removed: u32,
     in_block: Arc<AtomicUsize>,
     callbacks: Arc<AtomicU32>,
     shared: Arc<Shared>,
@@ -846,6 +861,10 @@ impl InputSide {
         self.processor.set_params(self.shared.params.load());
         self.in_block.store(frames, Ordering::Relaxed);
         self.callbacks.fetch_add(1, Ordering::Relaxed);
+        let removed = self.shared.shares_removed.load(Ordering::Relaxed);
+        if std::mem::replace(&mut self.removed, removed) != removed {
+            self.mixer.flush();
+        }
         // Shut unless the capture is lined up with the list of apps shared right now.
         let committed = self.shared.shares_committed.load(Ordering::Relaxed);
         let open = committed != 0 && committed == self.shared.shares_applied.load(Ordering::Relaxed);
@@ -1099,6 +1118,7 @@ mod tests {
             monitor_rings: monitor_in,
             retired_rings,
             mixer,
+            removed: 0,
             in_block: Arc::default(),
             callbacks: Arc::default(),
             shared,

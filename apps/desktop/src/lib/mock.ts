@@ -365,7 +365,7 @@ function runtime(): RuntimeState {
             : null,
       shareUnsupported: os === "windows" ? "Sharing app sound into the microphone is not supported on Windows yet." : null,
       shareError: null,
-      shareWaiting: voice.sharedApps.filter((a) => !mixer.apps.some((m) => m.playing && [m.id, m.name].some((x) => x.toLowerCase() === a.toLowerCase()))),
+      shareWaiting: voice.sharedApps.filter((a) => !mixer.apps.some((m) => m.playing && m.name.toLowerCase() === a.toLowerCase())),
     },
     audio: {
       perAppVolume: true,
