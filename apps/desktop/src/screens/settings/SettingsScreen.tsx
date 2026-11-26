@@ -378,10 +378,7 @@ function UpdateSettings() {
       {"version" in status ? (
         <Field label="New version" hint={manual ? "This copy can't update itself. Download the new installer and open it." : undefined}>
           <div className="flex items-center gap-2">
-            <span role="status" data-selectable>
-              OmniPanel {status.version}
-              {status.state === "downloading" && ` · downloading${status.percent === null ? "…" : ` ${status.percent}%`}`}
-            </span>
+            <span data-selectable>OmniPanel {status.version}</span>
             {manual ? (
               <Button size="sm" icon="external-link" onClick={() => openLink(`${REPO}/releases/tag/v${status.version}`)}>
                 Download
@@ -391,6 +388,9 @@ function UpdateSettings() {
                 Install and restart
               </Button>
             )}
+            <span role="status" className="text-muted">
+              {status.state === "downloading" && `Downloading${status.percent === null ? "…" : ` ${status.percent}%`}`}
+            </span>
           </div>
         </Field>
       ) : (

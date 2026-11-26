@@ -11,7 +11,7 @@ use serde::Serialize;
 use tauri::utils::config::BundleType;
 use tauri::utils::platform::bundle_type;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_updater::{Update, Updater, UpdaterExt};
+use tauri_plugin_updater::{Error, Update, Updater, UpdaterExt};
 
 use crate::{tray, window};
 
@@ -77,7 +77,7 @@ fn can_install() -> bool {
         && matches!(bundle_type(), Some(BundleType::AppImage | BundleType::Nsis | BundleType::Msi | BundleType::App))
 }
 
-fn updater(app: &AppHandle) -> tauri_plugin_updater::Result<Updater> {
+fn updater(app: &AppHandle) -> Result<Updater, Error> {
     let handle = app.clone();
     app.updater_builder()
         .timeout(CHECK_TIMEOUT)
@@ -171,7 +171,14 @@ pub async fn download_update(app: AppHandle) -> Result<(), String> {
         }
         Err(e) => {
             set_status(&app, Status::Available { version, can_install: true });
-            Err(format!("Couldn't download the update: {e}"))
+            let refused =
+                matches!(e, Error::Minisign(_) | Error::SignedVersionMismatch { .. } | Error::MissingSignedVersion);
+            let what = if refused {
+                "The update failed its signature check and was not installed"
+            } else {
+                "Couldn't download the update"
+            };
+            Err(format!("{what}: {e}"))
         }
     }
 }
