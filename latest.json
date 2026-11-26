@@ -1,0 +1,71 @@
+{
+  "version": "0.1.0-alpha.2",
+  "notes": "See CHANGELOG.md. Alpha builds are unsigned; the README explains how to run them.",
+  "pub_date": "2026-11-26T17:24:34.843Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlhPZ3pKOFgyeDRmZ3U5dldxdUhmT0ozWCtHYXJkLzJPRGtMbWdGZGE4dkgyMzVXUVRXdHlxengwNDBuZjRodHFBUExaMWFqYU1CNkhCdnM4MzczY2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzMzk3CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4wLWFscGhhLjIKVW04UVcxWFk1d3JwRnF6NUxYTGhBSFF0NmhMSnhXZnJrb3YxUHBhVm1iTFNrRUM2UzliT3hqOGxZdVAvWkVlaDViL0FFeFNiVWJYZndQTnJNd1NoQXc9PQo=",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_x64-setup.exe"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlhPZ3pKOFgyeDRmZ3U5dldxdUhmT0ozWCtHYXJkLzJPRGtMbWdGZGE4dkgyMzVXUVRXdHlxengwNDBuZjRodHFBUExaMWFqYU1CNkhCdnM4MzczY2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzMzk3CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4wLWFscGhhLjIKVW04UVcxWFk1d3JwRnF6NUxYTGhBSFF0NmhMSnhXZnJrb3YxUHBhVm1iTFNrRUM2UzliT3hqOGxZdVAvWkVlaDViL0FFeFNiVWJYZndQTnJNd1NoQXc9PQo=",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRmV5YjYyamlZdXl6S0ZYNzZ1L0t6NEdIMG1ybFErM1AwcVFtWDlvZU4vM0xGd21jSjFRWVlpejFWOFROL3lvbTZCNWNqbEtJS2FLK3hvd21vdjRTM1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDA2CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkRRVGxUSndrRXQ5QWhHZ3ZFM1kzenQzOTZBc0Rjd2J5U1duUmMyV0NKUnVNbStsOGpSQ2kreUdGZjcvTlpTbHFrcUpaTExDTWV1ME4weHU5UDl0N0FnPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRmV5YjYyamlZdXl6S0ZYNzZ1L0t6NEdIMG1ybFErM1AwcVFtWDlvZU4vM0xGd21jSjFRWVlpejFWOFROL3lvbTZCNWNqbEtJS2FLK3hvd21vdjRTM1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDA2CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkRRVGxUSndrRXQ5QWhHZ3ZFM1kzenQzOTZBc0Rjd2J5U1duUmMyV0NKUnVNbStsOGpSQ2kreUdGZjcvTlpTbHFrcUpaTExDTWV1ME4weHU5UDl0N0FnPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlpJcitEMy81OWxES2VmdFJOY0ZLdFI0YW50dW4yWXFYbzFGYTRkM1l0ZTBycGZkZllCRXB6bjVLd1FBUUVZdmJ3WXRzVVBYTVZvL1g3NTlIRXRkMmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDA2CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfYW1kNjQuZGViCXZlcnNpb246MC4xLjAtYWxwaGEuMgpLaWdVUlR1d0dMWEhpSHd3MC9nNWdHMFEzQlRCdkd3NUlMRk1TZkV0VHVDQnZHVEtjOUdFeGpHUHNLMklublBjZ3Rwa1NVRVMvYU5Zd05RZVdNbklEdz09Cg==",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_amd64.deb"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlJWYUlRUDIyL0x1cDlNOXZDVGtOR2ZrZDFWMmltaFR2NWNjL0puNVNycEFDcVhqNUdmK0lhMFFZbmN0bTlDUmJRWlNMZDBIQ1FWdERXcFNhbERhcEFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDA2CWZpbGU6T21uaVBhbmVsLTAuMS4wLWFscGhhLjItMS54ODZfNjQucnBtCXZlcnNpb246MC4xLjAtYWxwaGEuMgpCRXZZaXh5a1hhMmsvYy9EUFlUWjF6ZTh3K1EwZUVtR3daMTNkWW5CSVFkK3AyRWZsTDI2T3IwejJFSHRieDBJNEh2RzhXbHd4MGttWm1iemRiSitDZz09Cg==",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel-0.1.0-alpha.2-1.x86_64.rpm"
+    },
+    "linux-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRmN2OEF4TnhsZ2FFQW41VGwwSFZzcWlhR01QaW5EVVdEVFJSdUdkOGZJMlNLcVVzbXRhYmMyMVQ4TGJ3OFd2Z2prNnE4aXN1ek1yc2F1RzNPWk9JRWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDY4CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfYWFyY2g2NC5BcHBJbWFnZQl2ZXJzaW9uOjAuMS4wLWFscGhhLjIKdXZGS29zejNFdlhjMDJMQXVRTjFaRFBjc1YvdzZsMjZJYzUxYTAzUmlEQW0xK1NacHBRK29oZWRzOFM5K1BOUlV3eGJTU3BjaHhCZ0ZyWVBmYkF6RFE9PQo=",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_aarch64.AppImage"
+    },
+    "linux-aarch64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRmN2OEF4TnhsZ2FFQW41VGwwSFZzcWlhR01QaW5EVVdEVFJSdUdkOGZJMlNLcVVzbXRhYmMyMVQ4TGJ3OFd2Z2prNnE4aXN1ek1yc2F1RzNPWk9JRWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDY4CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfYWFyY2g2NC5BcHBJbWFnZQl2ZXJzaW9uOjAuMS4wLWFscGhhLjIKdXZGS29zejNFdlhjMDJMQXVRTjFaRFBjc1YvdzZsMjZJYzUxYTAzUmlEQW0xK1NacHBRK29oZWRzOFM5K1BOUlV3eGJTU3BjaHhCZ0ZyWVBmYkF6RFE9PQo=",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_aarch64.AppImage"
+    },
+    "linux-aarch64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRllWMi9CQ3k0N3JibDBtZ0tqOWpOQ3BTcFo2RC9Ed2MwTEQ1d2YyNDV3WWwxQ1lpNi9IWk4yK1ZIK2FGRnhJQmlCVUlQRW5oQ1hPcW5Vb0dWeFlhdFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDY4CWZpbGU6T21uaVBhbmVsXzAuMS4wLWFscGhhLjJfYXJtNjQuZGViCXZlcnNpb246MC4xLjAtYWxwaGEuMgppemlrT09Cd3F0a3I2dUQwbG5FMEN5eW9LK0dVRFFiVjhyT2FHcU14WGgxME1OTi9MeVlSUFVjQVRUVWlHQUdyeWlrbWd3enJRK2Z5bUhBcXlLd3NDZz09Cg==",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_arm64.deb"
+    },
+    "linux-aarch64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRmFuWVVZTmlzaGQ3dkN1Ung5cDBFTzl0QWV5OXVXWHBXVHJYSXpaSGN3MmFlUk95aDM5WEdlUHg0SEhTRXV2V3pxL3VwYXNoM043RDc3UzRXZnB3bGdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzNDY4CWZpbGU6T21uaVBhbmVsLTAuMS4wLWFscGhhLjItMS5hYXJjaDY0LnJwbQl2ZXJzaW9uOjAuMS4wLWFscGhhLjIKcnhjY1Vmejg2N1Nhc0Q3UHcvYytrc05keEVIZmlHcFBDYnA0MW5VbzBnZlN4MHo4T1BWeFlQenFGSm4xa2pmNEd2WjZzbGxRYTJkNnV2Z0ZmVFJqQ1E9PQo=",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel-0.1.0-alpha.2-1.aarch64.rpm"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlMwcVF6RmlRSVR2eFY2azhOcE1zS2VWOTFKbDZoOXMrbmRkbm9XeUNwK2pXcTZBQVFuUkxKYmdvR1JGUkJ2Rm5GVkdHYW8xQm9QN2RjTkxQVjJSM1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzODY5CWZpbGU6T21uaVBhbmVsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkFEakxJUmJsa1pEQlJJM0liZ3MxODBXTkJtL2UyNkNwdWl5ZUh5eC8ybFB4NGhrRk1hN0pYN3dkUDc3MmxrTk1yYlhkM2JGanJVOURSNjUwTUpZa0RRPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_universal.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlMwcVF6RmlRSVR2eFY2azhOcE1zS2VWOTFKbDZoOXMrbmRkbm9XeUNwK2pXcTZBQVFuUkxKYmdvR1JGUkJ2Rm5GVkdHYW8xQm9QN2RjTkxQVjJSM1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzODY5CWZpbGU6T21uaVBhbmVsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkFEakxJUmJsa1pEQlJJM0liZ3MxODBXTkJtL2UyNkNwdWl5ZUh5eC8ybFB4NGhrRk1hN0pYN3dkUDc3MmxrTk1yYlhkM2JGanJVOURSNjUwTUpZa0RRPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_universal.app.tar.gz"
+    },
+    "darwin-universal": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlMwcVF6RmlRSVR2eFY2azhOcE1zS2VWOTFKbDZoOXMrbmRkbm9XeUNwK2pXcTZBQVFuUkxKYmdvR1JGUkJ2Rm5GVkdHYW8xQm9QN2RjTkxQVjJSM1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzODY5CWZpbGU6T21uaVBhbmVsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkFEakxJUmJsa1pEQlJJM0liZ3MxODBXTkJtL2UyNkNwdWl5ZUh5eC8ybFB4NGhrRk1hN0pYN3dkUDc3MmxrTk1yYlhkM2JGanJVOURSNjUwTUpZa0RRPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_universal.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlMwcVF6RmlRSVR2eFY2azhOcE1zS2VWOTFKbDZoOXMrbmRkbm9XeUNwK2pXcTZBQVFuUkxKYmdvR1JGUkJ2Rm5GVkdHYW8xQm9QN2RjTkxQVjJSM1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzODY5CWZpbGU6T21uaVBhbmVsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkFEakxJUmJsa1pEQlJJM0liZ3MxODBXTkJtL2UyNkNwdWl5ZUh5eC8ybFB4NGhrRk1hN0pYN3dkUDc3MmxrTk1yYlhkM2JGanJVOURSNjUwTUpZa0RRPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_universal.app.tar.gz"
+    },
+    "darwin-x86_64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlMwcVF6RmlRSVR2eFY2azhOcE1zS2VWOTFKbDZoOXMrbmRkbm9XeUNwK2pXcTZBQVFuUkxKYmdvR1JGUkJ2Rm5GVkdHYW8xQm9QN2RjTkxQVjJSM1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzODY5CWZpbGU6T21uaVBhbmVsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkFEakxJUmJsa1pEQlJJM0liZ3MxODBXTkJtL2UyNkNwdWl5ZUh5eC8ybFB4NGhrRk1hN0pYN3dkUDc3MmxrTk1yYlhkM2JGanJVOURSNjUwTUpZa0RRPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_universal.app.tar.gz"
+    },
+    "darwin-universal-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb21NS0VHUGdmRlMwcVF6RmlRSVR2eFY2azhOcE1zS2VWOTFKbDZoOXMrbmRkbm9XeUNwK2pXcTZBQVFuUkxKYmdvR1JGUkJ2Rm5GVkdHYW8xQm9QN2RjTkxQVjJSM1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEzODY5CWZpbGU6T21uaVBhbmVsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuMC1hbHBoYS4yCkFEakxJUmJsa1pEQlJJM0liZ3MxODBXTkJtL2UyNkNwdWl5ZUh5eC8ybFB4NGhrRk1hN0pYN3dkUDc3MmxrTk1yYlhkM2JGanJVOURSNjUwTUpZa0RRPT0K",
+      "url": "https://github.com/RealDoc06/OmniPanel/releases/download/v0.1.0-alpha.2/OmniPanel_0.1.0-alpha.2_universal.app.tar.gz"
+    }
+  }
+}
