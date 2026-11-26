@@ -3208,6 +3208,7 @@ dependencies = [
  "cpal",
  "futures",
  "hound",
+ "omni-audio",
  "omni-core",
  "pulseaudio",
  "rtrb",

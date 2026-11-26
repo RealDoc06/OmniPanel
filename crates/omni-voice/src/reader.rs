@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use rtrb::Consumer;
 
@@ -22,6 +23,8 @@ const MAX_STEER: f64 = 0.005;
 const MARGIN_SECS: f64 = 0.003;
 /// Time constant of the callback-size peak hold (a one-off large callback fades out).
 const HOLD_SECS: f64 = 10.0;
+/// A gap between callbacks this much longer than two of them is a stall.
+const STALL_SECS: f64 = 0.1;
 
 pub(crate) struct Reader {
     rx: Consumer<f32>,
@@ -45,6 +48,17 @@ pub(crate) struct Reader {
     last: f32,
     /// Anti-aliasing when the output rate is lower than the input rate.
     aa: Option<[Biquad; 2]>,
+    /// See [`Self::starting_over_after_a_stall`].
+    mark: Option<Mark>,
+}
+
+/// What a reader that starts over after a stall goes by.
+struct Mark {
+    read: Box<dyn Fn() -> u64 + Send>,
+    /// The mark at the previous callback, and when that was (at first: when the
+    /// reader was made, so an output that is slow to start counts as stalled too).
+    seen: u64,
+    called: Instant,
 }
 
 impl Reader {
@@ -68,16 +82,52 @@ impl Reader {
             gain_step: (1.0 / (0.005 * out_rate)) as f32,
             last: 0.0,
             aa: (base_ratio > 1.01).then(|| Biquad::butterworth4((0.45 * out_rate) as f32, in_rate as f32)),
+            mark: None,
         }
+    }
+
+    /// Makes a reader that comes back from a stall (no callback for much longer
+    /// than its callbacks take) throw away everything that waited in the ring when
+    /// `mark()` changed meanwhile: that was written before the change and is not
+    /// played late. Whatever the ring holds and however large the callbacks are.
+    pub fn starting_over_after_a_stall(mut self, mark: impl Fn() -> u64 + Send + 'static) -> Self {
+        let seen = mark();
+        self.mark = Some(Mark { read: Box::new(mark), seen, called: Instant::now() });
+        self
     }
 
     /// Render `frames` output samples; `put(i, sample)` writes frame `i`.
     /// Call once per output callback.
-    pub fn render(&mut self, frames: usize, mut put: impl FnMut(usize, f32)) {
+    pub fn render(&mut self, frames: usize, put: impl FnMut(usize, f32)) {
+        self.render_at(Instant::now(), frames, put);
+    }
+
+    /// [`Self::render`] for a callback that came at `now`.
+    fn render_at(&mut self, now: Instant, frames: usize, put: impl FnMut(usize, f32)) {
+        if let Some(mark) = self.mark.as_mut() {
+            // By the callbacks seen before the gap: the one that ends a stall may be
+            // any size.
+            let callback = self.out_hold / self.out_rate;
+            let gap = now.saturating_duration_since(std::mem::replace(&mut mark.called, now));
+            let stalled = gap.as_secs_f64() > 2.0 * callback + STALL_SECS;
+            let read = (mark.read)();
+            if std::mem::replace(&mut mark.seen, read) != read && stalled {
+                self.flush();
+            }
+        }
+        self.begin(frames, frames);
+        self.fill(frames, put);
+    }
+
+    /// First half of [`Self::render`], for a consumer that produces one callback
+    /// in pieces: look at the ring once for a callback of `frames` frames, then
+    /// [`Self::fill`] the pieces. `block` is how much the consumer takes in one
+    /// go, which is more than `frames` when its callbacks come in bursts.
+    pub fn begin(&mut self, frames: usize, block: usize) {
         let decay = 1.0 - frames as f64 / (HOLD_SECS * self.out_rate);
         let in_block = self.in_block.load(Ordering::Relaxed) as f64;
         self.in_hold = (self.in_hold * decay).max(in_block);
-        self.out_hold = (self.out_hold * decay).max(frames as f64);
+        self.out_hold = (self.out_hold * decay).max(block as f64);
         let fill = self.rx.slots() as f64;
         let in_started = in_block > 0.0;
         // Ring fill (input samples) to aim for: one block each way plus jitter margin.
@@ -88,7 +138,7 @@ impl Reader {
 
         if !self.primed {
             if !in_started || fill < target {
-                return self.silence(0, frames, &mut put);
+                return;
             }
             self.skip((fill - target) as usize);
             self.primed = true;
@@ -105,7 +155,14 @@ impl Reader {
         }
         let steer = ((self.avg_fill - target) / (STEER_SECS * self.in_rate)).clamp(-MAX_STEER, MAX_STEER);
         self.ratio = self.base_ratio * (1.0 + steer);
+    }
 
+    /// Second half of [`Self::render`]: the next `frames` samples of the callback
+    /// [`Self::begin`] announced (silence until the ring is primed).
+    pub fn fill(&mut self, frames: usize, mut put: impl FnMut(usize, f32)) {
+        if !self.primed {
+            return self.silence(0, frames, &mut put);
+        }
         for i in 0..frames {
             self.frac += self.ratio;
             while self.frac >= 1.0 {
@@ -142,6 +199,33 @@ impl Reader {
         self.gain = 0.0;
     }
 
+    /// The writer is gone and everything it wrote was played, or will never be:
+    /// what is left of a ring that is not primed stays below its target for good.
+    pub fn finished(&self) -> bool {
+        self.rx.is_abandoned() && (self.rx.is_empty() || !self.primed)
+    }
+
+    /// Samples are coming out (the ring is primed), as opposed to still filling up.
+    pub fn playing(&self) -> bool {
+        self.primed
+    }
+
+    /// The writer is gone: nothing more will come.
+    pub fn ended(&self) -> bool {
+        self.rx.is_abandoned()
+    }
+
+    /// Throw away what is buffered; playing starts over with what comes after.
+    pub fn flush(&mut self) {
+        self.skip(self.rx.slots());
+        self.primed = false;
+        self.gain = 0.0;
+        self.last = 0.0;
+        // Nothing of what was thrown away lingers in the filters either.
+        self.hist = [0.0; 4];
+        self.aa.iter_mut().flatten().for_each(Biquad::reset);
+    }
+
     fn skip(&mut self, n: usize) {
         if let Ok(chunk) = self.rx.read_chunk(n.min(self.rx.slots())) {
             chunk.commit_all();
@@ -151,6 +235,8 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     /// Ring size the engine uses.
@@ -235,5 +321,52 @@ mod tests {
         // A ring too small for that fill plays with gaps instead of staying silent.
         let (_, _, out) = simulate(48_000.0, 16_384, 48_000.0, 16_384, 10.0, 24_000);
         assert!(rms(&out[out.len() / 2..]) > 0.1);
+    }
+
+    /// The output stalls while what it plays changes (an app stops being shared):
+    /// when it comes back, nothing that waited in the ring from before is played.
+    /// Also with callbacks so large that the ring never counts as "way behind", and
+    /// when the callback that ends the stall is much larger than those before it.
+    #[test]
+    fn a_reader_back_from_a_stall_starts_over_when_its_mark_changed() {
+        // Callbacks of `block` frames, a stall of `stall` seconds, then `back` frames.
+        let heard_after_a_stall = |block: usize, stall: f64, back: usize, marked: bool| {
+            let (mut tx, rx) = rtrb::RingBuffer::new(96_000);
+            let mark = Arc::new(AtomicUsize::new(1));
+            let read = mark.clone();
+            let mut reader = Reader::new(rx, 48_000, 48_000, Arc::new(AtomicUsize::new(block)))
+                .starting_over_after_a_stall(move || read.load(Ordering::Relaxed) as u64);
+            let mut now = Instant::now();
+            // `callbacks` input blocks of `level`, each played at once unless `stalled`.
+            let mut run = |now: &mut Instant, block: usize, level: f32, callbacks: usize, stalled: bool| {
+                let mut out = Vec::new();
+                for _ in 0..callbacks {
+                    for _ in 0..block {
+                        let _ = tx.push(level);
+                    }
+                    *now += Duration::from_secs_f64(block as f64 / 48_000.0);
+                    if !stalled {
+                        let mut buf = vec![0.0f32; block];
+                        reader.render_at(*now, block, |i, s| buf[i] = s);
+                        out.extend(buf);
+                    }
+                }
+                out
+            };
+            assert!(run(&mut now, block, 0.9, 8, false).ends_with(&[0.9]));
+            run(&mut now, block, 0.9, (stall * 48_000.0) as usize / block, true);
+            if marked {
+                mark.store(2, Ordering::Relaxed);
+            }
+            run(&mut now, back, 0.1, 8, false)
+        };
+        for (block, stall, back) in [(480, 3.0, 480), (24_000, 3.0, 24_000), (480, 0.6, 24_000)] {
+            let late = heard_after_a_stall(block, stall, back, false);
+            assert!(late.iter().any(|&s| s > 0.8), "{block}/{back}: an unmarked backlog is still played");
+            let fresh = heard_after_a_stall(block, stall, back, true);
+            let max = fresh.iter().fold(0.0f32, |m, s| m.max(*s));
+            assert!(max < 0.11, "{block}/{back}: max {max}");
+            assert!(fresh.ends_with(&[0.1]), "{block}/{back}");
+        }
     }
 }

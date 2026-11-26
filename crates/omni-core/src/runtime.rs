@@ -145,6 +145,14 @@ pub struct VoiceStatus {
     pub virtual_mic: Option<String>,
     /// Shown when no virtual cable is installed (install hint per OS).
     pub hint: Option<String>,
+    /// Why app sound cannot be shared into the microphone on this system
+    /// (`None` = it can).
+    pub share_unsupported: Option<String>,
+    /// Why the shared apps are not being heard right now, e.g. a missing permission.
+    pub share_error: Option<String>,
+    /// Shared apps with nothing to capture right now: not open, or (Linux) not
+    /// playing anything yet. They are heard as soon as they play.
+    pub share_waiting: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]

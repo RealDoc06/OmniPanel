@@ -6,6 +6,8 @@
   deb and rpm installs get a link to the new package.
 - Choose the speaker and the microphone of each app in Sound, or with a button. Linux does both, macOS the speaker;
   Windows not yet.
+- Share an app's sound into your microphone, from the Sound screen or a deck button, so a call hears what you are
+  hearing (macOS 14.2+ and Linux; not on Windows yet).
 
 ## 0.1.0-alpha.1
 

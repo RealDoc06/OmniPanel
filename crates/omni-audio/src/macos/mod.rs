@@ -26,6 +26,7 @@
 //! wanted ones are missing (a failed build, permission not granted yet).
 
 mod ca;
+pub mod capture;
 mod device;
 mod process;
 mod tap;

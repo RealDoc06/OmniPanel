@@ -1,5 +1,6 @@
-// Sound screen: the mixer (computer sound, microphone, per-app volume and devices)
-// followed by the voice changer section (`sound-voice` anchor).
+// Sound screen: the mixer (computer sound, microphone, per-app volume and devices),
+// sharing app sound into the microphone (`sound-share`) and the voice changer section
+// (`sound-voice` anchor).
 import type { AppAudio, AppRoute, AudioDirection, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
 import { useRef, useState, type ReactNode } from "react";
 import { DeviceSelect } from "../../components/DeviceSelect";
@@ -12,6 +13,7 @@ import { usePolling, useThrottled } from "../../lib/hooks";
 import { run, useAnchor, useIsMac } from "../../lib/store";
 import { toastError } from "../../lib/toast";
 import { cx, errorMessage } from "../../lib/util";
+import { ShareAppsSection } from "./ShareApps";
 import { VoiceChangerSection } from "./VoiceChanger";
 
 /** macOS privacy pane for "Screen & System Audio Recording", which per-app volume needs. */
@@ -26,6 +28,7 @@ export function SoundScreen() {
         <Section title="Volume" id="sound-volume">
           <Mixer />
         </Section>
+        <ShareAppsSection />
         <VoiceChangerSection />
       </div>
     </>

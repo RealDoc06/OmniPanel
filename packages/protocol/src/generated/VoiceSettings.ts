@@ -13,4 +13,16 @@ outputDevice: string | null,
 /**
  * Also play the processed voice on `monitor_device` (headphones).
  */
-monitor: boolean, monitorDevice: string | null, inputGainDb: number, outputGainDb: number, noiseGate: boolean, gateThresholdDb: number, };
+monitor: boolean, monitorDevice: string | null, inputGainDb: number, outputGainDb: number, noiseGate: boolean, gateThresholdDb: number, 
+/**
+ * Apps whose sound is mixed into the voice output next to the microphone, so
+ * a call hears them too (the apps' exact names, ignoring case). The apps
+ * keep playing normally. Works with the voice changer off (the voice then
+ * passes through unchanged) and never resumes by itself after a restart.
+ * Changed through [`crate::VoiceOp`], one app at a time.
+ */
+sharedApps: Array<string>, 
+/**
+ * Level of the shared app sound, -30 to +12 dB.
+ */
+shareGainDb: number, };

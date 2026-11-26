@@ -18,9 +18,9 @@ use pulseaudio::protocol;
 use crate::audio::InputSide;
 use crate::{Result, VoiceError};
 
-const FRAGMENT_SECS: f32 = 0.005;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const CREATE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const FRAGMENT_SECS: f32 = 0.005;
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const CREATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct Capture {
     stream: pulseaudio::RecordStream,
@@ -74,7 +74,10 @@ fn connect() -> Result<pulseaudio::Client> {
 /// Run `job` on a helper thread and wait at most `timeout`: the pulseaudio crate
 /// waits for the server without one. A job that never returns leaks its thread;
 /// one that returns late drops its result (a late stream is deleted on drop).
-fn with_timeout<T: Send + 'static>(timeout: Duration, job: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+pub(crate) fn with_timeout<T: Send + 'static>(
+    timeout: Duration,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("omni-voice-pulse".into())
@@ -85,7 +88,7 @@ fn with_timeout<T: Send + 'static>(timeout: Duration, job: impl FnOnce() -> T + 
     rx.recv_timeout(timeout).map_err(|_| VoiceError::Backend("PulseAudio did not respond".into()))
 }
 
-fn pulse_error(err: pulseaudio::ClientError, what: &str) -> VoiceError {
+pub(crate) fn pulse_error(err: pulseaudio::ClientError, what: &str) -> VoiceError {
     match err {
         pulseaudio::ClientError::ServerError(protocol::PulseError::NoEntity) => VoiceError::DeviceNotFound(what.into()),
         other => VoiceError::Backend(format!("PulseAudio: {other}")),

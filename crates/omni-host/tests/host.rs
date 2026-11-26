@@ -35,6 +35,39 @@ async fn voice_cycle_walks_the_given_presets_and_persists() {
 }
 
 #[tokio::test]
+async fn sharing_an_app_toggles_and_does_not_survive_a_restart() {
+    let host = start_host().await;
+    let share = |op: fn(String) -> VoiceOp| Action::Voice { op: op("Spotify".into()) };
+    let toggle = share(|app| VoiceOp::ToggleShareApp { app });
+    let shared = |host: &Host| host.config().settings.voice.shared_apps.clone();
+    if let Some(reason) = omni_voice::share_unsupported() {
+        // Where apps cannot be captured the action says so and changes nothing.
+        let error = host.run_action(toggle).await.unwrap_err();
+        assert_eq!(error.to_string(), reason);
+        assert!(shared(&host).is_empty());
+        host.shutdown().await;
+        return;
+    }
+
+    assert_eq!(host.run_action(toggle.clone()).await.unwrap().message.as_deref(), Some("Sharing Spotify"));
+    // Sharing needs no voice effect, and another spelling of the app is the same app.
+    assert!(!host.config().settings.voice.enabled);
+    host.run_action(Action::Voice { op: VoiceOp::ShareApp { app: " spotify ".into() } }).await.unwrap();
+    assert_eq!(shared(&host), ["Spotify"]);
+    host.run_action(toggle.clone()).await.unwrap();
+    assert!(shared(&host).is_empty());
+    host.run_action(share(|app| VoiceOp::UnshareApp { app })).await.unwrap();
+    assert!(host.run_action(Action::Voice { op: VoiceOp::ShareApp { app: " ".into() } }).await.is_err());
+
+    host.run_action(toggle).await.unwrap();
+    let data_dir = host.data_dir().to_path_buf();
+    host.shutdown().await;
+    let restarted = Host::start(HostOptions { data_dir, version: "test".into() }).await.unwrap();
+    assert!(shared(&restarted).is_empty(), "a later call must not carry the app's sound unasked");
+    restarted.shutdown().await;
+}
+
+#[tokio::test]
 async fn hotkeys_are_deduplicated_case_insensitively() {
     let host = start_host().await;
     let mut profile = host.config().profiles[0].clone();

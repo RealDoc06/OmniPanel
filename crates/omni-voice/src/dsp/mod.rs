@@ -53,6 +53,11 @@ impl From<&VoiceSettings> for Params {
     }
 }
 
+/// Linear gain of the shared app sound ([`VoiceSettings::share_gain_db`], -30 to +12 dB like its slider).
+pub(crate) fn share_gain(settings: &VoiceSettings) -> f32 {
+    db_to_gain(param(settings.share_gain_db, -30.0, 12.0, 0.0))
+}
+
 /// An effect chain built from a preset's effects. Building allocates, processing never does.
 ///
 /// Chains are loudness-matched: building one measures it with speech-shaped
@@ -514,7 +519,7 @@ fn soft_clip(x: f32) -> f32 {
 
 /// Safety limiter: transparent below 0.8, smooth saturation to ±1 above.
 #[inline]
-fn limit(x: f32) -> f32 {
+pub(crate) fn limit(x: f32) -> f32 {
     const KNEE: f32 = 0.8;
     let a = x.abs();
     if a <= KNEE { x } else { (KNEE + (1.0 - KNEE) * soft_clip((a - KNEE) / (1.0 - KNEE))).copysign(x) }

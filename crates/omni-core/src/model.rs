@@ -124,6 +124,35 @@ pub struct VoiceSettings {
     pub output_gain_db: f32,
     pub noise_gate: bool,
     pub gate_threshold_db: f32,
+    /// Apps whose sound is mixed into the voice output next to the microphone, so
+    /// a call hears them too (the apps' exact names, ignoring case). The apps
+    /// keep playing normally. Works with the voice changer off (the voice then
+    /// passes through unchanged) and never resumes by itself after a restart.
+    /// Changed through [`crate::VoiceOp`], one app at a time.
+    pub shared_apps: Vec<String>,
+    /// Level of the shared app sound, -30 to +12 dB.
+    pub share_gain_db: f32,
+}
+
+impl VoiceSettings {
+    /// Whether `app` is in [`Self::shared_apps`] (ignoring case).
+    pub fn shares(&self, app: &str) -> bool {
+        let app = app.trim().to_lowercase();
+        self.shared_apps.iter().any(|a| a.to_lowercase() == app)
+    }
+
+    /// Start or stop sharing `app`.
+    pub fn set_shared(&mut self, app: &str, on: bool) {
+        if self.shares(app) == on {
+            return;
+        }
+        if on {
+            self.shared_apps.push(app.trim().to_owned());
+        } else {
+            let app = app.trim().to_lowercase();
+            self.shared_apps.retain(|a| a.to_lowercase() != app);
+        }
+    }
 }
 
 /// A deck layout. Devices pick one profile each.
@@ -424,6 +453,12 @@ impl Config {
         for device in &mut self.devices {
             device.deck.dim = device.deck.dim.clamp(0.0, 0.8);
         }
+        // Each shared app once, however it got here (action, UI, hand-edited file).
+        let mut shared = HashSet::new();
+        self.settings.voice.shared_apps.retain_mut(|app| {
+            *app = app.trim().to_owned();
+            !app.is_empty() && shared.insert(app.to_lowercase())
+        });
     }
 }
 
@@ -608,6 +643,8 @@ impl Default for VoiceSettings {
             output_gain_db: 0.0,
             noise_gate: true,
             gate_threshold_db: -50.0,
+            shared_apps: vec![],
+            share_gain_db: 0.0,
         }
     }
 }

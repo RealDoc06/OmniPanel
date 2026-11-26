@@ -16,6 +16,8 @@ Android). Old devices are first-class: the deck works on Android 4.4 and iOS 9 b
   - Per-app speaker and microphone: send Spotify to the headphones, give Discord another mic (see the table below)
   - Voice changer for your microphone (robot, chipmunk, deep, demon, radio, telephone, echo, cathedral, alien,
     megaphone, underwater, or build your own effect chain)
+  - Share an app's sound into your microphone, so a call hears the music, video or game you are hearing
+    (macOS and Linux)
   - Open apps, files, folders and URLs
   - Hotkeys and text typing, media keys
   - Custom scripts: shell, bash, PowerShell, Python, Node, AppleScript, with output shown on the deck
@@ -106,6 +108,22 @@ Other apps need a virtual microphone to receive the processed voice:
   "CABLE Output" as the microphone in your apps.
 - **Linux:** click **Create virtual mic** in **Sound**, then pick "OmniPanel_Virtual_Mic" in your apps.
 
+### Share app sound
+
+**Sound → Share app sound** (or a "Share an app's sound into your mic" button) mixes an app into that same virtual
+microphone, next to your voice. You keep hearing the app as usual, voice effects stay on your voice only, and the
+voice changer does not have to be on. Sharing stops when OmniPanel quits and never resumes by itself. An app is
+shared by its name, so apps with the same name are shared together.
+
+Your call app has to use the virtual microphone to hear a share. With the voice changer off, your voice only reaches
+that microphone while an app is shared; keep the voice changer on (the Clean voice adds no effect) if the call stays
+on it.
+
+- **Linux:** follows the app's own volume and mute. Nothing is loaded into PulseAudio / PipeWire.
+- **macOS:** needs macOS 14.2+ and the "System Audio Recording" permission. The call hears the app at its own
+  level, whatever its volume in OmniPanel.
+- **Windows:** not supported yet.
+
 ### Permissions (macOS)
 
 | Feature | Permission |
@@ -113,6 +131,7 @@ Other apps need a virtual microphone to receive the processed voice:
 | Per-app volume | System Settings → Privacy & Security → Screen & System Audio Recording (asked on first use) |
 | Hotkey / type text actions | Privacy & Security → Accessibility |
 | Voice changer | Microphone (asked on first use) |
+| Share app sound | Screen & System Audio Recording, and Microphone (your voice is part of the mix) |
 | AppleScript actions | Automation (asked per target app) |
 
 ## Development

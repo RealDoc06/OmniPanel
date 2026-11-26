@@ -172,6 +172,19 @@ pub enum VoiceOp {
         #[serde(default)]
         preset_ids: Vec<String>,
     },
+    /// Start or stop mixing an app's sound into the voice output, so a call hears
+    /// what the user hears. `app` is the app's exact name as the Sound screen
+    /// shows it (case-insensitive). The app keeps playing normally, and the voice
+    /// changer does not have to be on.
+    ToggleShareApp {
+        app: String,
+    },
+    ShareApp {
+        app: String,
+    },
+    UnshareApp {
+        app: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]

@@ -264,6 +264,8 @@ function initialConfig(): Config {
         outputGainDb: 0,
         noiseGate: true,
         gateThresholdDb: -50,
+        sharedApps: [],
+        shareGainDb: 0,
       },
     },
     profiles: [main, streaming],
@@ -351,7 +353,7 @@ function runtime(): RuntimeState {
         : { state: "error", message: "401 Unauthorized: check the access token" }
       : { state: "disabled", message: null },
     voice: {
-      running: voice.enabled && voice.outputDevice !== null,
+      running: (voice.enabled || voice.sharedApps.length > 0) && voice.outputDevice !== null,
       presetId: voice.presetId,
       error: voice.enabled && voice.outputDevice === null ? "Pick an output device for the processed voice." : null,
       virtualMic: voice.outputDevice?.startsWith("blackhole") ? "BlackHole 2ch" : null,
@@ -361,6 +363,9 @@ function runtime(): RuntimeState {
           : os === "windows"
             ? "Install VB-CABLE, select CABLE Input as output here and CABLE Output as the microphone in your apps."
             : null,
+      shareUnsupported: os === "windows" ? "Sharing app sound into the microphone is not supported on Windows yet." : null,
+      shareError: null,
+      shareWaiting: voice.sharedApps.filter((a) => !mixer.apps.some((m) => m.playing && m.name.toLowerCase() === a.toLowerCase())),
     },
     audio: {
       perAppVolume: true,
@@ -672,6 +677,18 @@ const api: Api = {
       }
       default:
         break;
+    }
+    if (action.type === "voice" && "app" in action.op) {
+      // Same as the host: one entry per app, compared without case.
+      const app = action.op.app.trim();
+      const shared = config.settings.voice.sharedApps;
+      const without = shared.filter((a) => a.toLowerCase() !== app.toLowerCase());
+      const on = action.op.type === "shareApp" || (action.op.type === "toggleShareApp" && without.length === shared.length);
+      const unsupported = runtime().voice.shareUnsupported;
+      if (!app) throw "choose an app to share";
+      if (on && unsupported) throw unsupported;
+      mutate((c) => ({ ...c, settings: { ...c.settings, voice: { ...c.settings.voice, sharedApps: on ? [...without, app] : without } } }));
+      return { message: on ? `Sharing ${app}` : `Stopped sharing ${app}` };
     }
     log("info", `Ran ${action.type}`);
     return { message: null };

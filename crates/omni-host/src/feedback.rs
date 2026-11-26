@@ -77,6 +77,9 @@ impl StateContext {
             }
             Action::Voice { op } => match op {
                 VoiceOp::SetPreset { preset_id } => (self.voice.enabled && self.voice.preset_id == *preset_id, false),
+                VoiceOp::ToggleShareApp { app } | VoiceOp::ShareApp { app } | VoiceOp::UnshareApp { app } => {
+                    (self.voice.shares(app), omni_voice::share_unsupported().is_some())
+                }
                 _ => (self.voice.enabled, false),
             },
             Action::Obs { op } => {
@@ -283,7 +286,12 @@ mod tests {
                 current_scene: Some("Live".into()),
                 ..ObsState::default()
             },
-            voice: VoiceSettings { enabled: true, preset_id: "robot".into(), ..VoiceSettings::default() },
+            voice: VoiceSettings {
+                enabled: true,
+                preset_id: "robot".into(),
+                shared_apps: vec!["Spotify".into()],
+                ..VoiceSettings::default()
+            },
             toggles: HashMap::new(),
         }
     }
@@ -301,6 +309,10 @@ mod tests {
 
         let preset = button(Action::Voice { op: VoiceOp::SetPreset { preset_id: "robot".into() } });
         assert!(cx.state_for(&preset, "p", "pg").active);
+
+        let share = |app: &str| button(Action::Voice { op: VoiceOp::ToggleShareApp { app: app.into() } });
+        assert!(cx.state_for(&share("spotify"), "p", "pg").active, "lit while the app is shared");
+        assert!(!cx.state_for(&share("Discord"), "p", "pg").active);
 
         let missing_app =
             button(Action::Volume { target: VolumeTarget::App { app: "discord".into() }, op: VolumeOp::ToggleMute });
