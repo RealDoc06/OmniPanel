@@ -46,15 +46,29 @@ impl Direction {
 /// cpal's default host. On Linux its PulseAudio host is a client connection that
 /// stays open after the host is dropped (the `pulseaudio` crate's client thread
 /// does not notice a client that goes quietly), so one is kept and shared instead
-/// of leaving one behind per lookup. One whose connection died (the sound server
-/// restarted) is replaced.
+/// of leaving one behind per lookup. One whose connection died or stopped
+/// answering (the sound server restarted or hangs) is replaced.
 pub(crate) fn host() -> Arc<cpal::Host> {
     #[cfg(target_os = "linux")]
     {
         use std::sync::{Mutex, PoisonError};
+
+        use crate::pulse::{CONNECT_TIMEOUT, with_timeout};
+
         static HOST: Mutex<Option<Arc<cpal::Host>>> = Mutex::new(None);
-        let mut kept = HOST.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(host) = kept.as_ref().filter(|host| host.output_devices().is_ok()) {
+        let kept = || HOST.lock().unwrap_or_else(PoisonError::into_inner);
+        // Asked outside the lock and with a limit: a server that hangs must not
+        // hold up every other lookup behind this one.
+        let before = kept().clone();
+        if let Some(host) = &before {
+            let asked = host.clone();
+            if with_timeout(CONNECT_TIMEOUT, move || asked.output_devices().is_ok()).unwrap_or(false) {
+                return host.clone();
+            }
+        }
+        let mut kept = kept();
+        // Someone else replaced it meanwhile: theirs is fresh.
+        if let Some(host) = kept.as_ref().filter(|host| before.as_ref().is_none_or(|old| !Arc::ptr_eq(old, host))) {
             return host.clone();
         }
         let host = Arc::new(cpal::default_host());
@@ -67,7 +81,7 @@ pub(crate) fn host() -> Arc<cpal::Host> {
     Arc::new(cpal::default_host())
 }
 
-/// The host of the devices with ids of `id`.
+/// The host that `id` names, the kept default one where it is that.
 fn host_of(id: cpal::HostId) -> Option<Arc<cpal::Host>> {
     let default = host();
     if default.id() == id { Some(default) } else { cpal::host_from_id(id).ok().map(Arc::new) }

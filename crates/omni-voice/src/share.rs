@@ -185,13 +185,10 @@ impl MixerPort {
 }
 
 impl Mixer {
-    /// Start the callback of `frames` frames that came at `now`, mixed at `gain`
-    /// (ramped from the previous callback's): take new feeds, let go of ended
-    /// ones. A `gain` of zero means sharing is shut: what already sounds fades out
-    /// within this callback and nothing else starts; from then on what the feeds
-    /// hold is thrown away, so nothing from before is heard when it opens again.
-    /// False = nothing to add.
-    pub fn begin(&mut self, now: Instant, frames: usize, gain: f32) -> bool {
+    /// First thing in a callback: take new feeds, let go of ended ones. Before the
+    /// caller looks at whether sharing is open, so that answer covers every feed
+    /// this callback plays; one that arrives later waits for the next callback.
+    pub fn admit(&mut self) {
         for slot in &mut self.feeds {
             // Freed by the audio thread, never here: if it is not taking feeds back
             // right now, the ended one keeps its slot until it does.
@@ -215,6 +212,15 @@ impl Mixer {
                 Err(_) => break,
             }
         }
+    }
+
+    /// Start the callback of `frames` frames that came at `now`, mixed at `gain`
+    /// (ramped from the previous callback's), after [`Self::admit`]. A `gain` of
+    /// zero means sharing is shut: what already sounds fades out within this
+    /// callback and nothing else starts; from then on what the feeds hold is
+    /// thrown away, so nothing from before is heard when it opens again.
+    /// False = nothing to add.
+    pub fn begin(&mut self, now: Instant, frames: usize, gain: f32) -> bool {
         self.gain = std::mem::replace(&mut self.target, gain);
         self.step = (gain - self.gain) / frames.max(1) as f32;
         let block = self.burst.grow(now, frames);
@@ -238,8 +244,8 @@ impl Mixer {
         any
     }
 
-    /// Throw away what every feed holds, at the start of the next callback (so it
-    /// includes the feeds still on their way in). For when an app stops being
+    /// Throw away what every feed holds, at the next [`Self::begin`] (so it includes
+    /// the feeds admitted just before). For when an app stops being
     /// shared: what was captured of it so far must not be heard any more.
     pub fn flush(&mut self) {
         self.flush = true;
@@ -317,6 +323,7 @@ mod tests {
         for _ in 0..callbacks {
             for _ in 0..pieces {
                 let mut buf = vec![0.0; piece];
+                mixer.admit();
                 if mixer.begin(mic_clock(), piece, gain) {
                     // The microphone callback mixes in pieces of its scratch buffer.
                     buf.chunks_mut(1024).for_each(|part| mixer.add(part));
@@ -393,6 +400,7 @@ mod tests {
             writer.write_at(app_clock(), 480, std::iter::repeat_n(0.9, 480));
             let mut voice = vec![0.3; 480];
             // The gain steps from 0.25 to 1 at callback 40.
+            mixer.admit();
             if mixer.begin(mic_clock(), 480, if i < 40 { 0.25 } else { 1.0 }) {
                 mixer.add(&mut voice);
             }
@@ -410,6 +418,7 @@ mod tests {
         for _ in 0..10 {
             voice.fill(0.9);
             writer.write_at(app_clock(), 480, std::iter::repeat_n(0.0, 480));
+            mixer.admit();
             if mixer.begin(mic_clock(), 480, 1.0) {
                 mixer.add(&mut voice);
             }
@@ -428,6 +437,7 @@ mod tests {
             for _ in 0..callbacks {
                 writer.write_at(app_clock(), 480, std::iter::repeat_n(app, 480));
                 let mut buf = vec![0.0; 480];
+                mixer.admit();
                 if mixer.begin(mic_clock(), 480, gain) {
                     mixer.add(&mut buf);
                 }
@@ -456,6 +466,7 @@ mod tests {
         let (mut mic_clock, mut app_clock) = (clock(1323, 1), clock(1323, 1));
         let mut callback = |mixer: &mut Mixer, gain: f32| {
             let mut buf = vec![0.0; 1323];
+            mixer.admit();
             if mixer.begin(mic_clock(), 1323, gain) {
                 buf.chunks_mut(1024).for_each(|part| mixer.add(part));
             }
@@ -519,8 +530,10 @@ mod tests {
         let now = Instant::now();
         let (writer, feed) = feed(48_000, 48_000);
         assert!(port.add(feed));
+        mixer.admit();
         assert!(mixer.begin(now, 480, 1.0));
         drop(writer);
+        mixer.admit();
         assert!(!mixer.begin(now, 480, 1.0), "an ended feed leaves the mix");
         assert_eq!(port.retired.slots(), 1);
         port.drop_retired();
@@ -530,8 +543,10 @@ mod tests {
         let (mut writer, feed) = super::feed(48_000, 48_000);
         assert!(port.add(feed));
         writer.write_at(now, 100, std::iter::repeat_n(0.5, 100));
+        mixer.admit();
         assert!(mixer.begin(now, 480, 1.0));
         drop(writer);
+        mixer.admit();
         assert!(!mixer.begin(now, 480, 1.0), "nothing more will come: the feed is over");
         port.drop_retired();
 
@@ -543,13 +558,17 @@ mod tests {
             writers.push(writer);
             assert!(port.add(feed));
         }
+        mixer.admit();
         assert!(mixer.begin(now, 480, 1.0));
         let (_writer, extra) = super::feed(48_000, 48_000);
         assert!(port.add(extra));
+        mixer.admit();
         mixer.begin(now, 480, 1.0);
         assert_eq!((port.feeds.slots(), port.retired.slots()), (SLOTS - 1, 0), "it waits for a slot");
         writers.pop();
+        mixer.admit();
         mixer.begin(now, 480, 1.0);
+        mixer.admit();
         mixer.begin(now, 480, 1.0);
         assert_eq!((port.feeds.slots(), port.retired.slots()), (SLOTS, 1), "and takes the one that frees up");
     }
@@ -562,5 +581,21 @@ mod tests {
         assert!(!same("Discord", "Discord PTB"));
         assert!(!same("nightly", "Firefox Nightly"));
         assert!(!same("", ""));
+    }
+
+    /// The microphone callback looks at whether sharing is open after `admit`: a
+    /// feed queued behind that look (its app could be stopped again by now) is not
+    /// part of the callback, however much it holds.
+    #[test]
+    fn a_feed_that_arrives_mid_callback_waits_for_the_next_one() {
+        let (mut mixer, mut port) = mixer(48_000);
+        let now = Instant::now();
+        mixer.admit();
+        let (mut writer, feed) = feed(48_000, 48_000);
+        writer.write_at(now, 48_000, std::iter::repeat_n(0.5, 48_000));
+        assert!(port.add(feed));
+        assert!(!mixer.begin(now, 480, 1.0), "not in this callback");
+        mixer.admit();
+        assert!(mixer.begin(now + Duration::from_millis(10), 480, 1.0));
     }
 }

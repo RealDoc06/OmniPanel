@@ -42,8 +42,9 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// microphone polls for default changes. WASAPI default-device streams and macOS
 /// default outputs follow the default by themselves.
 const FOLLOW_DEFAULT_INPUT: bool = cfg!(target_os = "macos");
-/// A lost monitor is brought back by polling. Not on Linux: there every cpal
-/// device query opens a new PulseAudio connection.
+/// A lost monitor is brought back by polling. Not on Linux, where every cpal
+/// device query used to open a new PulseAudio connection (they share one now,
+/// see `devices::host`; polling there is untried).
 const POLL_MONITOR: bool = cfg!(not(target_os = "linux"));
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Why apps are not shared into an output that is not a virtual device.
@@ -528,8 +529,8 @@ struct Session {
     unsent: Option<Box<Chain>>,
     /// Non-fatal problem (monitor missing), shown as the status error while running.
     warning: Option<String>,
-    /// Feeds of shared app sound for the input callback, and the capture making them.
-    /// Declared after the streams: the capture stops once nothing reads its feeds.
+    /// Feeds of shared app sound for the input callback, and the capture making
+    /// them (the first thing a session lets go of, see its `Drop`).
     mixer: MixerPort,
     capture: Option<AppCapture>,
     gate: Arc<ShareGate>,
@@ -541,6 +542,14 @@ struct Session {
     shares_changed: Arc<AtomicBool>,
     /// The apps the capture was last lined up with.
     shares_synced: Vec<String>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // First, before the devices: closing those can wait on the sound server, and
+        // a session given up on meanwhile must not keep recording apps.
+        self.capture = None;
+    }
 }
 
 /// The microphone actually open, with a delay before retrying a failed switch.
@@ -877,6 +886,8 @@ impl InputSide {
         self.processor.set_params(self.shared.params.load());
         self.in_block.store(frames, Ordering::Relaxed);
         self.callbacks.fetch_add(1, Ordering::Relaxed);
+        // New feeds come in before the look at the gate: it then holds for all of them.
+        self.mixer.admit();
         // Shut unless the capture is lined up with the list of apps shared right now.
         // The applied list is read first and written last: whoever sees it also
         // sees the removals that came with it.
