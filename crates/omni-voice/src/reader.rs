@@ -164,6 +164,11 @@ impl Reader {
         self.rx.is_abandoned() && (self.rx.is_empty() || !self.primed)
     }
 
+    /// Samples are coming out (the ring is primed), as opposed to still filling up.
+    pub fn playing(&self) -> bool {
+        self.primed
+    }
+
     /// The writer is gone: nothing more will come.
     pub fn ended(&self) -> bool {
         self.rx.is_abandoned()

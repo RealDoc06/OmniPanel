@@ -25,7 +25,7 @@ use futures::executor::block_on;
 use pulseaudio::protocol::{self, Command, Prop, SubscriptionEventFacility as Facility, SubscriptionMask};
 
 use super::{FeedWriter, MAX_FEEDS, MixerPort, feed, same};
-use crate::pulse::{CREATE_TIMEOUT, FRAGMENT_SECS, connect, pulse_error, with_timeout};
+use crate::pulse::{CONNECT_TIMEOUT, CREATE_TIMEOUT, FRAGMENT_SECS, pulse_error, with_timeout};
 use crate::{Result, VoiceError};
 
 /// The sound server answers introspection at once; a stuck one must not hang the audio thread.
@@ -51,16 +51,42 @@ pub(crate) struct AppCapture {
     rate: u32,
 }
 
-/// The connection the record streams run on. Its thread (in the `pulseaudio` crate)
-/// only notices that everyone let go of the client when the server next sends
-/// something, so the last thing a client does is ask for that: without it, a
-/// capture that ends with no stream to delete would stay connected for good.
-struct Client(pulseaudio::Client);
+/// The connection the record streams run on, closed when dropped. Left to itself
+/// the `pulseaudio` crate's client thread only ends once every handle is gone and
+/// the server then sends something, which may never happen: shutting the socket
+/// down ends it for sure, and with the connection whatever a late answer of the
+/// server would still have started on it.
+struct Client {
+    client: pulseaudio::Client,
+    _hangup: Hangup,
+}
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        let _ = self.0.stat().now_or_never();
+impl Client {
+    fn connect() -> Result<Self> {
+        let socket = server_socket()?;
+        // Made first: a handshake that hangs is cut off too when this returns.
+        let hangup = Hangup(socket.try_clone().map_err(io)?);
+        let cookie = pulseaudio::cookie_path_from_env().and_then(|p| std::fs::read(p).ok());
+        let connect = move || pulseaudio::Client::new_unix(c"OmniPanel", socket, cookie);
+        let client = with_timeout(CONNECT_TIMEOUT, connect)?.map_err(|e| pulse_error(e, "server"))?;
+        Ok(Self { client, _hangup: hangup })
     }
+}
+
+/// Shuts its connection down when dropped.
+struct Hangup(UnixStream);
+
+impl Drop for Hangup {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+/// A new connection to the sound server, before the handshake.
+fn server_socket() -> Result<UnixStream> {
+    let unavailable = || VoiceError::Backend("PulseAudio / PipeWire is not running".into());
+    let path = pulseaudio::socket_path_from_env().ok_or_else(unavailable)?;
+    UnixStream::connect(path).map_err(|_| unavailable())
 }
 
 impl AppCapture {
@@ -72,7 +98,7 @@ impl AppCapture {
             _watcher: Watcher::spawn(changed)?,
             server: Connection::open()?,
             streams: HashMap::new(),
-            client: Client(connect()?),
+            client: Client::connect()?,
             tag: format!("{}.{}", std::process::id(), CAPTURES.fetch_add(1, Ordering::Relaxed)),
             rate: mix_rate,
         })
@@ -98,7 +124,7 @@ impl AppCapture {
                 break;
             }
             let (writer, feed) = feed(self.rate, self.rate);
-            match Stream::open(&self.client.0, index, &self.tag, self.rate, writer) {
+            match Stream::open(&self.client.client, index, &self.tag, self.rate, writer) {
                 // The mixer takes feeds every microphone callback; a full queue means it stalled.
                 Ok(stream) if port.add(feed) => drop(self.streams.insert(index, stream)),
                 Ok(_) => return Err(VoiceError::Backend("the microphone stream stalled".into())),
@@ -197,7 +223,7 @@ impl Stream {
         let writer = Arc::new(Mutex::new(Some(writer)));
         let feed = writer.clone();
         let callback = move |bytes: &[u8]| {
-            // Never waits: the lock is only ever held by `Drop`, once.
+            // Never waits: the only other one to take the lock is `Drop`, once.
             if let Ok(mut feed) = feed.try_lock()
                 && let Some(writer) = feed.as_mut()
             {
@@ -236,9 +262,7 @@ struct Connection {
 
 impl Connection {
     fn open() -> Result<Self> {
-        let unavailable = || VoiceError::Backend("PulseAudio / PipeWire is not running".into());
-        let path = pulseaudio::socket_path_from_env().ok_or_else(unavailable)?;
-        let socket = UnixStream::connect(path).map_err(|_| unavailable())?;
+        let socket = server_socket()?;
         socket.set_read_timeout(Some(REPLY_TIMEOUT)).map_err(io)?;
         socket.set_write_timeout(Some(REPLY_TIMEOUT)).map_err(io)?;
         let mut connection = Self { socket: BufReader::new(socket), version: protocol::MAX_VERSION, seq: 0 };

@@ -187,9 +187,10 @@ impl MixerPort {
 impl Mixer {
     /// Start the callback of `frames` frames that came at `now`, mixed at `gain`
     /// (ramped from the previous callback's): take new feeds, let go of ended
-    /// ones. A `gain` of zero means sharing is shut: once faded out, what the
-    /// feeds hold is thrown away, so nothing from before is heard when it opens
-    /// again. False = nothing to add.
+    /// ones. A `gain` of zero means sharing is shut: what already sounds fades out
+    /// within this callback and nothing else starts; from then on what the feeds
+    /// hold is thrown away, so nothing from before is heard when it opens again.
+    /// False = nothing to add.
     pub fn begin(&mut self, now: Instant, frames: usize, gain: f32) -> bool {
         for slot in &mut self.feeds {
             // Freed by the audio thread, never here: if it is not taking feeds back
@@ -218,9 +219,10 @@ impl Mixer {
         self.step = (gain - self.gain) / frames.max(1) as f32;
         let block = self.burst.grow(now, frames);
         let mut any = false;
-        let flush = std::mem::take(&mut self.flush) || (gain == 0.0 && self.gain == 0.0);
+        let shut = gain == 0.0;
+        let flush = std::mem::take(&mut self.flush) || (shut && self.gain == 0.0);
         for feed in self.feeds.iter_mut().flatten() {
-            if flush {
+            if flush || (shut && !feed.0.playing()) {
                 feed.0.flush();
             }
             feed.0.begin(frames, block);
@@ -489,6 +491,15 @@ mod tests {
             heard = callback(&mut mixer, 0.7);
             assert!(heard.iter().all(|&s| s < 0.141), "nothing of Discord: {:?}", heard.iter().find(|s| **s >= 0.141));
         }
+
+        // Shut while a new feed with a second of sound waits to come in: Firefox,
+        // which was heard, fades out; the new app does not start during the fade.
+        let (mut zoom, feed_d) = feed(48_000, 48_000);
+        zoom.write_at(app_clock(), 48_000, std::iter::repeat_n(0.9, 48_000));
+        assert!(port.add(feed_d));
+        firefox.write_at(app_clock(), 1323, std::iter::repeat_n(0.2, 1323));
+        heard = callback(&mut mixer, 0.0);
+        assert!(heard[0] > 0.13 && heard.iter().all(|&s| s < 0.141), "only the fade of Firefox: {heard:?}");
 
         // Shut, the gain lands on zero exactly, so the feeds are emptied while shut.
         for _ in 0..3 {

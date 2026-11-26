@@ -412,8 +412,10 @@ impl Host {
         }
         let voice_preset_changed = before.voice_presets != after.voice_presets;
         if old.voice != new.voice || voice_preset_changed {
-            // Stopped means stopped now, not when the voice worker gets to it.
-            self.voice.commit_shares(&new.voice.shared_apps);
+            // Stopped means stopped now, not when the voice worker gets to it. And
+            // nothing is shared any more once the host is closing.
+            let closing = self.closing.load(Ordering::Relaxed);
+            self.voice.commit_shares(if closing { &[] } else { &new.voice.shared_apps });
             self.apply_voice();
         }
         self.refresh_sessions();
@@ -632,11 +634,15 @@ impl Host {
     /// good, turn the voice changer off and stop the background loops, so
     /// the engine is freed once the last `Host` is dropped.
     pub async fn shutdown(&self) {
-        // Shared app sound stops now, not when the voice worker gets to it.
-        self.voice.commit_shares(&[]);
+        {
+            // Shared app sound stops now, not when the voice worker gets to it. Under
+            // the lock config changes are committed under, so none shares again after.
+            let _change = self.config_changes.lock().unwrap();
+            self.closing.store(true, Ordering::Relaxed);
+            self.voice.commit_shares(&[]);
+        }
         self.close_all_sessions();
         let voice_off = async {
-            self.closing.store(true, Ordering::Relaxed);
             self.voice_dirty.notify_one();
             let voice = self.voice_task.lock().unwrap().take();
             if let Some(voice) = voice {

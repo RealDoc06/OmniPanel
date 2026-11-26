@@ -19,7 +19,7 @@ use crate::audio::InputSide;
 use crate::{Result, VoiceError};
 
 pub(crate) const FRAGMENT_SECS: f32 = 0.005;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const CREATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct Capture {

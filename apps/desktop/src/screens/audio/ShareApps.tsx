@@ -31,8 +31,8 @@ export function ShareAppsSection() {
   const share = (type: Extract<VoiceOp, { app: string }>["type"], name: string) => void run(api.runAction({ type: "voice", op: { type, app: name } }));
   const name = app.trim();
 
-  // With no output chosen the engine uses a virtual cable it finds; only without one is there something to set up.
-  const needsSetup = voice.outputDevice === null && !status.virtualMic;
+  // With no output chosen the engine uses a virtual cable it finds; only without one (its hint says so) is there something to set up.
+  const needsSetup = voice.outputDevice === null && status.hint !== null;
   const state: keyof typeof STATE_TONES = status.shareUnsupported
     ? "Not supported"
     : shared.length === 0 ? "Off" : needsSetup ? "Needs setup" : status.running && !status.shareError ? "Sharing" : "Stopped";
