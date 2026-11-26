@@ -12,30 +12,13 @@ on:
   release:
     types: [published]
 
-jobs:
-  # New packages would no longer match the signatures in a published manifest, so a
-  # published version is never built again.
-  unpublished:
-    if: github.event_name != 'release'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # drafts are only visible with write access
-    steps:
-      - uses: actions/checkout@v7
-      - name: Refuse to rebuild a published release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="v$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
-          if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>&1)"; then
-            [ "$draft" = true ] || { echo "::error::$tag is already published. Bump the version to release again."; exit 1; }
-          elif [[ "$draft" != *"release not found"* ]]; then
-            echo "::error::Can't tell whether $tag is published: $draft"
-            exit 1
-          fi
+# One run at a time, builds and publishing alike. If a release is published while a
+# build of it is still uploading, publishing waits and then verifies the final packages.
+concurrency: release
 
+jobs:
   build:
-    needs: unpublished
+    if: github.event_name != 'release'
     permissions:
       contents: write
     strategy:
@@ -54,6 +37,21 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
+      # New packages would no longer match the signatures in a published manifest, so a
+      # published version is never built again. Here, so that rerunning one job checks too.
+      - name: Refuse to rebuild a published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # tr: Windows tools end their lines with a carriage return.
+          tag="v$(jq -r .version apps/desktop/src-tauri/tauri.conf.json | tr -d '\r')"
+          draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>&1 | tr -d '\r' || true)"
+          case "$draft" in
+            true | *"release not found"*) ;; # still a draft, or not created yet
+            false) echo "::error::$tag is already published. Bump the version to release again."; exit 1 ;;
+            *) echo "::error::Can't tell whether $tag is published: $draft"; exit 1 ;;
+          esac
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -118,19 +116,20 @@ jobs:
   publish-update:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
-    # One at a time, so two releases can't write the branch at once.
-    concurrency: publish-update
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      # Whichever release started this run, apps should get the newest one. A rerun or
-      # a late run for an older release then can't put an old manifest back.
+      # Whichever release started this run, apps should get the one published last. A
+      # rerun or a late run for an older release then can't put an old manifest back.
+      # (Publish in version order: a backport published later would become "newest".)
       - name: Find the newest published release
         id: newest
         run: |
-          tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.draft | not)] | max_by(.published_at) | .tag_name')"
+          tag="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | "\(.published_at) \(.tag_name)"' | sort | tail -n 1 | cut -d' ' -f2)"
+          [ -n "$tag" ]
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       # That release's copy of the check script and of the public key.
       - uses: actions/checkout@v7

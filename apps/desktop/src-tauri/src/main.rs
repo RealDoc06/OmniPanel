@@ -33,6 +33,8 @@ struct QuitState {
     ready: AtomicBool,
     /// No tray to come back from, so closing the window quits.
     no_tray: AtomicBool,
+    /// An exit was held back while an update replaced the app's files.
+    held: AtomicBool,
 }
 
 fn main() {
@@ -92,18 +94,15 @@ fn main() {
     app.run(|app, event| match event {
         RunEvent::ExitRequested { code, api, .. } => {
             if code.is_none() {
-                // Last window closed: keep running in the tray on every platform,
-                // and without a tray while an update is replacing the app's files.
-                if !app.state::<QuitState>().no_tray.load(Ordering::Relaxed) || updater::is_replacing(app) {
+                // Last window closed: keep running in the tray on every platform.
+                if !app.state::<QuitState>().no_tray.load(Ordering::SeqCst) || hold_for_install(app) {
                     api.prevent_exit();
                 }
-            } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::Relaxed) {
+            } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::SeqCst) {
                 // An explicit exit must use the same handshake as the menus.
                 api.prevent_exit();
                 request_quit(app);
-            } else if updater::is_replacing(app) {
-                // An update is replacing the app's files (and may need this thread for
-                // the macOS admin prompt). `end_after_install` finishes this quit.
+            } else if hold_for_install(app) {
                 api.prevent_exit();
             }
         }
@@ -167,7 +166,7 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     // Desktops without a tray still get the app, as a normal window.
     let tray = tray::create(app);
     if let Err(e) = &tray {
-        app.state::<QuitState>().no_tray.store(true, Ordering::Relaxed);
+        app.state::<QuitState>().no_tray.store(true, Ordering::SeqCst);
         host.log(omni_core::LogLevel::Warn, format!("No tray icon, so closing the window quits OmniPanel: {e}"));
     }
     sync_with_config(app, &host);
@@ -252,7 +251,7 @@ fn install_app_menu(app: &AppHandle) -> anyhow::Result<()> {
 
 /// Give the webview time to flush, with a fallback if it cannot answer.
 fn request_quit(app: &AppHandle) {
-    if app.state::<QuitState>().requested.swap(true, Ordering::Relaxed) {
+    if app.state::<QuitState>().requested.swap(true, Ordering::SeqCst) {
         return;
     }
     if let Some(window) = app.get_webview_window(window::MAIN) {
@@ -273,17 +272,40 @@ fn request_quit(app: &AppHandle) {
 
 /// The UI has finished its bounded drain, or the fallback timer has elapsed.
 fn finish_quit(app: &AppHandle) {
-    app.state::<QuitState>().ready.store(true, Ordering::Relaxed);
+    app.state::<QuitState>().ready.store(true, Ordering::SeqCst);
     app.exit(0);
 }
 
-/// An update has replaced the app's files: restart into it, or finish the quit
-/// that was held back meanwhile.
-fn end_after_install(app: &AppHandle) {
-    if app.state::<QuitState>().ready.load(Ordering::Relaxed) {
-        app.exit(0);
+/// True when an exit has to wait because an update is replacing the app's files
+/// (which may need this thread, for the macOS admin prompt). `end_after_install`
+/// then finishes the exit.
+fn hold_for_install(app: &AppHandle) -> bool {
+    let quit = app.state::<QuitState>();
+    quit.held.store(true, Ordering::SeqCst);
+    // Looked at after raising the flag: the install either sees the flag when it
+    // ends, or has already ended.
+    if updater::is_replacing(app) {
+        return true;
+    }
+    quit.held.store(false, Ordering::SeqCst);
+    false
+}
+
+/// An install has ended, well or not. A quit that came in meanwhile wins: one that
+/// was held back is finished here, one still saving finishes itself. Otherwise the
+/// app restarts if `restart` asks for it. Returns whether it restarts.
+fn end_after_install(app: &AppHandle, restart: bool) -> bool {
+    let quit = app.state::<QuitState>();
+    if quit.held.load(Ordering::SeqCst) {
+        finish_quit(app);
+        false
+    } else if quit.requested.load(Ordering::SeqCst) {
+        false
     } else {
-        app.request_restart();
+        if restart {
+            app.request_restart();
+        }
+        restart
     }
 }
 

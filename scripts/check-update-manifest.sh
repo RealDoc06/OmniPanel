@@ -35,6 +35,7 @@ package_for() {
     linux-aarch64-rpm) echo '*.aarch64.rpm' ;;
     windows-x86_64 | windows-x86_64-nsis) echo '*_x64-setup.exe' ;;
     darwin-*) echo '*.app.tar.gz' ;; # one universal bundle
+    *) fail "no package is known for $1" ;;
   esac
 }
 

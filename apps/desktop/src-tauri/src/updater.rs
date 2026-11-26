@@ -73,6 +73,9 @@ pub struct Updates {
 #[derive(Default)]
 struct Inner {
     status: Status,
+    /// A check is in flight. Its own flag, because a standing offer keeps its
+    /// status while it is refreshed.
+    checking: bool,
     /// The release behind every status that carries a version.
     update: Option<Update>,
     /// Its verified package, while `Ready`.
@@ -88,7 +91,7 @@ pub fn start(app: &AppHandle) {
         loop {
             let due = checked_at.and_then(|at| at.elapsed().ok()).is_none_or(|age| age >= CHECK_INTERVAL);
             let enabled = app.state::<Host>().config().settings.check_for_updates;
-            if due && enabled && check_for_update(app.clone()).await.is_ok() {
+            if due && enabled && matches!(check(&app).await, Ok(true)) {
                 checked_at = Some(SystemTime::now());
             }
             tokio::time::sleep(CHECK_TICK).await;
@@ -107,13 +110,13 @@ pub fn take_after_update_note(data_dir: &Path) -> Option<String> {
 
 /// True while an install is replacing the app's files. Exits wait for it.
 pub fn is_replacing(app: &AppHandle) -> bool {
-    app.state::<Updates>().replacing.load(Ordering::Relaxed)
+    app.state::<Updates>().replacing.load(Ordering::SeqCst)
 }
 
 /// For an exit that can't be held back (macOS Dock Quit goes straight to
 /// `RunEvent::Exit`): gives a running install a moment to finish. Bounded,
-/// because an install that needs the macOS admin prompt waits for this thread,
-/// and at that point it has not touched the installed app yet.
+/// because an install that needs the macOS admin prompt waits for this thread;
+/// one stuck there has not touched the installed app yet.
 pub fn wait_for_install(app: &AppHandle) {
     let deadline = Instant::now() + EXIT_WAIT;
     while is_replacing(app) && Instant::now() < deadline {
@@ -146,10 +149,11 @@ fn can_install() -> bool {
 
 /// The executable is `<name>.app/Contents/MacOS/<binary>`.
 fn in_app_bundle() -> bool {
-    let exe = tauri::utils::platform::current_exe().ok();
-    exe.as_deref()
-        .and_then(|exe| exe.ancestors().nth(3))
-        .is_some_and(|bundle| bundle.extension() == Some("app".as_ref()))
+    let Ok(exe) = tauri::utils::platform::current_exe() else { return false };
+    let mut above = exe.ancestors().skip(1);
+    above.next().is_some_and(|dir| dir.ends_with("MacOS"))
+        && above.next().is_some_and(|dir| dir.ends_with("Contents"))
+        && above.next().is_some_and(|dir| dir.extension() == Some("app".as_ref()))
 }
 
 fn updater(app: &AppHandle) -> Result<Updater, Error> {
@@ -160,7 +164,7 @@ fn updater(app: &AppHandle) -> Result<Updater, Error> {
         // skipping `RunEvent::Exit`. The plugin runs this just before it
         // starts the installer, and that start can still fail.
         .on_before_exit(move || {
-            handle.state::<Updates>().engine_stopped.store(true, Ordering::Relaxed);
+            handle.state::<Updates>().engine_stopped.store(true, Ordering::SeqCst);
             crate::shutdown_engine(&handle);
             handle.cleanup_before_exit();
         })
@@ -188,45 +192,65 @@ pub fn update_status(app: AppHandle) -> Status {
     state(&app).status.clone()
 }
 
-/// Asks the update server once. On failure the status goes back to what it was
-/// and the error is a message for the user. Does nothing while busy, or while an
-/// update is already on offer: that offer stays until it is installed or fails.
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
+    check(&app).await.map(drop)
+}
+
+/// Asks the update server once. `Ok(false)` when it didn't, because a check, a
+/// download or an install is under way. On failure the status goes back to what
+/// it was and the error is a message for the user.
+async fn check(app: &AppHandle) -> Result<bool, String> {
     let previous = {
-        let mut inner = state(&app);
-        if !matches!(inner.status, Status::Idle | Status::UpToDate) {
-            return Ok(());
+        let mut inner = state(app);
+        if inner.checking || !matches!(inner.status, Status::Idle | Status::UpToDate | Status::Available { .. }) {
+            return Ok(false);
         }
         // Claimed under the lock, so two checks can't both start.
-        std::mem::replace(&mut inner.status, Status::Checking)
+        inner.checking = true;
+        let previous = inner.status.clone();
+        // A standing offer stays up, and installable, while it is refreshed.
+        if !matches!(previous, Status::Available { .. }) {
+            inner.status = Status::Checking;
+        }
+        previous
     };
-    publish(&app, &Status::Checking);
-    let found = async { updater(&app)?.check().await }.await;
-    let (status, result) = {
-        let mut inner = state(&app);
-        let result = match found {
-            Ok(update) => {
+    if !matches!(previous, Status::Available { .. }) {
+        publish(app, &Status::Checking);
+    }
+    let found = async { updater(app)?.check().await }.await;
+    let (changed, result) = {
+        let mut inner = state(app);
+        inner.checking = false;
+        // False when the user started on the offer (or its download failed) meanwhile: that stands.
+        let untouched = inner.status == Status::Checking || inner.status == previous;
+        match found {
+            Ok(update) if untouched => {
                 inner.status = match &update {
                     Some(update) => Status::Available { version: update.version.clone(), can_install: can_install() },
                     None => Status::UpToDate,
                 };
                 inner.update = update;
-                Ok(())
+                (Some(inner.status.clone()), Ok(true))
             }
+            Ok(_) => (None, Ok(true)),
             Err(e) => {
                 tracing::info!("update check failed: {e}");
-                inner.status = previous;
-                Err(format!("Couldn't check for updates: {e}"))
+                let restored = (inner.status == Status::Checking).then(|| previous.clone());
+                if let Some(previous) = &restored {
+                    inner.status = previous.clone();
+                }
+                (restored, Err(format!("Couldn't check for updates: {e}")))
             }
-        };
-        (inner.status.clone(), result)
+        }
     };
-    if result.is_ok() {
-        let version = if let Status::Available { version, .. } = &status { Some(version.as_str()) } else { None };
-        tray::set_update(&app, version);
+    if let Some(status) = &changed {
+        if result.is_ok() {
+            let version = if let Status::Available { version, .. } = status { Some(version.as_str()) } else { None };
+            tray::set_update(app, version);
+        }
+        publish(app, status);
     }
-    publish(&app, &status);
     result
 }
 
@@ -301,7 +325,8 @@ pub async fn download_update(app: AppHandle) -> Result<(), String> {
 
 /// Replaces the app with the downloaded package and restarts into it. The UI
 /// saves pending edits first. On Windows the installer takes over and the
-/// process exits inside `Update::install`.
+/// process exits inside `Update::install`; everywhere else, and when the
+/// install fails, `end_after_install` decides how this ends.
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let (update, package, version) = {
@@ -313,29 +338,36 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         };
         inner.status = Status::Installing { version: version.clone() };
         // With the claim, before the worker starts: no exit slips in between.
-        app.state::<Updates>().replacing.store(true, Ordering::Relaxed);
+        app.state::<Updates>().replacing.store(true, Ordering::SeqCst);
         (update, package, version)
     };
     publish(&app, &Status::Installing { version: version.clone() });
     let note = app.state::<Host>().data_dir().join(AFTER_UPDATE_NOTE);
     let _ = std::fs::write(&note, "");
     let installed = tauri::async_runtime::spawn_blocking(move || update.install(package)).await;
-    app.state::<Updates>().replacing.store(false, Ordering::Relaxed);
-    let Err(error) = installed.map_err(|e| e.to_string()).and_then(|result| result.map_err(|e| e.to_string())) else {
-        crate::end_after_install(&app);
-        return Ok(());
+    let updates = app.state::<Updates>();
+    updates.replacing.store(false, Ordering::SeqCst);
+    let failure = match installed {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(format!("Couldn't install the update: {e}")),
+        Err(e) => Some(format!("Couldn't install the update: {e}")),
     };
-    let problem = format!("Couldn't install the update: {error}");
-    if app.state::<Updates>().engine_stopped.load(Ordering::Relaxed) {
-        // Windows: the installer didn't start, after the engine was shut down for
-        // it. Restarting brings this version back whole, and it shows the note.
-        let _ = std::fs::write(&note, &problem);
-        app.request_restart();
-        return Ok(());
+    // Windows: the installer didn't start, after the engine was shut down for it.
+    // Restarting brings this version back whole, and the note says what happened.
+    let engine_stopped = failure.is_some() && updates.engine_stopped.load(Ordering::SeqCst);
+    if let (Some(problem), true) = (&failure, engine_stopped) {
+        let _ = std::fs::write(&note, problem);
     }
-    let _ = std::fs::remove_file(&note);
-    set_status(&app, Status::Available { version, can_install: true });
-    Err(problem)
+    if !crate::end_after_install(&app, failure.is_none() || engine_stopped) {
+        let _ = std::fs::remove_file(&note);
+    }
+    match failure {
+        Some(problem) if !engine_stopped => {
+            set_status(&app, Status::Available { version, can_install: true });
+            Err(problem)
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
