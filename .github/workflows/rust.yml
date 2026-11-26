@@ -51,7 +51,7 @@ jobs:
         timeout-minutes: 5
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev libxkbcommon-dev libssl-dev pulseaudio-utils
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev libxkbcommon-dev libssl-dev pulseaudio-utils
       - run: cargo test --workspace --locked
       - name: Generated TypeScript types are up to date
         if: runner.os == 'Linux'
@@ -59,15 +59,3 @@ jobs:
           node scripts/gen-types.mjs
           git add --all packages/protocol
           git diff --cached --exit-code
-
-  # TEMPORARY: measures the same Windows job with full debug info. Removed before merge.
-  test-debuginfo:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 2
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
