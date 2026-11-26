@@ -5,6 +5,8 @@ name: Release
 # Review the draft and its assets, then publish it by hand. Publishing copies its
 # `latest.json` to the `updater` branch, where installed apps look: that is the moment
 # the update goes out. A published release is never rebuilt: apps download its packages.
+# (Publishing a draft that a manual run made creates its tag, which starts a build run.
+# That run fails at "Refuse to rebuild a published release", as it should.)
 on:
   push:
     tags: ["v*"]
@@ -122,23 +124,32 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      # A build still uploading to a release would change its packages after the check
-      # below, so every build of this workflow ends first. One that starts later refuses
-      # a published release.
-      - name: Wait for builds that are still running
-        run: |
-          while gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --limit 50 --json status,event \
-            --jq '.[] | select(.event != "release" and .status != "completed") | .status' | grep -q .; do
-            sleep 30
-          done
       # Whichever release started this run, apps should get the one published last. A
       # rerun or a late run for an older release then can't put an old manifest back.
       # (Publish in version order: a backport published later would become "newest".)
-      - name: Find the newest published release
+      #
+      # A build still uploading to a release would change its packages after the check
+      # below, so every build of this workflow ends first, and the pick is made again if
+      # another release was published during that wait. A build that starts later refuses
+      # a published release.
+      - name: Find the newest published release, once no build is running
         id: newest
         run: |
-          tag="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq '.[] | select(.draft | not) | "\(.published_at) \(.tag_name)"' | sort | tail -n 1 | cut -d' ' -f2)"
+          newest() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft | not) | "\(.published_at) \(.tag_name)"' | sort | tail -n 1 | cut -d' ' -f2
+          }
+          while true; do
+            tag="$(newest)"
+            while true; do
+              # Its own statement, so that a failed lookup fails the step instead of reading as "none".
+              running="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --limit 50 --json status,event \
+                --jq '.[] | select(.event != "release" and .status != "completed") | .status')"
+              [ -n "$running" ] || break
+              sleep 30
+            done
+            [ "$(newest)" = "$tag" ] && break
+          done
           [ -n "$tag" ]
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       # That release's copy of the check script and of the public key.

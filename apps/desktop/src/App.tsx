@@ -4,7 +4,7 @@ import { ConfirmHost, Toasts } from "./components/Overlays";
 import { Sidebar, SCREENS } from "./components/Sidebar";
 import { navigate, useApp, useAppTheme, type Screen } from "./lib/store";
 import { applyTheme } from "./lib/theme";
-import { useUpdate } from "./lib/updates";
+import { useUpdateLock } from "./lib/updates";
 import { SoundScreen } from "./screens/audio/SoundScreen";
 import { DecksScreen } from "./screens/decks/DecksScreen";
 import { LogScreen } from "./screens/log/LogScreen";
@@ -15,7 +15,7 @@ export function App() {
   const screen = useApp((s) => s.screen);
   const theme = useAppTheme();
   // While an update installs, nothing can be edited: an edit made then would not be saved.
-  const locked = useUpdate((s) => s.locked);
+  const locked = useUpdateLock();
   useLayoutEffect(() => applyTheme(theme), [theme]);
 
   // Cmd/Ctrl + 1..4 switches between the sidebar screens.

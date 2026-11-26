@@ -8,7 +8,7 @@ export const useUpdate = create<{ status: UpdateStatus; installing: boolean; loc
   status: { state: "idle" },
   /** `installUpdate` is running: from the click until the shell reports progress, and between its steps. */
   installing: false,
-  /** The app takes no input (App.tsx): from the last save before an install until that install ends. */
+  /** `installUpdate` is past its last save: see `isLocked`. */
   locked: false,
 }));
 
@@ -20,6 +20,15 @@ await updater.onStatus((status) => {
 });
 const initial = await updater.status();
 if (!pushed) useUpdate.setState({ status: initial });
+
+/**
+ * The app takes no input: from the last save before an install until that install ends,
+ * also in a window opened meanwhile. App.tsx makes the page inert.
+ */
+const isLocked = (s: ReturnType<typeof useUpdate.getState>) => s.locked || s.status.state === "installing";
+export const useUpdateLock = () => useUpdate(isLocked);
+// `inert` doesn't reach shortcuts bound to the window, such as undo in the editor.
+window.addEventListener("keydown", (e) => isLocked(useUpdate.getState()) && e.stopImmediatePropagation(), true);
 
 /** A newer version is known and not installed yet. */
 export const useUpdateVersion = () => useUpdate(({ status }) => ("version" in status ? status.version : null));

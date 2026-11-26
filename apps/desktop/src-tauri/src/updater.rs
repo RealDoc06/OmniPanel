@@ -89,7 +89,9 @@ pub fn start(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut checked_at: Option<SystemTime> = None;
         loop {
-            let due = checked_at.and_then(|at| at.elapsed().ok()).is_none_or(|age| age >= CHECK_INTERVAL);
+            // Nothing known (a failed download drops the offer): don't wait out the day.
+            let unknown = state(&app).status == Status::Idle;
+            let due = unknown || checked_at.and_then(|at| at.elapsed().ok()).is_none_or(|age| age >= CHECK_INTERVAL);
             let enabled = app.state::<Host>().config().settings.check_for_updates;
             if due && enabled && matches!(check(&app).await, Ok(true)) {
                 checked_at = Some(SystemTime::now());
@@ -197,9 +199,10 @@ pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
     check(&app).await.map(drop)
 }
 
-/// Asks the update server once. `Ok(false)` when the answer wasn't used: a check,
-/// a download or an install was under way, or the user started on the offer meanwhile. On failure the status goes back to what
-/// it was and the error is a message for the user.
+/// Asks the update server once. `Ok(false)` when the answer wasn't used: a
+/// check, a download or an install was under way, or the user started on the
+/// offer meanwhile. On failure the status goes back to what it was and the
+/// error is a message for the user.
 async fn check(app: &AppHandle) -> Result<bool, String> {
     let previous = {
         let mut inner = state(app);
@@ -222,7 +225,8 @@ async fn check(app: &AppHandle) -> Result<bool, String> {
     let (changed, result) = {
         let mut inner = state(app);
         inner.checking = false;
-        // False when the user started on the offer (or its download failed) meanwhile: that stands.
+        // False when the user started on the offer (or its download failed) meanwhile: that
+        // stands. An offer that was downloaded and put back (window closed) is still the same offer.
         let untouched = inner.status == Status::Checking || inner.status == previous;
         match found {
             Ok(update) if untouched => {
