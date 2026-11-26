@@ -63,7 +63,10 @@ export function ShareAppsSection() {
             </div>
           )}
           {shared.length > 0 && (
-            <Field label="Sharing">
+            <Field
+              label="Sharing"
+              hint={voice.enabled ? undefined : "The voice changer is off: your voice only reaches the virtual microphone while an app is shared. Turn it on (the Clean voice changes nothing) to keep talking through it afterwards."}
+            >
               <ul className="flex flex-col">
                 {shared.map((a) => (
                   <li key={a} className="flex h-8 items-center gap-2">

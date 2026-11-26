@@ -142,6 +142,8 @@ pub(crate) struct Mixer {
     gain: f32,
     step: f32,
     target: f32,
+    /// [`Self::flush`] was asked for; done at the start of the next callback.
+    flush: bool,
     /// The feeds' sum for one piece of a callback.
     apps: Box<[f32]>,
 }
@@ -164,6 +166,7 @@ pub(crate) fn mixer(rate: u32) -> (Mixer, MixerPort) {
         gain: 0.0,
         step: 0.0,
         target: 0.0,
+        flush: false,
         apps: vec![0.0; 1024].into_boxed_slice(),
     };
     (mixer, MixerPort { feeds, retired })
@@ -199,10 +202,16 @@ impl Mixer {
                 *slot = Some(feed);
             }
         }
-        // New feeds wait in their queue while every slot is taken.
+        // New feeds wait in their queue while every slot is taken. One whose stream
+        // ended before it got here is never played: it goes back with the next round.
         for slot in self.feeds.iter_mut().filter(|slot| slot.is_none()) {
             match self.incoming.pop() {
-                Ok(feed) => *slot = Some(feed),
+                Ok(mut feed) => {
+                    if feed.0.ended() {
+                        feed.0.flush();
+                    }
+                    *slot = Some(feed);
+                }
                 Err(_) => break,
             }
         }
@@ -210,9 +219,9 @@ impl Mixer {
         self.step = (gain - self.gain) / frames.max(1) as f32;
         let block = self.burst.grow(now, frames);
         let mut any = false;
-        let shut = gain == 0.0 && self.gain == 0.0;
+        let flush = std::mem::take(&mut self.flush) || (gain == 0.0 && self.gain == 0.0);
         for feed in self.feeds.iter_mut().flatten() {
-            if shut {
+            if flush {
                 feed.0.flush();
             }
             feed.0.begin(frames, block);
@@ -224,10 +233,11 @@ impl Mixer {
         any
     }
 
-    /// Throw away what every feed holds. For when an app stops being shared: what
-    /// was captured of it so far must not be heard any more.
+    /// Throw away what every feed holds, at the start of the next callback (so it
+    /// includes the feeds still on their way in). For when an app stops being
+    /// shared: what was captured of it so far must not be heard any more.
     pub fn flush(&mut self) {
-        self.feeds.iter_mut().flatten().for_each(|feed| feed.0.flush());
+        self.flush = true;
     }
 
     /// Add the callback's next `buf.len()` frames of every feed onto `buf`. Where an
@@ -471,6 +481,18 @@ mod tests {
             );
         }
         assert!(heard.ends_with(&[0.2 * 0.7]));
+
+        // A feed that was still on its way in when its app was unshared is not heard either.
+        let (mut discord, feed_c) = feed(48_000, 48_000);
+        discord.write_at(app_clock(), 48_000, std::iter::repeat_n(0.9, 48_000));
+        assert!(port.add(feed_c));
+        drop(discord);
+        mixer.flush();
+        for _ in 0..5 {
+            firefox.write_at(app_clock(), 1323, std::iter::repeat_n(0.2, 1323));
+            heard = callback(&mut mixer, 0.7);
+            assert!(heard.iter().all(|&s| s < 0.141), "nothing of Discord: {:?}", heard.iter().find(|s| **s >= 0.141));
+        }
 
         // Shut, the gain lands on zero exactly, so the feeds are emptied while shut.
         for _ in 0..3 {

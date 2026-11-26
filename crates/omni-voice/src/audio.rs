@@ -660,7 +660,7 @@ impl Session {
                 shared.shares_removed.fetch_add(1, Ordering::Relaxed);
             }
             // From here on the feeds in the mixer belong to exactly this list.
-            shared.shares_applied.store(share::key(shares), Ordering::Relaxed);
+            shared.shares_applied.store(share::key(shares), Ordering::Release);
         });
         self.shares_synced = shares.to_vec();
     }
@@ -861,13 +861,16 @@ impl InputSide {
         self.processor.set_params(self.shared.params.load());
         self.in_block.store(frames, Ordering::Relaxed);
         self.callbacks.fetch_add(1, Ordering::Relaxed);
+        // Shut unless the capture is lined up with the list of apps shared right now.
+        // The applied list is read first and written last: whoever sees it also
+        // sees the removals that came with it.
+        let applied = self.shared.shares_applied.load(Ordering::Acquire);
         let removed = self.shared.shares_removed.load(Ordering::Relaxed);
         if std::mem::replace(&mut self.removed, removed) != removed {
             self.mixer.flush();
         }
-        // Shut unless the capture is lined up with the list of apps shared right now.
         let committed = self.shared.shares_committed.load(Ordering::Relaxed);
-        let open = committed != 0 && committed == self.shared.shares_applied.load(Ordering::Relaxed);
+        let open = committed != 0 && committed == applied;
         let share_gain = if open { f32::from_bits(self.shared.share_gain.load(Ordering::Relaxed)) } else { 0.0 };
         let sharing = self.mixer.begin(Instant::now(), frames, share_gain);
         let mut left = frames;

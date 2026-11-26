@@ -164,6 +164,11 @@ impl Reader {
         self.rx.is_abandoned() && (self.rx.is_empty() || !self.primed)
     }
 
+    /// The writer is gone: nothing more will come.
+    pub fn ended(&self) -> bool {
+        self.rx.is_abandoned()
+    }
+
     /// Throw away what is buffered; playing starts over with what comes after.
     pub fn flush(&mut self) {
         self.skip(self.rx.slots());
