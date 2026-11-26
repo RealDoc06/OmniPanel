@@ -3,7 +3,7 @@
 //!
 //! Backends:
 //! - macOS: CoreAudio for output/mic, Core Audio process taps (macOS 14.2+) for per-app
-//!   volume and output device, and for [`capture`] (hearing an app without muting it).
+//!   volume and output device, and for `capture` (hearing an app without muting it).
 //!   Another app's microphone cannot be changed.
 //! - Windows: WASAPI (`IAudioEndpointVolume`, `ISimpleAudioVolume` per session). No
 //!   per-app devices yet.

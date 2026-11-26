@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 pub use omni_core::{AudioDeviceInfo, AudioDevices, Effect, VoiceLevels, VoicePreset, VoiceSettings, VoiceStatus};
 
 use audio::{Selection, Shared, Wanted, Worker};
+use share::Shares;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceError {
@@ -44,6 +45,8 @@ pub fn share_unsupported() -> Option<&'static str> {
 /// Thread-safe (`Send + Sync`) handle. Audio streams run on an internal thread.
 pub struct VoiceEngine {
     state: Mutex<State>,
+    /// The shared apps as of [`Self::commit_shares`].
+    committed: Mutex<Shares>,
     shared: Arc<Shared>,
 }
 
@@ -56,7 +59,7 @@ struct State {
 
 impl VoiceEngine {
     pub fn new() -> Self {
-        Self { state: Mutex::default(), shared: Arc::default() }
+        Self { state: Mutex::default(), committed: Mutex::default(), shared: Arc::default() }
     }
 
     /// Inputs and outputs; ids round-trip into `VoiceSettings` device fields.
@@ -87,9 +90,10 @@ impl VoiceEngine {
         self.shared.status().preset_id.clone_from(&preset.id);
 
         // Nothing to capture apps with: their sound cannot keep the streams open.
-        let shares = if share::unsupported().is_some() { Vec::new() } else { settings.shared_apps.clone() };
+        let shares =
+            if share::unsupported().is_some() { Shares::default() } else { self.numbered(&settings.shared_apps) };
         self.shared.share_gain.store(dsp::share_gain(settings).to_bits(), Ordering::Relaxed);
-        if !settings.enabled && shares.is_empty() {
+        if !settings.enabled && shares.apps.is_empty() {
             state.applied = None;
             drop(state.worker.take()); // closes the streams and joins the audio thread (bounded wait)
             let mut status = self.shared.status();
@@ -148,11 +152,24 @@ impl VoiceEngine {
     /// Tell the engine which apps are shared as of now (the same list `apply` gets
     /// in `settings.shared_apps`). Call it the moment the list changes, before
     /// `apply`, which may be busy with devices: app sound only reaches the voice
-    /// output while the capture is lined up with exactly this list. So "stopped"
-    /// is heard within one audio callback, and nothing of the apps shared before
-    /// comes through when another one is shared right after.
+    /// output once the capture is lined up with this very change. So "stopped"
+    /// is heard within one audio callback, and nothing comes through of an app
+    /// that was shared before, or shared and stopped again while the capture was
+    /// still busy with it.
     pub fn commit_shares(&self, apps: &[String]) {
-        self.shared.shares_committed.store(share::key(apps), Ordering::Relaxed);
+        let mut committed = self.committed.lock().unwrap_or_else(PoisonError::into_inner);
+        if committed.apps != apps {
+            committed.apps = apps.to_vec();
+            committed.revision += 1;
+            self.shared.shares_committed.store(committed.revision, Ordering::Relaxed);
+        }
+    }
+
+    /// `apps` with the number of the change that committed them. A list that is
+    /// not the committed one (any more, or yet) has none: it stays unheard.
+    fn numbered(&self, apps: &[String]) -> Shares {
+        let committed = self.committed.lock().unwrap_or_else(PoisonError::into_inner);
+        Shares { apps: apps.to_vec(), revision: if committed.apps == apps { committed.revision } else { 0 } }
     }
 
     pub fn status(&self) -> VoiceStatus {
@@ -195,3 +212,28 @@ const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<VoiceEngine>();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An app shared and stopped again while the capture is still busy with it must
+    /// not be heard: going back to the list from before is a change of its own, and
+    /// the mix stays shut until the capture caught up with it.
+    #[test]
+    fn going_back_to_an_earlier_list_of_shared_apps_is_a_new_change() {
+        let engine = VoiceEngine::new();
+        let commit = |apps: &[&str]| {
+            engine.commit_shares(&apps.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+            engine.shared.shares_committed.load(Ordering::Relaxed)
+        };
+        let first = commit(&["Spotify"]);
+        assert_ne!(first, 0);
+        assert_eq!(commit(&["Spotify"]), first, "the same list again is no change");
+        assert_ne!(commit(&["Spotify", "Firefox"]), first);
+        let back = commit(&["Spotify"]);
+        assert_ne!(back, first);
+        assert_eq!(engine.numbered(&["Spotify".into()]).revision, back);
+        assert_eq!(engine.numbered(&["Firefox".into()]).revision, 0, "not the committed list: never heard");
+    }
+}

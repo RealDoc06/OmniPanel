@@ -40,15 +40,27 @@ pub(crate) struct AppCapture {
     /// First, so it is the first to go: deleting the record streams below must
     /// not come back as change events for a capture that is closing.
     _watcher: Watcher,
-    /// Owns the record streams.
-    client: pulseaudio::Client,
     /// Lists what is playing and which of our record streams the server still runs.
     server: Connection,
     /// Record streams by the sink input they monitor.
     streams: HashMap<u32, Stream>,
+    /// Owns the record streams, and goes after them.
+    client: Client,
     /// Marks our record streams on the server, see [`Stream::tag`].
     tag: String,
     rate: u32,
+}
+
+/// The connection the record streams run on. Its thread (in the `pulseaudio` crate)
+/// only notices that everyone let go of the client when the server next sends
+/// something, so the last thing a client does is ask for that: without it, a
+/// capture that ends with no stream to delete would stay connected for good.
+struct Client(pulseaudio::Client);
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.0.stat().now_or_never();
+    }
 }
 
 impl AppCapture {
@@ -58,9 +70,9 @@ impl AppCapture {
         static CAPTURES: AtomicU32 = AtomicU32::new(0);
         Ok(Self {
             _watcher: Watcher::spawn(changed)?,
-            client: connect()?,
             server: Connection::open()?,
             streams: HashMap::new(),
+            client: Client(connect()?),
             tag: format!("{}.{}", std::process::id(), CAPTURES.fetch_add(1, Ordering::Relaxed)),
             rate: mix_rate,
         })
@@ -86,7 +98,7 @@ impl AppCapture {
                 break;
             }
             let (writer, feed) = feed(self.rate, self.rate);
-            match Stream::open(&self.client, index, &self.tag, self.rate, writer) {
+            match Stream::open(&self.client.0, index, &self.tag, self.rate, writer) {
                 // The mixer takes feeds every microphone callback; a full queue means it stalled.
                 Ok(stream) if port.add(feed) => drop(self.streams.insert(index, stream)),
                 Ok(_) => return Err(VoiceError::Backend("the microphone stream stalled".into())),
@@ -137,8 +149,9 @@ fn text(value: &[u8]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// The streams of the app called `query`. Only names count, never the binary:
-/// apps can share one (Electron), and a share must stay with the app it names.
+/// The streams of the app called `query`. Only [`Playback::name`] counts, never the
+/// binary of an app that has a name: apps can share one (Electron), and a share
+/// must stay with the app it names.
 fn named<'a>(playing: &'a [Playback], query: &str) -> Vec<&'a Playback> {
     playing.iter().filter(|p| same(query, &p.name)).collect()
 }

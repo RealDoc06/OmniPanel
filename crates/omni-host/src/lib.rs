@@ -632,6 +632,8 @@ impl Host {
     /// good, turn the voice changer off and stop the background loops, so
     /// the engine is freed once the last `Host` is dropped.
     pub async fn shutdown(&self) {
+        // Shared app sound stops now, not when the voice worker gets to it.
+        self.voice.commit_shares(&[]);
         self.close_all_sessions();
         let voice_off = async {
             self.closing.store(true, Ordering::Relaxed);

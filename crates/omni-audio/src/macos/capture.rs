@@ -533,11 +533,12 @@ mod tests {
         assert!(pieces.iter().flatten().all(|&s| s == 0.125));
     }
 
-    /// Captures `afplay` on real hardware: the tone arrives, and the app keeps
-    /// playing (its process still runs output) because the tap does not mute.
+    /// Captures `afplay` on real hardware: its tone arrives at its own level and in
+    /// real time, and afplay keeps running output. (That it is still heard on the
+    /// speakers rests on the tap being made unmuted; nothing here listens to them.)
     #[test]
     #[ignore]
-    fn captures_afplay_without_muting_it() {
+    fn captures_afplay_at_its_level() {
         require_permission();
         let tone = Tone::play();
         let object = tone.object();

@@ -23,7 +23,7 @@ use rtrb::RingBuffer;
 use crate::devices::{self, Direction, backend};
 use crate::dsp::{Chain, ChainPort, Params, Processor};
 use crate::reader::Reader;
-use crate::share::{self, AppCapture, Mixer, MixerPort};
+use crate::share::{self, AppCapture, Mixer, MixerPort, Shares};
 use crate::{Effect, Result, VoiceError, VoiceLevels, VoiceStatus};
 
 /// Preferred processing rate; outputs are opened at the input's rate when possible.
@@ -71,7 +71,7 @@ pub(crate) struct Wanted {
     pub voice: bool,
     pub effects: Vec<Effect>,
     /// Apps whose sound is mixed into the main output.
-    pub shares: Vec<String>,
+    pub shares: Shares,
 }
 
 /// State shared between the engine handle, the audio thread and the callbacks.
@@ -82,9 +82,9 @@ pub(crate) struct Shared {
     pub levels: Levels,
     /// Linear gain of the shared app sound (`f32` bits), read by the input callback.
     pub share_gain: AtomicU32,
-    /// The list of shared apps the host committed and the one the capture was last
-    /// lined up with ([`share::key`]). App sound is only mixed while they agree,
-    /// see [`crate::VoiceEngine::commit_shares`].
+    /// The number of the latest change to the list of shared apps the host committed,
+    /// and of the one the capture was last lined up with ([`Shares::revision`]). App
+    /// sound is only mixed while they agree, see [`crate::VoiceEngine::commit_shares`].
     pub shares_committed: AtomicU64,
     pub shares_applied: AtomicU64,
     /// Counts the times an app stopped being shared: the input callback then
@@ -191,7 +191,7 @@ enum Command {
         reply: SyncSender<Result<()>>,
     },
     Effects(Vec<Effect>),
-    Shares(Vec<String>),
+    Shares(Shares),
     /// What the shared apps play changed (sent by the app capture).
     SharesChanged,
     /// Fatal error reported by cpal for the stream opened as `generation`
@@ -246,7 +246,7 @@ impl Worker {
     }
 
     /// Change which apps are shared without touching the streams.
-    pub fn set_shares(&self, shares: Vec<String>) -> Result<()> {
+    pub fn set_shares(&self, shares: Shares) -> Result<()> {
         self.send(Command::Shares(shares))
     }
 
@@ -386,7 +386,7 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
                     worker.update(|shared| shared.status().error.clone_from(&s.warning));
                     // The safety net of the app capture: reopens a failed one and
                     // catches what its change events did not report.
-                    if !wanted.shares.is_empty() {
+                    if !wanted.shares.apps.is_empty() {
                         s.sync_shares(&wanted.shares, &worker, &events);
                     }
                 }
@@ -627,16 +627,17 @@ impl Session {
     /// Capture exactly the apps in `shares` that play now (none: stop capturing)
     /// and put any problem in the status. Run again whenever the capture reports
     /// a change; a failed capture is reopened by the next poll.
-    fn sync_shares(&mut self, shares: &[String], worker: &WorkerState, events: &Sender<Command>) {
+    fn sync_shares(&mut self, shares: &Shares, worker: &WorkerState, events: &Sender<Command>) {
+        let Shares { apps, revision } = shares;
         // Cleared first: a change during the sync asks for another one.
         self.shares_changed.store(false, Ordering::Relaxed);
-        let result = if shares.is_empty() {
+        let result = if apps.is_empty() {
             self.capture = None;
             Ok(Vec::new())
         } else if !self.output_virtual {
             Err(VoiceError::Backend(NOT_A_VIRTUAL_MIC.into()))
         } else {
-            self.capture_shares(shares, events)
+            self.capture_shares(apps, events)
         };
         self.mixer.drop_retired();
         if result.is_err() {
@@ -656,13 +657,13 @@ impl Session {
             status.share_waiting = waiting;
             // The capture of an app that is no longer shared has ended above; what the
             // mixer still holds of it goes too, before the mix may open for the new list.
-            if self.shares_synced.iter().any(|app| !shares.contains(app)) {
+            if self.shares_synced.iter().any(|app| !apps.contains(app)) {
                 shared.shares_removed.fetch_add(1, Ordering::Relaxed);
             }
             // From here on the feeds in the mixer belong to exactly this list.
-            shared.shares_applied.store(share::key(shares), Ordering::Release);
+            shared.shares_applied.store(*revision, Ordering::Release);
         });
-        self.shares_synced = shares.to_vec();
+        self.shares_synced.clone_from(apps);
     }
 
     /// Returns the shared apps with nothing to capture right now.
@@ -713,7 +714,7 @@ impl Session {
         self.watchdog.is_some()
             || self.default_input.is_some()
             || (POLL_MONITOR && wanted.selection.monitor.is_some() && self.monitor.is_none())
-            || !wanted.shares.is_empty()
+            || !wanted.shares.apps.is_empty()
     }
 
     /// No input callback since the previous poll.
@@ -1106,9 +1107,8 @@ mod tests {
     fn shared_app_sound_reaches_the_output_but_not_the_monitor() {
         let shared = Arc::new(Shared::default());
         shared.share_gain.store(1.0f32.to_bits(), Ordering::Relaxed);
-        let spotify = share::key(&["Spotify".into()]);
-        shared.shares_committed.store(spotify, Ordering::Relaxed);
-        shared.shares_applied.store(spotify, Ordering::Relaxed);
+        shared.shares_committed.store(1, Ordering::Relaxed);
+        shared.shares_applied.store(1, Ordering::Relaxed);
         let (output, mut output_rx) = ring(48_000);
         let (monitor, mut monitor_rx) = ring(48_000);
         let (_monitor_rings, monitor_in) = RingBuffer::new(2);
@@ -1143,9 +1143,9 @@ mod tests {
         assert!(to_call[10 * 2048..].iter().all(|s| (s - 0.6).abs() < 1e-3), "voice + app: {}", to_call[10 * 2048]);
         assert!(to_ears[10 * 2048..].iter().all(|s| (s - 0.1).abs() < 1e-3), "voice only: {}", to_ears[10 * 2048]);
 
-        // Another list is committed (here: nothing shared any more): the app is shut
-        // out within one callback, whatever its feed and the capture still do.
-        side.shared.shares_committed.store(0, Ordering::Relaxed);
+        // The list changes: the app is shut out within one callback, whatever its
+        // feed and the capture still do.
+        side.shared.shares_committed.store(2, Ordering::Relaxed);
         for _ in 0..2 {
             app.write(2048, std::iter::repeat_n(0.5, 2048));
             side.process_mono(2048, std::iter::repeat_n(0.1, 2048));

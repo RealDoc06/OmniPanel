@@ -15,7 +15,6 @@
 // Without a capture (Windows for now) only the tests feed the mixer.
 #![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -271,16 +270,13 @@ pub(crate) fn same(query: &str, name: &str) -> bool {
     !query.is_empty() && query.to_lowercase() == name.to_lowercase()
 }
 
-/// Identifies a list of shared apps (0 = none). The mix is only open while the
-/// list the host committed and the one the capture was last lined up with have
-/// the same key, see [`crate::VoiceEngine::commit_shares`].
-pub(crate) fn key(apps: &[String]) -> u64 {
-    if apps.is_empty() {
-        return 0;
-    }
-    let mut hasher = std::hash::DefaultHasher::new();
-    apps.hash(&mut hasher);
-    hasher.finish() | 1
+/// A list of shared apps and the number of the change that made it the shared
+/// list, see [`crate::VoiceEngine::commit_shares`]. 0: no change committed it,
+/// so it is never heard.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Shares {
+    pub apps: Vec<String>,
+    pub revision: u64,
 }
 
 #[cfg(test)]
@@ -551,15 +547,5 @@ mod tests {
         assert!(!same("Discord", "Discord PTB"));
         assert!(!same("nightly", "Firefox Nightly"));
         assert!(!same("", ""));
-    }
-
-    #[test]
-    fn lists_of_shared_apps_have_their_own_key() {
-        let list = |apps: &[&str]| key(&apps.iter().map(|a| a.to_string()).collect::<Vec<_>>());
-        assert_eq!(list(&[]), 0);
-        assert_ne!(list(&["Spotify"]), 0);
-        assert_eq!(list(&["Spotify"]), list(&["Spotify"]));
-        assert_ne!(list(&["Spotify"]), list(&["Firefox"]));
-        assert_ne!(list(&["Spotify"]), list(&["Spotify", "Firefox"]));
     }
 }

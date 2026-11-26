@@ -31,12 +31,14 @@ export function ShareAppsSection() {
   const share = (type: Extract<VoiceOp, { app: string }>["type"], name: string) => void run(api.runAction({ type: "voice", op: { type, app: name } }));
   const name = app.trim();
 
+  // With no output chosen the engine uses a virtual cable it finds; only without one is there something to set up.
+  const needsSetup = voice.outputDevice === null && !status.virtualMic;
   const state: keyof typeof STATE_TONES = status.shareUnsupported
     ? "Not supported"
-    : shared.length === 0 ? "Off" : voice.outputDevice === null ? "Needs setup" : status.running && !status.shareError ? "Sharing" : "Stopped";
+    : shared.length === 0 ? "Off" : needsSetup ? "Needs setup" : status.running && !status.shareError ? "Sharing" : "Stopped";
 
   return (
-    <Section title="Share app sound" id="sound-share" actions={<span className={cx("text-xs", STATE_TONES[state])}>{state}</span>}>
+    <Section title="Share app sound" id="sound-share" actions={<span role="status" className={cx("text-xs", STATE_TONES[state])}>{state}</span>}>
       <p className="mb-2 text-muted">
         Lets people in your call hear an app, like music, a video or a game, along with your voice. You keep hearing it as usual.
       </p>
@@ -44,7 +46,7 @@ export function ShareAppsSection() {
         <Notice tone="warn">{status.shareUnsupported}</Notice>
       ) : (
         <>
-          {voice.outputDevice === null && (
+          {needsSetup && (
             <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1">
               <Notice tone="warn">Shared sound goes to the voice changer's virtual microphone, which needs a one-time setup.</Notice>
               <Button size="sm" onClick={() => navigate("sound", "voice")}>
@@ -65,7 +67,7 @@ export function ShareAppsSection() {
           {shared.length > 0 && (
             <Field
               label="Sharing"
-              hint={voice.enabled ? undefined : "The voice changer is off: your voice only reaches the virtual microphone while an app is shared. Turn it on (the Clean voice changes nothing) to keep talking through it afterwards."}
+              hint={voice.enabled ? undefined : "The voice changer is off: your voice only reaches the virtual microphone while an app is shared. Turn it on (the Clean voice adds no effect) to keep talking through it afterwards."}
             >
               <ul className="flex flex-col">
                 {shared.map((a) => (

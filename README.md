@@ -112,10 +112,11 @@ Other apps need a virtual microphone to receive the processed voice:
 
 **Sound → Share app sound** (or a "Share an app's sound into your mic" button) mixes an app into that same virtual
 microphone, next to your voice. You keep hearing the app as usual, voice effects stay on your voice only, and the
-voice changer does not have to be on. Sharing stops when OmniPanel quits and never resumes by itself.
+voice changer does not have to be on. Sharing stops when OmniPanel quits and never resumes by itself. An app is
+shared by its name, so apps with the same name are shared together.
 
 Your call app has to use the virtual microphone to hear a share. With the voice changer off, your voice only reaches
-that microphone while an app is shared; keep the voice changer on (the Clean voice changes nothing) if the call stays
+that microphone while an app is shared; keep the voice changer on (the Clean voice adds no effect) if the call stays
 on it.
 
 - **Linux:** follows the app's own volume and mute. Nothing is loaded into PulseAudio / PipeWire.
