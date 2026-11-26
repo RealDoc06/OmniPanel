@@ -1,8 +1,8 @@
 name: Rust
 
-# Rust tests on every OS OmniPanel ships for. Runs unless a change only touches
-# docs, web sources or other workflows, which these tests never read. Any other
-# path runs them: a wasted run costs less than a skipped one.
+# Rust tests on every OS OmniPanel ships for. Skipped when a change only touches
+# root Markdown, docs/, web sources or other workflows. Any other path runs
+# them: a wasted run costs less than a skipped one.
 on:
   push:
     branches: [main]
@@ -13,7 +13,7 @@ on:
       - "!apps/deck/**"
       - "!apps/desktop/**"
       - "apps/desktop/src-tauri/**"
-      - "!**/package.json"
+      - "!package.json"
       - "!pnpm-*.yaml"
       - "!.github/**"
       - ".github/workflows/rust.yml"
@@ -23,7 +23,7 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request cancels that pull request's earlier run of this
+# A new run for a pull request cancels that pull request's previous run of this
 # workflow. Runs on main are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -44,8 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # Dependencies only. A pull request starts from the cache main saved and
-      # saves its own only when main has none for the same dependencies.
+      # Dependencies only. Restores the closest cache in reach (this pull
+      # request's, else main's) and saves a new one only when that was no exact match.
       - uses: Swatinem/rust-cache@v2
       - name: Linux system deps
         if: runner.os == 'Linux'

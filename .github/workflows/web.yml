@@ -1,9 +1,10 @@
 name: Web
 
-# Type checks, builds and tests the desktop UI and the deck client. One OS is
-# enough: none of this is platform-specific. Runs unless a change only touches
-# docs, Rust sources or other workflows, which these checks never read. Any
-# other path runs them: a wasted run costs less than a skipped one.
+# Type checks, builds and tests the desktop UI and the deck client. Linux is
+# enough for source changes; web-other-os.yml covers what differs per OS.
+# Skipped when a change only touches root Markdown, docs/, Rust sources or
+# other workflows. Any other path runs them: a wasted run costs less than a
+# skipped one.
 on:
   push:
     branches: [main]
@@ -23,7 +24,7 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request cancels that pull request's earlier run of this
+# A new run for a pull request cancels that pull request's previous run of this
 # workflow. Runs on main are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}

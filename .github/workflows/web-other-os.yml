@@ -1,0 +1,47 @@
+name: Web (macOS, Windows)
+
+# web.yml only runs on Linux, but TypeScript, Vite, esbuild, swc and Tailwind
+# ship one binary per OS and releases are built on all three. When dependencies
+# or the build scripts change, this runs the same checks on the other two.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "**/package.json"
+      - "apps/deck/build.mjs"
+      - "apps/desktop/vite.config.ts"
+      - ".github/workflows/web-other-os.yml"
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+# A new run for a pull request cancels that pull request's previous run of this
+# workflow. Runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    # Same steps as web.yml.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build:ui
+      - run: pnpm -r test
