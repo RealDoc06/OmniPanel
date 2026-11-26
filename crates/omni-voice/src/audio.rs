@@ -616,9 +616,11 @@ impl Session {
         let in_block = Arc::new(AtomicUsize::new(0));
         let callbacks = Arc::new(AtomicU32::new(0));
         let (ring, rx) = ring(rate);
-        let output_stale = Arc::<AtomicBool>::default();
-        let reader =
-            Reader::new(rx, rate, out_cfg.sample_rate(), in_block.clone()).starting_over_on(output_stale.clone());
+        // An output that comes back from a stall after the shared list changed must
+        // not play what was mixed before.
+        let committed = shared.clone();
+        let reader = Reader::new(rx, rate, out_cfg.sample_rate(), in_block.clone())
+            .starting_over_behind(move || committed.shares_committed.load(Ordering::Relaxed));
         let on_error = stream_error_handler(events.clone(), generation, "output");
         let stream = output_stream(output, out_cfg, fixed, reader, on_error)?;
 
@@ -640,7 +642,6 @@ impl Session {
             mixer,
             gate: gate.clone(),
             changes: 0,
-            output_stale,
             in_block: in_block.clone(),
             callbacks: callbacks.clone(),
             shared: shared.clone(),
@@ -688,6 +689,10 @@ impl Session {
         let result = if apps.is_empty() {
             self.capture = None;
             Ok(Vec::new())
+        } else if superseded() {
+            // The sync for the newer list, or the stop, comes next: this one starts
+            // nothing (no capture, no permission prompt) and reports nothing.
+            return;
         } else if !self.output_virtual {
             Err(VoiceError::Backend(NOT_A_VIRTUAL_MIC.into()))
         } else {
@@ -696,6 +701,10 @@ impl Session {
         self.mixer.drop_retired();
         if result.is_err() {
             self.capture = None;
+        }
+        // Cut short on the way: what it found says nothing about the list that counts now.
+        if !apps.is_empty() && superseded() {
+            return;
         }
         let (waiting, error) = match result {
             Ok(waiting) => (waiting, None),
@@ -888,8 +897,6 @@ pub(crate) struct InputSide {
     mixer: Mixer,
     gate: Arc<ShareGate>,
     changes: u32,
-    /// Tells the main output's reader to start over, see [`Reader::starting_over_on`].
-    output_stale: Arc<AtomicBool>,
     in_block: Arc<AtomicUsize>,
     callbacks: Arc<AtomicU32>,
     shared: Arc<Shared>,
@@ -927,11 +934,6 @@ impl InputSide {
         let changes = self.gate.changes.load(Ordering::Relaxed);
         if std::mem::replace(&mut self.changes, changes) != changes {
             self.mixer.flush();
-            // An output that fell far behind (it stalled) still holds what was mixed
-            // before the change: it starts over rather than play that late.
-            if self.output.slots() < self.output.buffer().capacity() / 2 {
-                self.output_stale.store(true, Ordering::Relaxed);
-            }
         }
         let committed = self.shared.shares_committed.load(Ordering::Relaxed);
         let open = committed != 0 && committed == applied;
@@ -1186,7 +1188,6 @@ mod tests {
             mixer,
             gate,
             changes: 0,
-            output_stale: Arc::default(),
             in_block: Arc::default(),
             callbacks: Arc::default(),
             shared,
@@ -1253,22 +1254,6 @@ mod tests {
         let to_call = drain(&mut output_rx);
         assert!(to_call.iter().all(|&s| s < 0.41), "nothing of the 0.9: {:?}", to_call.iter().find(|s| **s >= 0.41));
         assert!(to_call.ends_with(&[0.4]), "voice + app again: {:?}", to_call.last());
-    }
-
-    /// The output stalled while an app was shared: when the list changes, what
-    /// waits in its ring (mixed before the change) is not to be played late.
-    #[test]
-    fn a_stalled_output_starts_over_when_the_shared_list_changes() {
-        let (mut side, mut port, _output_rx, _monitor_rx) = sharing_side();
-        let (mut app, feed) = share::feed(48_000, 48_000);
-        assert!(port.add(feed));
-        // Nobody reads the output: its 2 s ring fills up.
-        run(&mut side, &mut app, 0.5, 40);
-        assert!(!side.output_stale.load(Ordering::Relaxed));
-        let gate = side.gate.clone();
-        gate.line_up(2, gate.shut_for(2));
-        run(&mut side, &mut app, 0.5, 1);
-        assert!(side.output_stale.load(Ordering::Relaxed));
     }
 
     /// Real-device smoke test of the output path (ring -> Reader -> cpal), no microphone needed.

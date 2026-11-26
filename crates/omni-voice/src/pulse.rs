@@ -67,7 +67,7 @@ impl Drop for Capture {
     }
 }
 
-pub(crate) fn connect() -> Result<pulseaudio::Client> {
+fn connect() -> Result<pulseaudio::Client> {
     with_timeout(CONNECT_TIMEOUT, || pulseaudio::Client::from_env(c"OmniPanel"))?.map_err(|e| pulse_error(e, "server"))
 }
 

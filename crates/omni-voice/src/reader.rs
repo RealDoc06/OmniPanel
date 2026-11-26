@@ -8,7 +8,7 @@
 //! (stalls, start-up) are fixed by skipping samples or padding silence.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rtrb::Consumer;
 
@@ -45,8 +45,8 @@ pub(crate) struct Reader {
     last: f32,
     /// Anti-aliasing when the output rate is lower than the input rate.
     aa: Option<[Biquad; 2]>,
-    /// See [`Self::starting_over_on`].
-    stale: Option<Arc<AtomicBool>>,
+    /// See [`Self::starting_over_behind`]: reads the mark, and the one last seen.
+    mark: Option<(Box<dyn Fn() -> u64 + Send>, u64)>,
 }
 
 impl Reader {
@@ -70,23 +70,22 @@ impl Reader {
             gain_step: (1.0 / (0.005 * out_rate)) as f32,
             last: 0.0,
             aa: (base_ratio > 1.01).then(|| Biquad::butterworth4((0.45 * out_rate) as f32, in_rate as f32)),
-            stale: None,
+            mark: None,
         }
     }
 
-    /// Makes the reader throw away what is buffered and start over whenever `stale`
-    /// is set (which it clears): the writer's way to take back what it wrote.
-    pub fn starting_over_on(mut self, stale: Arc<AtomicBool>) -> Self {
-        self.stale = Some(stale);
+    /// Makes a reader that finds itself way behind throw away all of the backlog,
+    /// not only the older part, when `mark()` changed since its last callback: what
+    /// waited in the ring was written before that change and is not played late.
+    pub fn starting_over_behind(mut self, mark: impl Fn() -> u64 + Send + 'static) -> Self {
+        let seen = mark();
+        self.mark = Some((Box::new(mark), seen));
         self
     }
 
     /// Render `frames` output samples; `put(i, sample)` writes frame `i`.
     /// Call once per output callback.
     pub fn render(&mut self, frames: usize, put: impl FnMut(usize, f32)) {
-        if self.stale.as_ref().is_some_and(|stale| stale.swap(false, Ordering::Relaxed)) {
-            self.flush();
-        }
         self.begin(frames, frames);
         self.fill(frames, put);
     }
@@ -108,6 +107,14 @@ impl Reader {
         let half_ring = 0.5 * self.rx.buffer().capacity() as f64;
         let target = (self.in_hold + self.out_hold * self.base_ratio + MARGIN_SECS * self.in_rate).min(half_ring);
 
+        let behind = fill > 2.0 * target + self.in_hold;
+        let marked = self.mark.as_mut().is_some_and(|(mark, seen)| {
+            let now = mark();
+            std::mem::replace(seen, now) != now
+        });
+        if behind && marked {
+            return self.flush();
+        }
         if !self.primed {
             if !in_started || fill < target {
                 return;
@@ -117,7 +124,7 @@ impl Reader {
             self.avg_fill = target;
             self.frac = 0.0;
             self.hist = [0.0; 4];
-        } else if fill > 2.0 * target + self.in_hold {
+        } else if behind {
             // Way behind (e.g. the output stalled): drop the backlog instead of drifting.
             self.skip((fill - target) as usize);
             self.avg_fill = target;
@@ -288,5 +295,44 @@ mod tests {
         // A ring too small for that fill plays with gaps instead of staying silent.
         let (_, _, out) = simulate(48_000.0, 16_384, 48_000.0, 16_384, 10.0, 24_000);
         assert!(rms(&out[out.len() / 2..]) > 0.1);
+    }
+
+    /// The output stalls while what it plays changes (an app stops being shared):
+    /// when it comes back, nothing that waited in the ring from before is played.
+    #[test]
+    fn a_reader_way_behind_starts_over_when_its_mark_changed() {
+        let heard_after_a_stall = |marked: bool| {
+            let (mut tx, rx) = rtrb::RingBuffer::new(96_000);
+            let mark = Arc::new(AtomicUsize::new(1));
+            let read = mark.clone();
+            let mut reader = Reader::new(rx, 48_000, 48_000, Arc::new(AtomicUsize::new(480)))
+                .starting_over_behind(move || read.load(Ordering::Relaxed) as u64);
+            // `callbacks` input blocks of `level`, each played at once unless `stalled`.
+            let mut run = |level: f32, callbacks: usize, stalled: bool| {
+                let mut out = Vec::new();
+                for _ in 0..callbacks {
+                    for _ in 0..480 {
+                        let _ = tx.push(level);
+                    }
+                    if !stalled {
+                        let mut buf = [0.0f32; 480];
+                        reader.render(480, |i, s| buf[i] = s);
+                        out.extend(buf);
+                    }
+                }
+                out
+            };
+            assert!(run(0.9, 50, false).ends_with(&[0.9]));
+            run(0.9, 100, true);
+            if marked {
+                mark.store(2, Ordering::Relaxed);
+            }
+            run(0.1, 50, false)
+        };
+        let late = heard_after_a_stall(false);
+        assert!(late.iter().any(|&s| s > 0.8), "an unmarked backlog keeps its newest part");
+        let fresh = heard_after_a_stall(true);
+        assert!(fresh.iter().all(|&s| s < 0.11), "max {}", fresh.iter().fold(0.0f32, |m, s| m.max(*s)));
+        assert!(fresh.ends_with(&[0.1]));
     }
 }
