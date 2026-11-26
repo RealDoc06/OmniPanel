@@ -15,4 +15,14 @@ name: string, pid: number | null, volume: number, muted: boolean,
 /**
  * Currently producing sound.
  */
-playing: boolean, };
+playing: boolean, 
+/**
+ * Output device the app plays on (`AudioDeviceInfo::id`). `None` for an app that
+ * only records, and where `AudioCapabilities::per_app_output` is false.
+ */
+output: string | null, 
+/**
+ * Microphone the app records from, while it records. Always `None` where
+ * `AudioCapabilities::per_app_input` is false.
+ */
+input: string | null, };

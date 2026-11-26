@@ -40,6 +40,16 @@ pub enum Action {
     Media { command: MediaCommand },
     /// Change a volume (system output, microphone, a single app or an OBS input).
     Volume { target: VolumeTarget, op: VolumeOp },
+    /// Choose the device one app plays on or records from. Where the platform cannot
+    /// do that (see `AudioCapabilities`), the action fails with the reason.
+    AppDevice {
+        /// Matched like `VolumeTarget::App`.
+        app: String,
+        direction: AudioDirection,
+        /// `AudioDeviceInfo::id` or a device name; `None` is the system default.
+        #[serde(default)]
+        device: Option<String>,
+    },
     /// Control the microphone voice changer.
     Voice { op: VoiceOp },
     /// Control OBS Studio through obs-websocket v5.
@@ -135,6 +145,15 @@ pub enum VolumeOp {
     ToggleMute,
     Mute,
     Unmute,
+}
+
+/// Which side of an app's audio: what it plays or what it records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum AudioDirection {
+    Output,
+    Input,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]

@@ -13,6 +13,7 @@ Android). Old devices are first-class: the deck works on Android 4.4 and iOS 9 b
 - **Global hotkeys.** Any button can also be triggered by a keyboard shortcut.
 - **Actions**
   - Per-app volume with live sliders on the deck, master volume, mic mute
+  - Per-app speaker and microphone: send Spotify to the headphones, give Discord another mic (see the table below)
   - Voice changer for your microphone (robot, chipmunk, deep, demon, radio, telephone, echo, cathedral, alien,
     megaphone, underwater, or build your own effect chain)
   - Open apps, files, folders and URLs
@@ -41,6 +42,17 @@ Download the installer for your OS from the [releases page](https://github.com/R
 | Linux x86_64 | `.deb`, `.rpm`, `.AppImage` | Needs PulseAudio or PipeWire (`pactl`). Global hotkeys and key simulation need X11 (or XWayland). |
 | Linux arm64 | `.deb`, `.rpm`, `.AppImage` from the release workflow | Same as x86_64. |
 | Android, iOS, anything with a browser | none | These are decks. Open the deck URL, nothing to install. |
+
+**Speaker and microphone per app**
+
+| Platform | An app's speaker | An app's microphone |
+| --- | --- | --- |
+| Linux | Yes | Yes, while the app is recording |
+| macOS 14.2+ | Yes, for what the app plays on the default output | No: macOS cannot change it, pick it inside the app |
+| Windows | Not yet | Not yet |
+
+Pick them per app in **Sound**, or put them on a button ("Play an app on another speaker"). Where it does not work,
+the app says so.
 
 **Unsigned builds**
 

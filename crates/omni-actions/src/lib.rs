@@ -109,6 +109,9 @@ impl Executor {
             }
             Action::Media { command } => media::run(&self.audio, *command).await.map(|()| done()),
             Action::Volume { target, op } => volume::run(&self.audio, &self.obs, target, op).await.map(|()| done()),
+            Action::AppDevice { app, direction, device } => {
+                volume::set_app_device(&self.audio, app, *direction, device.as_deref()).await.map(|()| done())
+            }
             Action::Obs { op } => self.obs.run(op).await,
             Action::HomeAssistant { op } => self.ha.run(op).await,
             Action::Http { method, url, headers, body } => {

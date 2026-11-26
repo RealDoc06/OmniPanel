@@ -1,13 +1,18 @@
-//! Volume control: system output, default microphone and per-application volume.
+//! Volume control: system output, default microphone and per-application volume,
+//! plus the device each application plays on and records from.
 //!
 //! Backends:
-//! - macOS: CoreAudio for output/mic, Core Audio process taps (macOS 14.2+) for per-app volume
-//! - Windows: WASAPI (`IAudioEndpointVolume`, `ISimpleAudioVolume` per session)
+//! - macOS: CoreAudio for output/mic, Core Audio process taps (macOS 14.2+) for per-app
+//!   volume and output device. Another app's microphone cannot be changed.
+//! - Windows: WASAPI (`IAudioEndpointVolume`, `ISimpleAudioVolume` per session). No
+//!   per-app devices yet.
 //! - Linux: PulseAudio / PipeWire through `pactl`
 //!
 //! All methods are blocking but fast; call them from `spawn_blocking` in async code.
 
-pub use omni_core::{AppAudio, AppLevel, AudioCapabilities, MixerState, VolumeState};
+pub use omni_core::{
+    AppAudio, AppLevel, AudioCapabilities, AudioDeviceInfo, AudioDevices, AudioDirection, MixerState, VolumeState,
+};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -36,6 +41,8 @@ pub enum AudioError {
     Unsupported(String),
     #[error("no audio app matches \"{0}\"")]
     AppNotFound(String),
+    #[error("no audio device matches \"{0}\"")]
+    DeviceNotFound(String),
     #[error("permission required: {0}")]
     Permission(String),
     #[error("{0}")]
@@ -44,12 +51,9 @@ pub enum AudioError {
 
 pub type Result<T> = std::result::Result<T, AudioError>;
 
-/// The two system endpoints: default output ("master") and default input ("mic").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Endpoint {
-    Output,
-    Input,
-}
+/// Output or input side: the default output ("master") and default input ("mic")
+/// endpoints, or the device an app plays on / records from.
+pub(crate) use omni_core::AudioDirection as Endpoint;
 
 /// What every platform backend implements. `AudioController` adds clamping and app matching.
 pub(crate) trait Backend: Send + Sync + Sized {
@@ -72,6 +76,17 @@ pub(crate) trait Backend: Send + Sync + Sized {
         Vec::new()
     }
     fn restore_app_levels(&self, _levels: &[AppLevel]) {}
+    /// Devices apps can be sent to; none where `set_app_device` is unsupported.
+    fn devices(&self) -> Result<AudioDevices> {
+        Ok(AudioDevices::default())
+    }
+    /// Sends what the app plays to an output device, or gives it a microphone.
+    /// `device` matches like [`find_device`]; `None` is the system default. Takes the
+    /// app query instead of a found app: a platform that cannot do this says so
+    /// (with `capabilities().device_note`) whether or not the app is running.
+    fn set_app_device(&self, _app: &str, _direction: Endpoint, _device: Option<&str>) -> Result<()> {
+        Err(AudioError::Unsupported(self.capabilities().device_note.unwrap_or_default()))
+    }
 }
 
 /// Thread-safe (`Send + Sync`) handle to the platform audio system.
@@ -137,8 +152,22 @@ impl AudioController {
         self.platform.set_app_muted(&self.platform.find(app)?, muted)
     }
 
-    /// App levels that differ from 100% / unmuted, to persist. Only macOS keeps
-    /// per-app levels itself; Windows and Linux remember them and return none.
+    /// Devices an app can be sent to, per direction. Empty where the platform cannot
+    /// do that (see [`AudioCapabilities`]).
+    pub fn devices(&self) -> Result<AudioDevices> {
+        self.platform.devices()
+    }
+
+    /// Sends what `app` plays to an output device, or gives it another microphone.
+    /// `device` is an [`AudioDeviceInfo::id`] or a device name; `None` is the system
+    /// default. See [`Self::app`] for app matching.
+    pub fn set_app_device(&self, app: &str, direction: AudioDirection, device: Option<&str>) -> Result<()> {
+        self.platform.set_app_device(app, direction, device)
+    }
+
+    /// App levels and output devices that differ from 100% / unmuted / default, to
+    /// persist. Only macOS keeps them itself; Windows and Linux remember them and
+    /// return none.
     pub fn app_levels(&self) -> Vec<AppLevel> {
         self.platform.app_levels()
     }
@@ -157,6 +186,7 @@ impl AudioController {
             mic: self.mic().ok(),
             apps: self.apps().unwrap_or_default(),
             capabilities: self.capabilities(),
+            devices: self.devices().unwrap_or_default(),
         }
     }
 }
@@ -180,18 +210,29 @@ fn clamp_volume(volume: f32) -> Result<f32> {
     Ok(volume.clamp(0.0, 1.0))
 }
 
-/// Matching rule shared by all backends: id (case-insensitive), then exact name,
-/// then name substring. Earlier entries win ties.
-fn find_app<'a>(apps: &'a [AppAudio], query: &str) -> Option<&'a AppAudio> {
+/// Matching rule shared by all backends, for apps and devices: id (case-insensitive),
+/// then exact name, then name substring. Earlier entries win ties.
+fn best_match<'a, T>(items: &'a [T], query: &str, id: impl Fn(&T) -> &str, name: impl Fn(&T) -> &str) -> Option<&'a T> {
     let query = query.trim();
     if query.is_empty() {
         return None;
     }
     let needle = query.to_lowercase();
-    apps.iter()
-        .find(|a| a.id.to_lowercase() == needle)
-        .or_else(|| apps.iter().find(|a| a.name.to_lowercase() == needle))
-        .or_else(|| apps.iter().find(|a| a.name.to_lowercase().contains(&needle)))
+    items
+        .iter()
+        .find(|i| id(i).to_lowercase() == needle)
+        .or_else(|| items.iter().find(|i| name(i).to_lowercase() == needle))
+        .or_else(|| items.iter().find(|i| name(i).to_lowercase().contains(&needle)))
+}
+
+fn find_app<'a>(apps: &'a [AppAudio], query: &str) -> Option<&'a AppAudio> {
+    best_match(apps, query, |a| &a.id, |a| &a.name)
+}
+
+// Backends without per-app devices never look one up.
+#[cfg_attr(windows, allow(dead_code))]
+fn find_device<'a>(devices: &'a [AudioDeviceInfo], query: &str) -> Result<&'a AudioDeviceInfo> {
+    best_match(devices, query, |d| &d.id, |d| &d.name).ok_or_else(|| AudioError::DeviceNotFound(query.into()))
 }
 
 #[cfg(test)]
@@ -199,7 +240,16 @@ mod tests {
     use super::*;
 
     fn app(id: &str, name: &str) -> AppAudio {
-        AppAudio { id: id.into(), name: name.into(), pid: None, volume: 1.0, muted: false, playing: false }
+        AppAudio {
+            id: id.into(),
+            name: name.into(),
+            pid: None,
+            volume: 1.0,
+            muted: false,
+            playing: false,
+            output: None,
+            input: None,
+        }
     }
 
     #[test]
@@ -221,6 +271,23 @@ mod tests {
         assert_eq!(id("nightly"), Some("firefox"));
         assert_eq!(id("chrome"), None);
         assert_eq!(id(""), None);
+    }
+
+    #[test]
+    fn devices_match_like_apps() {
+        let device = |id: &str, name: &str| AudioDeviceInfo {
+            id: id.into(),
+            name: name.into(),
+            is_default: false,
+            is_virtual: false,
+        };
+        let devices = [device("alsa_output.usb-0", "Scarlett Solo"), device("bluez_output.1", "WH-1000XM4 Headphones")];
+        let id = |q: &str| find_device(&devices, q).map(|d| d.id.as_str()).map_err(|e| e.to_string());
+
+        assert_eq!(id("BLUEZ_OUTPUT.1"), Ok("bluez_output.1"));
+        assert_eq!(id("scarlett solo"), Ok("alsa_output.usb-0"));
+        assert_eq!(id("headphones"), Ok("bluez_output.1"));
+        assert_eq!(id("HDMI"), Err("no audio device matches \"HDMI\"".into()));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Live button state: toggles, mute, voice changer, OBS status, slider values.
+//! Live button state: toggles, mute, app devices, voice changer, OBS status, slider values.
 //!
 //! The loop sleeps until something changes (an action ran, OBS sent an
 //! event, a deck connected). Audio has no change events, so while a visible
@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use omni_actions::obs::ObsState;
 use omni_core::{
-    Action, AppAudio, Config, Control, ControlKind, ControlState, HostToDeck, NavTarget, ObsOp, VoiceOp, VoiceSettings,
-    VolumeOp, VolumeState, VolumeTarget,
+    Action, AppAudio, AudioDirection, Config, Control, ControlKind, ControlState, HostToDeck, NavTarget, ObsOp,
+    VoiceOp, VoiceSettings, VolumeOp, VolumeState, VolumeTarget,
 };
 
 use crate::Host;
@@ -59,6 +59,15 @@ impl StateContext {
             Action::Toggle { .. } => (self.toggles.get(control_id).copied().unwrap_or(false), false),
             Action::Volume { target, op: VolumeOp::ToggleMute | VolumeOp::Mute | VolumeOp::Unmute } => {
                 self.volume(target).map_or((false, true), |v| (v.muted, false))
+            }
+            // Lit while the app is on that device. Known by id only: a device given by
+            // name, or the system default, runs but never lights up.
+            Action::AppDevice { app, direction, device } => {
+                let current = find_app(&self.audio.apps, app).and_then(|a| match direction {
+                    AudioDirection::Output => a.output.as_deref(),
+                    AudioDirection::Input => a.input.as_deref(),
+                });
+                (current.zip(device.as_deref()).is_some_and(|(on, wanted)| on.eq_ignore_ascii_case(wanted)), false)
             }
             Action::Voice { op } => match op {
                 VoiceOp::SetPreset { preset_id } => (self.voice.enabled && self.voice.preset_id == *preset_id, false),
@@ -124,10 +133,10 @@ fn needs_audio(control: &Control) -> bool {
         ControlKind::Slider { target, .. } => is_audio(target),
         ControlKind::Button { action: Some(action) } => {
             let mut needed = false;
-            action.walk(&mut |a| {
-                if let Action::Volume { target, .. } = a {
-                    needed |= is_audio(target);
-                }
+            action.walk(&mut |a| match a {
+                Action::Volume { target, .. } => needed |= is_audio(target),
+                Action::AppDevice { .. } => needed = true,
+                _ => {}
             });
             needed
         }
@@ -245,6 +254,8 @@ mod tests {
                     volume: 0.3,
                     muted: false,
                     playing: true,
+                    output: Some("headphones".into()),
+                    input: None,
                 }],
             },
             obs: ObsState {
@@ -275,6 +286,22 @@ mod tests {
         let missing_app =
             button(Action::Volume { target: VolumeTarget::App { app: "discord".into() }, op: VolumeOp::ToggleMute });
         assert!(cx.state_for(&missing_app, "p", "pg").disabled);
+    }
+
+    #[test]
+    fn app_device_button_lights_while_the_app_is_on_it() {
+        let to = |direction, device: Option<&str>| {
+            button(Action::AppDevice { app: "spotify".into(), direction, device: device.map(str::to_string) })
+        };
+        let cx = cx();
+        let lit = |control: &Control| cx.state_for(control, "p", "pg").active;
+        assert!(lit(&to(AudioDirection::Output, Some("Headphones"))));
+        assert!(!lit(&to(AudioDirection::Output, Some("speakers"))));
+        assert!(!lit(&to(AudioDirection::Output, None)));
+        assert!(!lit(&to(AudioDirection::Input, Some("headphones"))), "it is not recording");
+        // Never disabled: where it cannot work, pressing it says why.
+        assert!(!cx.state_for(&to(AudioDirection::Input, None), "p", "pg").disabled);
+        assert!(needs_audio(&to(AudioDirection::Output, None)));
     }
 
     #[test]

@@ -2,6 +2,11 @@
 //!
 //! Volumes are PulseAudio's normalized scale: 65536 (`PA_VOLUME_NORM`) is 100%, and
 //! pactl's percentages are already cubic-tapered. Values above 100% are reported as 1.0.
+//!
+//! An app's device is where its streams are connected: playback streams (sink inputs)
+//! are moved between sinks, recording streams (source outputs) between sources. The
+//! sound server remembers the choice per app. Moving a stream to the default device
+//! makes it follow the default again.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::collections::HashMap;
@@ -11,7 +16,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{AppAudio, AudioCapabilities, AudioError, Backend, Endpoint, Result, VolumeState};
+use crate::{
+    AppAudio, AudioCapabilities, AudioDeviceInfo, AudioDevices, AudioError, Backend, Endpoint, Result, VolumeState,
+    best_match, find_device,
+};
 
 const NORM: f32 = 65536.0;
 const MISSING: &str = "pactl not found: install pulseaudio-utils (works with PipeWire via pipewire-pulse)";
@@ -20,8 +28,8 @@ const PACTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct Platform {
     installed: bool,
-    /// Sink-input indices per app id from the latest `apps()` listing.
-    streams: Mutex<HashMap<String, Vec<u32>>>,
+    /// The latest `apps()` listing: where the streams and devices of a found app are.
+    latest: Mutex<Listing>,
 }
 
 fn pactl(args: &[&str]) -> Result<String> {
@@ -75,9 +83,62 @@ fn parse_mute(text: &str) -> Option<bool> {
     }
 }
 
+type Properties = HashMap<String, serde_json::Value>;
+
+fn property<'a>(properties: &'a Properties, key: &str) -> Option<&'a str> {
+    properties.get(key)?.as_str().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// What `pactl -f json list` prints, as far as we read it. One call covers streams and
+/// devices; listing each kind on its own would spawn pactl four times.
+#[derive(Debug, Default, Deserialize)]
+struct Raw {
+    #[serde(default)]
+    sinks: Vec<Device>,
+    #[serde(default)]
+    sources: Vec<Device>,
+    #[serde(default)]
+    sink_inputs: Vec<Stream>,
+    #[serde(default)]
+    source_outputs: Vec<Stream>,
+}
+
+/// A sink or a source.
 #[derive(Debug, Deserialize)]
-struct SinkInput {
+struct Device {
     index: u32,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    properties: Properties,
+}
+
+impl Device {
+    /// Every sink has a monitor source; they are never a microphone.
+    fn is_monitor(&self) -> bool {
+        property(&self.properties, "device.class") == Some("monitor") || self.name.ends_with(".monitor")
+    }
+
+    fn info(&self) -> AudioDeviceInfo {
+        AudioDeviceInfo {
+            id: self.name.clone(),
+            name: if self.description.trim().is_empty() { self.name.clone() } else { self.description.clone() },
+            // Filled in by `Platform::devices`: the listing does not say.
+            is_default: false,
+            // Hardware comes from a device API (alsa, bluez5); null sinks and remaps do not.
+            is_virtual: property(&self.properties, "device.api").is_none(),
+        }
+    }
+}
+
+/// A sink input (playback) or source output (recording).
+#[derive(Debug, Deserialize)]
+struct Stream {
+    index: u32,
+    /// Index of the sink (sink inputs) or source (source outputs) it is connected to.
+    #[serde(alias = "sink", alias = "source")]
+    device: Option<u32>,
     #[serde(default)]
     mute: bool,
     #[serde(default)]
@@ -85,7 +146,7 @@ struct SinkInput {
     #[serde(default)]
     volume: HashMap<String, ChannelVolume>,
     #[serde(default)]
-    properties: HashMap<String, serde_json::Value>,
+    properties: Properties,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,9 +154,15 @@ struct ChannelVolume {
     value: u32,
 }
 
-impl SinkInput {
+impl Stream {
     fn property(&self, key: &str) -> Option<&str> {
-        self.properties.get(key)?.as_str().map(str::trim).filter(|s| !s.is_empty())
+        property(&self.properties, key)
+    }
+
+    /// The app the stream belongs to; none for streams the sound server runs itself
+    /// (loopbacks, remapped sources).
+    fn app_id(&self) -> Option<&str> {
+        self.property("application.process.binary").or_else(|| self.property("application.name"))
     }
 
     fn volume(&self) -> f32 {
@@ -103,42 +170,115 @@ impl SinkInput {
     }
 }
 
-/// Groups `pactl -f json list sink-inputs` by binary into apps (sorted by name),
-/// with the sink-input indices of each.
-fn parse_apps(json: &str) -> Result<Vec<(AppAudio, Vec<u32>)>> {
-    let inputs: Vec<SinkInput> =
+/// One app and the indices of its streams.
+#[derive(Debug)]
+struct App {
+    audio: AppAudio,
+    playback: Vec<u32>,
+    recording: Vec<u32>,
+}
+
+/// Apps (sorted by name) and the devices they can be sent to.
+#[derive(Debug, Default)]
+struct Listing {
+    apps: Vec<App>,
+    devices: AudioDevices,
+}
+
+/// Groups the streams of `pactl -f json list` by binary into apps. An app is on the
+/// device of its first stream. Recording from a monitor (desktop capture) is not a
+/// microphone choice and is left alone.
+fn parse_listing(json: &str) -> Result<Listing> {
+    let raw: Raw =
         serde_json::from_str(json).map_err(|e| AudioError::Backend(format!("unexpected pactl output: {e}")))?;
-    let mut apps: Vec<(AppAudio, Vec<u32>)> = Vec::new();
-    for input in &inputs {
-        let id = input
-            .property("application.process.binary")
-            .or_else(|| input.property("application.name"))
-            .map_or_else(|| format!("sink-input-{}", input.index), str::to_string);
-        if let Some((app, indices)) = apps.iter_mut().find(|(a, _)| a.id == id) {
-            indices.push(input.index);
-            app.volume = app.volume.max(input.volume());
-            app.muted &= input.mute;
-            app.playing |= !input.corked;
+    let name_of = |devices: &[Device], index: Option<u32>| {
+        devices.iter().find(|d| Some(d.index) == index).map(|d| d.name.clone())
+    };
+    let mut apps: Vec<App> = Vec::new();
+    for stream in &raw.sink_inputs {
+        let id = stream.app_id().map_or_else(|| format!("sink-input-{}", stream.index), str::to_string);
+        if let Some(app) = apps.iter_mut().find(|a| a.audio.id == id) {
+            app.playback.push(stream.index);
+            app.audio.volume = app.audio.volume.max(stream.volume());
+            app.audio.muted &= stream.mute;
+            app.audio.playing |= !stream.corked;
             continue;
         }
-        let app = AppAudio {
-            name: input.property("application.name").unwrap_or(&id).to_string(),
-            pid: input.property("application.process.id").and_then(|p| p.parse().ok()),
+        let audio = AppAudio {
+            name: stream.property("application.name").unwrap_or(&id).to_string(),
+            pid: stream.property("application.process.id").and_then(|p| p.parse().ok()),
             id,
-            volume: input.volume(),
-            muted: input.mute,
-            playing: !input.corked,
+            volume: stream.volume(),
+            muted: stream.mute,
+            playing: !stream.corked,
+            output: name_of(&raw.sinks, stream.device),
+            input: None,
         };
-        apps.push((app, vec![input.index]));
+        apps.push(App { audio, playback: vec![stream.index], recording: Vec::new() });
     }
-    apps.sort_by_cached_key(|(a, _)| a.name.to_lowercase());
-    Ok(apps)
+    let microphones: Vec<&Device> = raw.sources.iter().filter(|d| !d.is_monitor()).collect();
+    for stream in &raw.source_outputs {
+        let Some(id) = stream.app_id() else { continue };
+        let Some(source) = microphones.iter().find(|d| Some(d.index) == stream.device) else { continue };
+        let app = match apps.iter_mut().position(|a| a.audio.id == id) {
+            Some(known) => &mut apps[known],
+            None => {
+                // Only records: listed for its microphone, with no volume to change.
+                let audio = AppAudio {
+                    name: stream.property("application.name").unwrap_or(id).to_string(),
+                    pid: stream.property("application.process.id").and_then(|p| p.parse().ok()),
+                    id: id.to_string(),
+                    volume: 1.0,
+                    muted: false,
+                    playing: false,
+                    output: None,
+                    input: None,
+                };
+                apps.push(App { audio, playback: Vec::new(), recording: Vec::new() });
+                apps.last_mut().expect("just pushed")
+            }
+        };
+        app.recording.push(stream.index);
+        app.audio.input.get_or_insert_with(|| source.name.clone());
+    }
+    apps.sort_by_cached_key(|a| a.audio.name.to_lowercase());
+    let devices = AudioDevices {
+        outputs: raw.sinks.iter().map(Device::info).collect(),
+        inputs: microphones.into_iter().map(Device::info).collect(),
+    };
+    Ok(Listing { apps, devices })
+}
+
+/// `pactl -f json info`, as far as we read it.
+#[derive(Debug, Default, Deserialize)]
+struct ServerInfo {
+    #[serde(default)]
+    default_sink_name: String,
+    #[serde(default)]
+    default_source_name: String,
 }
 
 impl Platform {
-    fn streams_of(&self, app: &AppAudio) -> Result<Vec<u32>> {
-        let streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
-        streams.get(&app.id).cloned().ok_or_else(|| AudioError::AppNotFound(app.id.clone()))
+    fn list(&self) -> Result<Listing> {
+        let json = pactl(&["-f", "json", "list"]).map_err(|e| match e {
+            // JSON output arrived with PulseAudio 15.99 / 16.
+            AudioError::Backend(m) if m.contains("unrecognized option") || m.contains("invalid option") => {
+                AudioError::Unsupported("per-app volume needs pactl 16 or newer (pulseaudio-utils)".into())
+            }
+            e => e,
+        })?;
+        parse_listing(&json)
+    }
+
+    /// Indices of the app's playback streams, from the listing that found it.
+    fn playback_of(&self, app: &AppAudio) -> Result<Vec<u32>> {
+        let latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        let found = latest.apps.iter().find(|a| a.audio.id == app.id);
+        let streams = found.ok_or_else(|| AudioError::AppNotFound(app.id.clone()))?.playback.clone();
+        if streams.is_empty() {
+            return Err(AudioError::Backend(format!("{} is not playing anything", app.name)));
+        }
+        Ok(streams)
     }
 }
 
@@ -148,11 +288,18 @@ fn pactl_installed() -> bool {
 
 impl Backend for Platform {
     fn new() -> Self {
-        Platform { installed: pactl_installed(), streams: Mutex::default() }
+        Platform { installed: pactl_installed(), latest: Mutex::default() }
     }
 
     fn capabilities(&self) -> AudioCapabilities {
-        AudioCapabilities { per_app_volume: self.installed, note: (!self.installed).then(|| MISSING.into()) }
+        let note = (!self.installed).then(|| MISSING.to_string());
+        AudioCapabilities {
+            per_app_volume: self.installed,
+            note: note.clone(),
+            per_app_output: self.installed,
+            per_app_input: self.installed,
+            device_note: note,
+        }
     }
 
     fn endpoint(&self, endpoint: Endpoint) -> Result<VolumeState> {
@@ -177,30 +324,58 @@ impl Backend for Platform {
     }
 
     fn apps(&self) -> Result<Vec<AppAudio>> {
-        let json = pactl(&["-f", "json", "list", "sink-inputs"]).map_err(|e| match e {
-            // JSON output arrived with PulseAudio 15.99 / 16.
-            AudioError::Backend(m) if m.contains("unrecognized option") || m.contains("invalid option") => {
-                AudioError::Unsupported("per-app volume needs pactl 16 or newer (pulseaudio-utils)".into())
-            }
-            e => e,
-        })?;
-        let apps = parse_apps(&json)?;
-        let mut streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
-        *streams = apps.iter().map(|(a, indices)| (a.id.clone(), indices.clone())).collect();
-        Ok(apps.into_iter().map(|(app, _)| app).collect())
+        let listing = self.list()?;
+        let apps = listing.apps.iter().map(|a| a.audio.clone()).collect();
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = listing;
+        Ok(apps)
     }
 
     fn set_app_volume(&self, app: &AppAudio, volume: f32) -> Result<()> {
         let volume = raw(volume);
-        for index in self.streams_of(app)? {
+        for index in self.playback_of(app)? {
             pactl(&["set-sink-input-volume", &index.to_string(), &volume])?;
         }
         Ok(())
     }
 
     fn set_app_muted(&self, app: &AppAudio, muted: bool) -> Result<()> {
-        for index in self.streams_of(app)? {
+        for index in self.playback_of(app)? {
             pactl(&["set-sink-input-mute", &index.to_string(), if muted { "1" } else { "0" }])?;
+        }
+        Ok(())
+    }
+
+    fn devices(&self) -> Result<AudioDevices> {
+        let mut devices = self.list()?.devices;
+        let info = pactl(&["-f", "json", "info"])?;
+        let info: ServerInfo = serde_json::from_str(&info).unwrap_or_default();
+        for device in &mut devices.outputs {
+            device.is_default = device.id == info.default_sink_name;
+        }
+        for device in &mut devices.inputs {
+            device.is_default = device.id == info.default_source_name;
+        }
+        Ok(devices)
+    }
+
+    fn set_app_device(&self, app: &str, direction: Endpoint, device: Option<&str>) -> Result<()> {
+        let listing = self.list()?;
+        let app = best_match(&listing.apps, app, |a| &a.audio.id, |a| &a.audio.name)
+            .ok_or_else(|| AudioError::AppNotFound(app.into()))?;
+        let (streams, devices, verb, idle) = match direction {
+            Endpoint::Output => (&app.playback, &listing.devices.outputs, "move-sink-input", "playing"),
+            Endpoint::Input => (&app.recording, &listing.devices.inputs, "move-source-output", "recording"),
+        };
+        if streams.is_empty() {
+            // Nothing to move, and nowhere to keep the choice for later.
+            return Err(AudioError::Backend(format!("{} is not {idle} anything", app.audio.name)));
+        }
+        let device = match device {
+            Some(query) => find_device(devices, query)?.id.as_str(),
+            None => target(direction).1,
+        };
+        for index in streams {
+            pactl(&[verb, &index.to_string(), device])?;
         }
         Ok(())
     }
@@ -214,24 +389,172 @@ mod tests {
     /// trimmed to three streams: two Firefox tabs (one paused) and Spotify.
     const SINK_INPUTS: &str = r#"[{"index":75,"driver":"PipeWire","owner_module":"","client":"74","sink":56,"sample_specification":"float32le 2ch 48000Hz","channel_map":"front-left,front-right","format":"pcm, format.sample_format = \"\\\"float32le\\\"\"  format.rate = \"48000\"  format.channels = \"2\"  format.channel_map = \"\\\"front-left,front-right\\\"\"","corked":false,"mute":false,"volume":{"front-left":{"value":32768,"value_percent":"50%","db":"-18.06 dB"},"front-right":{"value":32768,"value_percent":"50%","db":"-18.06 dB"}},"balance":0.000000,"buffer_latency_usec":0,"sink_latency_usec":0,"resample_method":"PipeWire","properties":{"client.api":"pipewire-pulse","pulse.server.type":"unix","application.name":"Firefox","application.process.id":"4321","application.process.user":"doc","application.process.host":"fedora","application.process.binary":"firefox","application.language":"en_US.UTF-8","window.x11.display":":0","application.process.machine_id":"0f2c5b1e9a8d4c7b","application.icon_name":"firefox","media.name":"AudioStream","node.rate":"1/48000","node.latency":"3600/48000","stream.is-live":"true","node.name":"Firefox","node.want-driver":"true","node.autoconnect":"true","media.class":"Stream/Output/Audio","adapt.follower.spa-node":"","object.register":"false","factory.id":"7","clock.quantum-limit":"8192","factory.mode":"split","audio.adapt.follower":"","library.name":"audioconvert/libspa-audioconvert","client.id":"74","object.id":"77","object.serial":"1203","pulse.attr.maxlength":"4194304","pulse.attr.tlength":"14400","pulse.attr.prebuf":"14404","pulse.attr.minreq":"3600","media.role":"Music","module-stream-restore.id":"sink-input-by-application-name:Firefox"}},{"index":81,"driver":"PipeWire","owner_module":"","client":"74","sink":56,"sample_specification":"float32le 2ch 44100Hz","channel_map":"front-left,front-right","format":"pcm, format.sample_format = \"\\\"float32le\\\"\"  format.rate = \"44100\"  format.channels = \"2\"  format.channel_map = \"\\\"front-left,front-right\\\"\"","corked":true,"mute":true,"volume":{"front-left":{"value":65536,"value_percent":"100%","db":"0.00 dB"},"front-right":{"value":65536,"value_percent":"100%","db":"0.00 dB"}},"balance":0.000000,"buffer_latency_usec":0,"sink_latency_usec":0,"resample_method":"PipeWire","properties":{"client.api":"pipewire-pulse","application.name":"Firefox","application.process.id":"4321","application.process.binary":"firefox","media.name":"AudioStream","media.class":"Stream/Output/Audio","object.id":"91","object.serial":"1270"}},{"index":88,"driver":"PipeWire","owner_module":"","client":"85","sink":56,"sample_specification":"s16le 2ch 44100Hz","channel_map":"front-left,front-right","format":"pcm, format.sample_format = \"\\\"s16le\\\"\"  format.rate = \"44100\"  format.channels = \"2\"  format.channel_map = \"\\\"front-left,front-right\\\"\"","corked":false,"mute":false,"volume":{"front-left":{"value":98304,"value_percent":"150%","db":"10.57 dB"},"front-right":{"value":98304,"value_percent":"150%","db":"10.57 dB"}},"balance":0.000000,"buffer_latency_usec":0,"sink_latency_usec":0,"resample_method":"PipeWire","properties":{"client.api":"pipewire-pulse","application.name":"Spotify","application.process.id":"5555","application.process.binary":"spotify","application.icon_name":"spotify-client","media.name":"Spotify","media.role":"music","media.class":"Stream/Output/Audio","object.id":"95","object.serial":"1301"}}]"#;
 
+    /// The rest of a `pactl -f json list` from the same kind of system, trimmed to what
+    /// is read: two sinks, their monitors and two microphones, and four recording
+    /// streams (Discord on the webcam, Firefox on the default microphone, OBS capturing
+    /// the desktop from a monitor, and the loopback behind a remapped source).
+    const DEVICES_AND_RECORDERS: &str = r#""sinks":[{"index":56,"state":"RUNNING","name":"alsa_output.pci-0000_00_1f.3.analog-stereo","description":"Built-in Audio Analog Stereo","monitor_source":"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor","flags":["HARDWARE","HW_MUTE_CTRL","HW_VOLUME_CTRL","DECIBEL_VOLUME","LATENCY"],"properties":{"device.api":"alsa","device.class":"sound","node.name":"alsa_output.pci-0000_00_1f.3.analog-stereo","media.class":"Audio/Sink"}},{"index":59,"state":"SUSPENDED","name":"headphones","description":"","monitor_source":"headphones.monitor","flags":["HARDWARE","DECIBEL_VOLUME","LATENCY"],"properties":{"node.name":"headphones","media.class":"Audio/Sink","factory.name":"support.null-audio-sink"}}],"sources":[{"index":56,"state":"SUSPENDED","name":"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor","description":"Monitor of Built-in Audio Analog Stereo","monitor_source":"alsa_output.pci-0000_00_1f.3.analog-stereo","properties":{"device.api":"alsa","device.class":"monitor"}},{"index":59,"state":"SUSPENDED","name":"headphones.monitor","description":"Monitor of headphones","monitor_source":"headphones","properties":{"device.class":"monitor"}},{"index":57,"state":"RUNNING","name":"alsa_input.pci-0000_00_1f.3.analog-stereo","description":"Built-in Audio Analog Stereo","monitor_source":"","properties":{"device.api":"alsa","device.class":"sound"}},{"index":73,"state":"RUNNING","name":"alsa_input.usb-046d_C922-02.analog-stereo","description":"C922 Pro Stream Webcam Analog Stereo","monitor_source":"","properties":{"device.api":"alsa","device.class":"sound"}}],"source_outputs":[{"index":100,"driver":"PipeWire","owner_module":null,"client":"98","source":73,"corked":false,"mute":false,"properties":{"client.api":"pipewire-pulse","application.name":"WEBRTC VoiceEngine","application.process.id":"7001","application.process.binary":"Discord","media.name":"recStream","media.class":"Stream/Input/Audio"}},{"index":104,"driver":"PipeWire","owner_module":null,"client":"74","source":57,"corked":false,"mute":false,"properties":{"application.name":"Firefox","application.process.id":"4321","application.process.binary":"firefox","media.name":"AudioCallbackDriver","media.class":"Stream/Input/Audio"}},{"index":110,"driver":"PipeWire","owner_module":null,"client":"120","source":56,"corked":false,"mute":false,"properties":{"application.name":"OBS","application.process.id":"8100","application.process.binary":"obs","media.name":"Desktop Audio","media.class":"Stream/Input/Audio"}},{"index":74,"driver":"PipeWire","owner_module":"536870919","client":null,"source":57,"corked":false,"mute":false,"properties":{"node.name":"input.mic_a","media.name":"MicA input","node.virtual":"true","media.class":"Stream/Input/Audio"}}]"#;
+
+    fn listing() -> Listing {
+        parse_listing(&format!(r#"{{"modules":[],"sink_inputs":{SINK_INPUTS},{DEVICES_AND_RECORDERS},"clients":[]}}"#))
+            .unwrap()
+    }
+
     #[test]
     fn sink_inputs_group_by_binary() {
-        let apps = parse_apps(SINK_INPUTS).unwrap();
-        assert_eq!(apps.len(), 2);
+        let apps = listing().apps;
+        let names: Vec<&str> = apps.iter().map(|a| a.audio.name.as_str()).collect();
+        assert_eq!(names, ["Firefox", "Spotify", "WEBRTC VoiceEngine"]);
 
-        let (firefox, streams) = &apps[0];
-        assert_eq!((firefox.id.as_str(), firefox.name.as_str(), firefox.pid), ("firefox", "Firefox", Some(4321)));
-        assert_eq!(streams, &[75, 81]);
-        assert_eq!(firefox.volume, 1.0); // loudest stream
-        assert!(!firefox.muted); // only one of two streams is muted
-        assert!(firefox.playing); // one stream is not corked
+        let firefox = &apps[0];
+        let audio = &firefox.audio;
+        assert_eq!((audio.id.as_str(), audio.name.as_str(), audio.pid), ("firefox", "Firefox", Some(4321)));
+        assert_eq!(firefox.playback, [75, 81]);
+        assert_eq!(audio.volume, 1.0); // loudest stream
+        assert!(!audio.muted); // only one of two streams is muted
+        assert!(audio.playing); // one stream is not corked
 
-        let (spotify, streams) = &apps[1];
-        assert_eq!((spotify.id.as_str(), spotify.volume, spotify.playing), ("spotify", 1.0, true));
-        assert_eq!(streams, &[88]);
+        let spotify = &apps[1];
+        assert_eq!((spotify.audio.id.as_str(), spotify.audio.volume, spotify.audio.playing), ("spotify", 1.0, true));
+        assert_eq!(spotify.playback, [88]);
 
-        assert!(parse_apps("[]").unwrap().is_empty());
-        assert!(parse_apps("Connection failure: Connection refused").is_err());
+        assert!(parse_listing("{}").unwrap().apps.is_empty());
+        assert!(parse_listing("Connection failure: Connection refused").is_err());
+    }
+
+    #[test]
+    fn apps_know_their_devices() {
+        let Listing { apps, devices } = listing();
+        let device = |d: &AudioDeviceInfo| (d.id.clone(), d.name.clone(), d.is_virtual);
+        assert_eq!(
+            devices.outputs.iter().map(device).collect::<Vec<_>>(),
+            [
+                ("alsa_output.pci-0000_00_1f.3.analog-stereo".into(), "Built-in Audio Analog Stereo".into(), false),
+                ("headphones".into(), "headphones".into(), true), // null sink without a description
+            ]
+        );
+        // Monitors are not microphones.
+        assert_eq!(
+            devices.inputs.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            ["alsa_input.pci-0000_00_1f.3.analog-stereo", "alsa_input.usb-046d_C922-02.analog-stereo"]
+        );
+
+        let firefox = &apps[0];
+        assert_eq!(firefox.audio.output.as_deref(), Some("alsa_output.pci-0000_00_1f.3.analog-stereo"));
+        assert_eq!(firefox.audio.input.as_deref(), Some("alsa_input.pci-0000_00_1f.3.analog-stereo"));
+        assert_eq!(firefox.recording, [104]);
+
+        let spotify = &apps[1];
+        assert_eq!((spotify.audio.input.as_deref(), spotify.recording.len()), (None, 0));
+
+        // Only records: no playback to move or turn down. OBS (desktop capture from a
+        // monitor) and the sound server's own loopback are not listed at all.
+        let discord = &apps[2];
+        assert_eq!((discord.audio.id.as_str(), discord.audio.pid), ("Discord", Some(7001)));
+        assert_eq!((discord.audio.output.as_deref(), discord.audio.playing), (None, false));
+        assert_eq!(discord.audio.input.as_deref(), Some("alsa_input.usb-046d_C922-02.analog-stereo"));
+        assert_eq!((discord.playback.len(), discord.recording.as_slice()), (0, [100].as_slice()));
+    }
+
+    /// Two null sinks and two microphones (remapped monitors) loaded into the running
+    /// sound server, the first of each made the default, and a `pacat` playing and
+    /// recording on those. All of it is undone on drop.
+    struct Lab {
+        modules: Vec<String>,
+        streams: Vec<std::process::Child>,
+        /// The defaults to put back: (`set-default-sink` / `set-default-source`, name).
+        defaults: Vec<(&'static str, String)>,
+    }
+
+    impl Lab {
+        fn start() -> Self {
+            let mut lab = Lab { modules: Vec::new(), streams: Vec::new(), defaults: Vec::new() };
+            for name in ["omni_test_a", "omni_test_b"] {
+                let sink = format!("sink_name={name}");
+                let description = format!("sink_properties=device.description={name}_speaker");
+                lab.load(&["module-null-sink", &sink, &description]);
+            }
+            for name in ["omni_test_mic_a", "omni_test_mic_b"] {
+                let source = format!("source_name={name}");
+                let description = format!("source_properties=device.description={name}_device");
+                lab.load(&["module-remap-source", "master=omni_test_a.monitor", &source, &description]);
+            }
+            for (get, set, ours) in [
+                ("get-default-sink", "set-default-sink", "omni_test_a"),
+                ("get-default-source", "set-default-source", "omni_test_mic_a"),
+            ] {
+                lab.defaults.push((set, pactl(&[get]).unwrap_or_default().trim().to_string()));
+                pactl(&[set, ours]).unwrap();
+            }
+            for args in [["--playback", "--device=omni_test_a"], ["--record", "--device=omni_test_mic_a"]] {
+                let (zero, null) =
+                    (std::fs::File::open("/dev/zero").unwrap(), std::fs::File::create("/dev/null").unwrap());
+                lab.streams
+                    .push(Command::new("pacat").args(args).arg("--raw").stdin(zero).stdout(null).spawn().unwrap());
+            }
+            lab
+        }
+
+        fn load(&mut self, args: &[&str]) {
+            let module = pactl(&[&["load-module"], args].concat()).unwrap();
+            self.modules.push(module.trim().to_string());
+        }
+    }
+
+    impl Drop for Lab {
+        fn drop(&mut self) {
+            for stream in &mut self.streams {
+                let _ = stream.kill();
+                let _ = stream.wait();
+            }
+            for (set, previous) in &self.defaults {
+                let _ = pactl(&[set, previous]);
+            }
+            for module in self.modules.iter().rev() {
+                let _ = pactl(&["unload-module", module]);
+            }
+        }
+    }
+
+    /// Moves an app's playback and recording between devices of a live PulseAudio or
+    /// PipeWire server, as that server then reports them. Loads its own devices:
+    /// `cargo test -p omni-audio -- --ignored live_server`.
+    #[test]
+    #[ignore]
+    fn live_server_moves_app_streams() {
+        let _lab = Lab::start();
+        let platform = Platform::new();
+        let pacat = || platform.apps().unwrap().into_iter().find(|a| a.id == "pacat");
+        let on = |output: &str, input: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let devices = pacat().map(|a| (a.output, a.input));
+                if devices == Some((Some(output.into()), Some(input.into()))) {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "pacat is on {devices:?}, not on {output} / {input}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        on("omni_test_a", "omni_test_mic_a");
+
+        platform.set_app_device("pacat", Endpoint::Output, Some("omni_test_b")).unwrap();
+        on("omni_test_b", "omni_test_mic_a");
+        // By display name, like a hand-written action.
+        platform.set_app_device("pacat", Endpoint::Input, Some("omni_test_mic_b_device")).unwrap();
+        on("omni_test_b", "omni_test_mic_b");
+
+        let missing = platform.set_app_device("pacat", Endpoint::Output, Some("no such speaker"));
+        assert!(matches!(missing, Err(AudioError::DeviceNotFound(_))), "{missing:?}");
+        on("omni_test_b", "omni_test_mic_b");
+
+        let devices = platform.devices().unwrap();
+        let default = |devices: &[AudioDeviceInfo]| devices.iter().find(|d| d.is_default).map(|d| d.id.clone());
+        assert_eq!(default(&devices.outputs).as_deref(), Some("omni_test_a"));
+        assert_eq!(default(&devices.inputs).as_deref(), Some("omni_test_mic_a"));
+        platform.set_app_device("pacat", Endpoint::Output, None).unwrap();
+        platform.set_app_device("pacat", Endpoint::Input, None).unwrap();
+        on("omni_test_a", "omni_test_mic_a");
     }
 
     #[test]

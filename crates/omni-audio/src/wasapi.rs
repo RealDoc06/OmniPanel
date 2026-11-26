@@ -1,6 +1,10 @@
 //! Windows backend: WASAPI. `IAudioEndpointVolume` on the default render / capture
 //! endpoints; per-app volume through audio sessions (`ISimpleAudioVolume`) on every
 //! active render endpoint, grouped by executable like the Windows volume mixer.
+//!
+//! Apps cannot be sent to a device of their own yet: Windows only offers that through
+//! an undocumented interface (`IAudioPolicyConfig`), which is not used until it has
+//! been proven on real hardware. `capabilities()` says so.
 
 use std::collections::HashMap;
 use std::ptr;
@@ -171,6 +175,8 @@ impl Platform {
                         volume,
                         muted,
                         playing: session.playing,
+                        output: None,
+                        input: None,
                     },
                     vec![session.volume],
                 )),
@@ -195,7 +201,13 @@ impl Backend for Platform {
     }
 
     fn capabilities(&self) -> AudioCapabilities {
-        AudioCapabilities { per_app_volume: true, note: None }
+        AudioCapabilities {
+            per_app_volume: true,
+            note: None,
+            per_app_output: false,
+            per_app_input: false,
+            device_note: Some("Choosing a device per app is not available on Windows yet.".into()),
+        }
     }
 
     fn endpoint(&self, endpoint: Endpoint) -> Result<VolumeState> {

@@ -32,7 +32,7 @@ export function VolumeTargetPicker({ value, onChange }: { value: VolumeTarget; o
 }
 
 /** App name. Suggestions are the apps the mixer knows; the host matches names too. */
-function AppField({ value, onChange }: { value: string; onChange: (app: string) => void }) {
+export function AppField({ value, onChange }: { value: string; onChange: (app: string) => void }) {
   const mixer = useResource(() => api.getMixer());
   const options = (mixer.data?.apps ?? []).map((a) => ({ value: a.name, label: a.name }));
   return (

@@ -117,6 +117,40 @@ export const RECIPES = [
     button: "App",
     make: () => ({ type: "slider", target: { type: "app", app: "" }, vertical: true }),
   },
+  {
+    id: "app-output",
+    group: "Sound",
+    label: "Play an app on another speaker",
+    keywords: "output device headphones speakers send move audio route",
+    icon: "speaker",
+    button: "Speaker",
+    make: () => ({ type: "button", action: { type: "appDevice", app: "", direction: "output", device: null } }),
+  },
+  {
+    id: "app-output-switch",
+    group: "Sound",
+    label: "Switch an app between two speakers",
+    keywords: "output device headphones speakers toggle swap audio",
+    icon: "arrow-right-left",
+    button: "Switch speaker",
+    make: () => ({
+      type: "button",
+      action: {
+        type: "toggle",
+        on: { type: "appDevice", app: "", direction: "output", device: null },
+        off: { type: "appDevice", app: "", direction: "output", device: null },
+      },
+    }),
+  },
+  {
+    id: "app-input",
+    group: "Sound",
+    label: "Change an app's microphone",
+    keywords: "input device mic recording discord zoom",
+    icon: "mic",
+    button: "Microphone",
+    make: () => ({ type: "button", action: { type: "appDevice", app: "", direction: "input", device: null } }),
+  },
   // Music and video
   {
     id: "play-pause",
@@ -611,6 +645,8 @@ function labelFor(kind: Control["kind"], names: LabelNames): string | null {
       return action.op.type === "set" ? `Volume ${Math.round(action.op.value * 100)}%` :
         action.op.type === "step" ? (action.op.delta < 0 ? "Volume down" : "Volume up") :
           `${action.op.type === "unmute" ? "Unmute" : "Mute"} ${soundName(action.target)}`;
+    case "appDevice":
+      return action.device === null ? (action.direction === "output" ? "Speaker" : "Microphone") : names.device?.(action.device) ?? action.device;
     case "voice":
       return action.op.type === "setPreset" ? names.preset?.(action.op.presetId) ?? action.op.presetId : null;
     case "obs":

@@ -4,6 +4,8 @@
 
 - Auto-update: OmniPanel checks for a new version at launch and once a day, and installs it from Settings → Updates.
   deb and rpm installs get a link to the new package.
+- Choose the speaker and the microphone of each app in Sound, or with a button. Linux does both, macOS the speaker;
+  Windows not yet.
 
 ## 0.1.0-alpha.1
 

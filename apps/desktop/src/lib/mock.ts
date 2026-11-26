@@ -283,10 +283,12 @@ const mixer: { master: VolumeState; mic: VolumeState; apps: AppAudio[] } = {
   master: { volume: 0.62, muted: false },
   mic: { volume: 0.8, muted: false },
   apps: [
-    { id: "com.spotify.client", name: "Spotify", pid: 812, volume: 0.7, muted: false, playing: true },
-    { id: "com.hnc.Discord", name: "Discord", pid: 944, volume: 0.55, muted: false, playing: false },
-    { id: "com.google.Chrome", name: "Google Chrome", pid: 1201, volume: 1, muted: false, playing: true },
-    { id: "us.zoom.xos", name: "zoom.us", pid: 1550, volume: 0.9, muted: true, playing: false },
+    { id: "com.spotify.client", name: "Spotify", pid: 812, volume: 0.7, muted: false, playing: true, output: "airpods", input: null },
+    { id: "com.hnc.Discord", name: "Discord", pid: 944, volume: 0.55, muted: false, playing: false, output: "builtin-speakers", input: "mv7" },
+    { id: "com.google.Chrome", name: "Google Chrome", pid: 1201, volume: 1, muted: false, playing: true, output: "builtin-speakers", input: null },
+    { id: "us.zoom.xos", name: "zoom.us", pid: 1550, volume: 0.9, muted: true, playing: false, output: "builtin-speakers", input: "builtin-mic" },
+    // Only records: it has a microphone but no volume.
+    { id: "com.obsproject.obs-studio", name: "OBS", pid: 1702, volume: 1, muted: false, playing: false, output: null, input: "builtin-mic" },
   ],
 };
 
@@ -355,6 +357,13 @@ function runtime(): RuntimeState {
     audio: {
       perAppVolume: true,
       note: os === "macos" ? "Per-app volume needs System Settings > Privacy & Security > Screen & System Audio Recording." : null,
+      // As the real backends: Linux moves both, macOS only what an app plays, Windows neither yet.
+      perAppOutput: os !== "windows",
+      perAppInput: os === "linux",
+      deviceNote:
+        os === "macos" ? "macOS has no way to change another app's microphone. Pick it in the app's own settings."
+        : os === "windows" ? "Choosing a device per app is not available on Windows yet."
+        : null,
     },
   };
 }
@@ -639,6 +648,19 @@ const api: Api = {
         return { message: action.showOutput ? "Already up to date." : null };
       case "http":
         return { message: `${action.method} ${action.url}: 200 OK` };
+      case "appDevice": {
+        const { audio } = runtime();
+        const output = action.direction === "output";
+        if (!(output ? audio.perAppOutput : audio.perAppInput)) throw `not supported on this platform: ${audio.deviceNote}`;
+        const app = mixer.apps.find((a) => a.id === action.app || a.name.toLowerCase() === action.app.toLowerCase());
+        if (!app) throw `no audio app matches "${action.app}"`;
+        const devices = output ? audioDevices.outputs : audioDevices.inputs;
+        const device = devices.find((d) => (action.device === null ? d.isDefault : d.id === action.device || d.name === action.device));
+        if (!device) throw `no audio device matches "${action.device}"`;
+        if (app[action.direction] === null) throw `${app.name} is not ${output ? "playing" : "recording"} anything`;
+        app[action.direction] = device.id;
+        break;
+      }
       default:
         break;
     }
@@ -657,13 +679,15 @@ const api: Api = {
     return reply(id);
   },
 
-  getMixer: (): Promise<MixerState> =>
-    reply({
-      master: mixer.master,
-      mic: mixer.mic,
-      apps: mixer.apps.map((a) => ({ ...a, playing: a.playing && !a.muted })),
-      capabilities: runtime().audio,
-    }),
+  getMixer: (): Promise<MixerState> => {
+    const { audio } = runtime();
+    // Like the host: only what this OS can change is known, and record-only apps come with microphones.
+    const apps = mixer.apps
+      .filter((a) => a.output !== null || audio.perAppInput)
+      .map((a) => ({ ...a, playing: a.playing && !a.muted, output: audio.perAppOutput ? a.output : null, input: audio.perAppInput ? a.input : null }));
+    const devices = { outputs: audio.perAppOutput ? audioDevices.outputs : [], inputs: audio.perAppInput ? audioDevices.inputs : [] };
+    return reply({ master: mixer.master, mic: mixer.mic, apps, capabilities: audio, devices });
+  },
   setVolume: async (target, value) => {
     const state = volumeOf(target);
     if (!state) throw "Unknown audio target";

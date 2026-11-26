@@ -13,6 +13,7 @@ export type { AppState } from "./generated/AppState";
 export type { AudioCapabilities } from "./generated/AudioCapabilities";
 export type { AudioDeviceInfo } from "./generated/AudioDeviceInfo";
 export type { AudioDevices } from "./generated/AudioDevices";
+export type { AudioDirection } from "./generated/AudioDirection";
 export type { ChatMessage } from "./generated/ChatMessage";
 export type { ChatRole } from "./generated/ChatRole";
 export type { ClientInfo } from "./generated/ClientInfo";

@@ -1,9 +1,10 @@
 //! `volume` actions: master / mic / per-app through `omni-audio`, OBS inputs through OBS.
+//! `appDevice` actions: the device one app plays on or records from, through `omni-audio`.
 
 use std::sync::Arc;
 
 use omni_audio::AudioController;
-use omni_core::{VolumeOp, VolumeState, VolumeTarget};
+use omni_core::{AudioDirection, VolumeOp, VolumeState, VolumeTarget};
 use serde_json::json;
 
 use crate::obs::ObsClient;
@@ -22,6 +23,18 @@ pub(crate) async fn run(
             blocking(move || apply(&audio, &target, &op)).await
         }
     }
+}
+
+/// Sends `app` to an output device or gives it a microphone; `None` is the system
+/// default. Fails with the platform's reason where that cannot be done.
+pub(crate) async fn set_app_device(
+    audio: &Arc<AudioController>,
+    app: &str,
+    direction: AudioDirection,
+    device: Option<&str>,
+) -> Result<()> {
+    let (audio, app, device) = (audio.clone(), app.to_string(), device.map(str::to_string));
+    blocking(move || Ok(audio.set_app_device(&app, direction, device.as_deref())?)).await
 }
 
 /// Raise / lower the system volume by `delta` (clamped), used by the media volume fallbacks.

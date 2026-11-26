@@ -154,6 +154,12 @@ pub struct AudioCapabilities {
     pub per_app_volume: bool,
     /// Why per-app volume is limited/unavailable, or a permission hint.
     pub note: Option<String>,
+    /// Apps can be sent to an output device of their own.
+    pub per_app_output: bool,
+    /// Apps can be given a microphone of their own.
+    pub per_app_input: bool,
+    /// Why choosing a device per app is limited/unavailable.
+    pub device_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
@@ -179,10 +185,16 @@ pub struct AppAudio {
     pub muted: bool,
     /// Currently producing sound.
     pub playing: bool,
+    /// Output device the app plays on (`AudioDeviceInfo::id`). `None` for an app that
+    /// only records, and where `AudioCapabilities::per_app_output` is false.
+    pub output: Option<String>,
+    /// Microphone the app records from, while it records. Always `None` where
+    /// `AudioCapabilities::per_app_input` is false.
+    pub input: Option<String>,
 }
 
-/// A per-app level the user set, persisted so it survives restarts on
-/// platforms that don't remember it themselves (macOS).
+/// A per-app level and output device the user set, persisted so they survive
+/// restarts on platforms that don't remember them themselves (macOS).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -191,6 +203,9 @@ pub struct AppLevel {
     pub app: String,
     pub volume: f32,
     pub muted: bool,
+    /// Output device the app is sent to; `None` follows the system default.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -201,6 +216,8 @@ pub struct MixerState {
     pub mic: Option<VolumeState>,
     pub apps: Vec<AppAudio>,
     pub capabilities: AudioCapabilities,
+    /// Devices an app can be sent to (`Action::AppDevice`); empty where unsupported.
+    pub devices: AudioDevices,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

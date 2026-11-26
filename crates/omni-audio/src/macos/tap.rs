@@ -1,11 +1,13 @@
-//! Software gain on other processes' audio: a Core Audio process tap (macOS 14.2+)
-//! muting its source, played back by an IOProc that applies our gain, through a
-//! private aggregate device made of the default output and the tap. Used for one
-//! app's volume and for the software master volume.
+//! Software gain and output routing for other processes' audio: a Core Audio process
+//! tap (macOS 14.2+) muting its source, played back by an IOProc that applies our
+//! gain, through a private aggregate device made of an output device and the tap.
+//! Used for one app's volume and output device, and for the software master volume.
 //!
-//! A tap takes only the audio headed to one stream of that output and plays it back
-//! onto the same channels, so nothing is rerouted: what an app sends to another
-//! device is not tapped (and not muted).
+//! A tap takes only the audio headed to one stream of the device it listens to (the
+//! default output): what an app sends to another device by itself is not tapped (and
+//! not muted). Played back on that same device it lands on the same channels, so
+//! only the level changes. Played back on another device it moves there, onto that
+//! device's stereo channels.
 //!
 //! Same structure as AudioCap / FineTune. Taps use `mutedWhenTapped`, so a source is
 //! silenced only while our IOProc reads it: when we stop (or our process dies, taking
@@ -28,10 +30,10 @@ use objc2_core_audio::{
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey, kAudioAggregateDeviceSubDeviceListKey,
     kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
     kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyIOProcStreamUsage, kAudioDevicePropertyNominalSampleRate,
-    kAudioDevicePropertyPreferredChannelsForStereo, kAudioDevicePropertyStreams, kAudioDevicePropertyTransportType,
-    kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
-    kAudioDeviceTransportTypeVirtual, kAudioHardwarePropertyDevices, kAudioStreamPropertyVirtualFormat,
-    kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyDescription,
+    kAudioDevicePropertyPreferredChannelsForStereo, kAudioDevicePropertyStreams, kAudioDeviceTransportTypeAggregate,
+    kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeVirtual,
+    kAudioHardwarePropertyDevices, kAudioStreamPropertyVirtualFormat, kAudioSubDeviceUIDKey,
+    kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyDescription,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, kAudioFormatFlagIsFloat,
@@ -106,11 +108,16 @@ struct Shared {
     /// Peak levels since the last `take_peaks` (non-negative `f32` bits, so `fetch_max` works).
     peak_in: AtomicU32,
     peak_out: AtomicU32,
+    /// Largest jump between two consecutive samples of the tap's first channel since
+    /// the last `take_step`, and the sample it continues from: dropouts and clock
+    /// drift show up as jumps a steady tone never makes.
+    peak_step: AtomicU32,
+    last_sample: AtomicU32,
     /// Fixed before the IOProc starts.
     layout: Layout,
 }
 
-/// Whose audio a tap captures, of what is played to the output device's stream.
+/// Whose audio a tap captures, of what is played to the stream it listens to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// These processes (one app).
@@ -124,7 +131,7 @@ struct Layout {
     /// Index of the tap's first buffer in the IOProc input list.
     tap_buffer: u32,
     /// Output channel of the tap's first channel (0-based, counted across buffers):
-    /// the tapped stream's first channel.
+    /// the first channel of the playback device's stereo stream.
     offset: u32,
     /// Per-frame smoothing coefficient.
     coeff: f32,
@@ -139,27 +146,31 @@ pub struct Tap {
     running: bool,
     shared: Box<Shared>,
     label: String,
-    device_uid: String,
-    /// The device output stream the tap listens to, and its first channel.
-    stream: (u32, u32),
+    from_uid: String,
+    /// Index of the output stream of `from` the tap listens to.
+    stream: u32,
     /// IO cycle count at the last health check, and when it last moved.
     seen_cycles: u32,
     seen_at: Instant,
-    /// Output sample rate the aggregate was built for.
-    rate: f64,
+    /// Sample rates of `device` and `from` the aggregate was built for.
+    rates: (f64, f64),
     pub source: Source,
-    /// Output device the aggregate plays to.
+    /// Output device the tap listens to (the default output when it was built).
+    pub from: ObjectId,
+    /// Output device the aggregate plays to: `from`, or the device an app is sent to.
     pub device: ObjectId,
+    pub device_uid: String,
 }
 
 impl Tap {
-    /// Taps `source` and plays it through `device` at `gain`, fading in from silence.
+    /// Taps what `source` plays on `from` and plays it through `device` at `gain`,
+    /// fading in from silence.
     ///
     /// Blocks while macOS shows the System Audio Recording prompt, so callers check
     /// the permission first.
-    pub fn new(label: &str, source: Source, device: ObjectId, gain: f32) -> Result<Self> {
+    pub fn new(label: &str, source: Source, from: ObjectId, device: ObjectId, gain: f32) -> Result<Self> {
         let api = api().ok_or_else(|| AudioError::Unsupported("per-app volume needs macOS 14.2 or later".into()))?;
-        if transport(device) == kAudioDeviceTransportTypeAggregate {
+        if device::transport(device) == kAudioDeviceTransportTypeAggregate {
             // Aggregates cannot nest; flattening multi-output devices is not supported yet.
             return Err(AudioError::Unsupported(
                 "per-app volume does not work with aggregate or multi-output devices".into(),
@@ -177,16 +188,20 @@ impl Tap {
                 cycles: AtomicU32::new(0),
                 peak_in: AtomicU32::new(0),
                 peak_out: AtomicU32::new(0),
+                peak_step: AtomicU32::new(0),
+                last_sample: AtomicU32::new(0),
                 layout: Layout { tap_buffer: 0, offset: 0, coeff: 1.0 },
             }),
             label: label.to_string(),
-            device_uid: device::uid(device)?,
-            stream: output_stream(device),
+            from_uid: device::uid(from)?,
+            stream: output_stream(from).0,
             seen_cycles: 0,
             seen_at: Instant::now(),
-            rate: sample_rate(device),
+            rates: (sample_rate(device), sample_rate(from)),
             source,
+            from,
             device,
+            device_uid: device::uid(device)?,
         };
         // On any error below, `Drop` releases whatever was created so far.
         let description = tap.description(None);
@@ -194,7 +209,7 @@ impl Tap {
         ca::check(unsafe { (api.create)(&*description, &mut tap.tap) })
             .map_err(|s| AudioError::Backend(format!("could not create the process tap (CoreAudio error {s})")))?;
 
-        let aggregate = aggregate_description(device, &tap.device_uid, &tap.tap_uid, label);
+        let aggregate = aggregate_description(device, &tap.device_uid, &tap.tap_uid, label, from != device);
         ca::check(unsafe {
             AudioHardwareCreateAggregateDevice(aggregate.as_ref(), NonNull::from(&mut tap.aggregate))
         })?;
@@ -205,7 +220,7 @@ impl Tap {
         if !wait_until_ready(tap.aggregate, tap_buffer + 1) {
             return Err(AudioError::Backend("the process tap did not attach to the output device".into()));
         }
-        tap.shared.layout = layout(tap.aggregate, tap_buffer, tap.stream.1)?;
+        tap.shared.layout = layout(tap.aggregate, tap_buffer, output_stream(device).1)?;
         ca::check(unsafe {
             AudioDeviceCreateIOProcID(
                 tap.aggregate,
@@ -252,8 +267,8 @@ impl Tap {
     }
 
     /// False once the aggregate died (device unplugged, coreaudiod restart), stopped
-    /// calling us, or the output changed sample rate (Bluetooth headset switching to
-    /// call mode): all of which need a rebuild. (`DeviceIsRunning` is no signal: it
+    /// calling us, or a device it uses changed sample rate (Bluetooth headset switching
+    /// to call mode): all of which need a rebuild. (`DeviceIsRunning` is no signal: it
     /// lags behind `AudioDeviceStart`.)
     pub fn healthy(&mut self) -> bool {
         let flag = |selector| ca::get::<u32>(self.aggregate, ca::global(selector)).is_ok_and(|v| v != 0);
@@ -263,7 +278,7 @@ impl Tap {
         }
         flag(kAudioDevicePropertyDeviceIsAlive)
             && self.seen_at.elapsed() < STALL
-            && sample_rate(self.device) == self.rate
+            && (sample_rate(self.device), sample_rate(self.from)) == self.rates
     }
 
     /// Peak input (tapped app) and output levels since the last call.
@@ -273,13 +288,19 @@ impl Tap {
         (take(&self.shared.peak_in), take(&self.shared.peak_out))
     }
 
+    /// Largest jump between consecutive tapped samples since the last call.
+    #[cfg(test)]
+    pub fn take_step(&self) -> f32 {
+        f32::from_bits(self.shared.peak_step.swap(0, Relaxed))
+    }
+
     fn description(&self, uuid: Option<&str>) -> Retained<CATapDescription> {
         autoreleasepool(|_| unsafe {
             let numbers = |objects: &[ObjectId]| {
                 NSArray::from_retained_slice(&objects.iter().map(|&o| NSNumber::new_u32(o)).collect::<Vec<_>>())
             };
-            // Only audio headed to this device: apps playing elsewhere are not rerouted.
-            let (device, stream) = (NSString::from_str(&self.device_uid), self.stream.0 as isize);
+            // Only audio headed to this device: what an app plays elsewhere is left alone.
+            let (device, stream) = (NSString::from_str(&self.from_uid), self.stream as isize);
             let description = match &self.source {
                 Source::Processes(objects) => CATapDescription::initWithProcesses_andDeviceUID_withStream(
                     CATapDescription::alloc(),
@@ -365,10 +386,6 @@ impl Drop for Tap {
     }
 }
 
-fn transport(device: ObjectId) -> u32 {
-    ca::get::<u32>(device, ca::global(kAudioDevicePropertyTransportType)).unwrap_or(0)
-}
-
 fn sample_rate(device: ObjectId) -> f64 {
     ca::get::<f64>(device, ca::global(kAudioDevicePropertyNominalSampleRate)).unwrap_or(0.0)
 }
@@ -434,17 +451,24 @@ fn layout(aggregate: ObjectId, tap_buffer: u32, offset: u32) -> Result<Layout> {
 }
 
 /// Private aggregate: `device` is the main (clock) sub-device, the tap its input.
+/// `rerouted`: the tap listens to another device than `device`.
 fn aggregate_description(
     device: ObjectId,
     output_uid: &str,
     tap_uid: &str,
     label: &str,
+    rerouted: bool,
 ) -> CFRetained<CFDictionary<CFString, CFType>> {
     // Bluetooth and virtual outputs share the tap's clock; drift compensation there
-    // only adds periodic crackle (FineTune's finding).
-    let drift =
-        ![kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeVirtual]
-            .contains(&transport(device));
+    // only adds periodic crackle (FineTune's finding). A tap of another device never
+    // shares the output's clock.
+    let drift = rerouted
+        || ![
+            kAudioDeviceTransportTypeBluetooth,
+            kAudioDeviceTransportTypeBluetoothLE,
+            kAudioDeviceTransportTypeVirtual,
+        ]
+        .contains(&device::transport(device));
 
     let string = |s: &str| CFRetained::<CFType>::from(&*CFString::from_str(s));
     let boolean = |b: bool| CFRetained::<CFType>::from(&**CFBoolean::new(b));
@@ -535,6 +559,8 @@ unsafe extern "C-unwind" fn io_proc(
     let start = f32::from_bits(shared.current.load(Relaxed));
     let mut gain = start;
     let (mut peak_in, mut peak_out) = (0f32, 0f32);
+    let mut last = f32::from_bits(shared.last_sample.load(Relaxed));
+    let mut peak_step = 0f32;
     // Channel by channel, each replaying the same gain ramp: any channel count works
     // without per-channel state.
     let mut index = 0;
@@ -550,6 +576,10 @@ unsafe extern "C-unwind" fn io_proc(
                 *out += sample * gain;
                 peak_in = peak_in.max(sample.abs());
                 peak_out = peak_out.max((*out).abs());
+                if index == 0 {
+                    peak_step = peak_step.max((sample - last).abs());
+                    last = sample;
+                }
             }
         }
         index += 1;
@@ -560,6 +590,8 @@ unsafe extern "C-unwind" fn io_proc(
     shared.current.store(gain.to_bits(), Relaxed);
     shared.peak_in.fetch_max(peak_in.to_bits(), Relaxed);
     shared.peak_out.fetch_max(peak_out.to_bits(), Relaxed);
+    shared.peak_step.fetch_max(peak_step.to_bits(), Relaxed);
+    shared.last_sample.store(last.to_bits(), Relaxed);
     0
 }
 
@@ -599,6 +631,8 @@ mod tests {
             cycles: AtomicU32::new(0),
             peak_in: atomic(0.0),
             peak_out: atomic(0.0),
+            peak_step: atomic(0.0),
+            last_sample: atomic(0.0),
             layout,
         }
     }
@@ -664,7 +698,7 @@ mod tests {
         let object = tone.object();
         let device = device::default_device(Endpoint::Output).unwrap();
         let started = Instant::now();
-        let mut tap = Tap::new("test", Source::Processes(vec![object]), device, 0.0).unwrap();
+        let mut tap = Tap::new("test", Source::Processes(vec![object]), device, device, 0.0).unwrap();
         eprintln!("tap ready in {:?}, layout {:?}", started.elapsed(), tap.shared.layout);
 
         let (input, output) = peaks_after(&tap, Duration::from_millis(500));

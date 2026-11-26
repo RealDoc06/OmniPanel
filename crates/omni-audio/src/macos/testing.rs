@@ -4,7 +4,8 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use objc2_core_audio::{
-    kAudioHardwarePropertyProcessObjectList, kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
+    kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioHardwarePropertyProcessObjectList,
+    kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
 };
 
 use super::ca::{self, ObjectId};
@@ -15,6 +16,14 @@ use super::tcc;
 pub fn require_permission() {
     assert_eq!(tcc::status(), Some(tcc::Permission::Granted), "allow System Audio Recording for this terminal first");
 }
+
+/// Some process is doing IO on the device.
+pub fn running(device: ObjectId) -> bool {
+    ca::get::<u32>(device, ca::global(kAudioDevicePropertyDeviceIsRunningSomewhere)).is_ok_and(|r| r != 0)
+}
+
+/// Largest difference between two consecutive samples of the tone at 44.1 kHz or more.
+pub const TONE_STEP: f32 = 650.0 / 32768.0 * std::f32::consts::TAU * 440.0 / 44_100.0;
 
 /// A quiet 440 Hz stereo tone (about -34 dBFS) played by `afplay` for 20 s; killed on drop.
 pub struct Tone(Child);
