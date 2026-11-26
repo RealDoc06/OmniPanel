@@ -17,3 +17,4 @@ import("./App").then(
     ),
   (error: unknown) => root.render(<ErrorScreen title="OmniPanel couldn't start" error={error} />),
 );
+// path filter test
