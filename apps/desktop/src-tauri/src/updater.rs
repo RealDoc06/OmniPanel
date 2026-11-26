@@ -96,8 +96,13 @@ fn lock(app: &AppHandle) -> MutexGuard<'_, Inner> {
 
 fn set_status(app: &AppHandle, status: Status) {
     lock(app).status = status.clone();
+    publish(app, &status);
+}
+
+/// Tells the window, if there is one.
+fn publish(app: &AppHandle, status: &Status) {
     if app.get_webview_window(window::MAIN).is_some() {
-        let _ = app.emit("update-status", &status);
+        let _ = app.emit("update-status", status);
     }
 }
 
@@ -115,9 +120,10 @@ pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
         if matches!(inner.status, Status::Checking | Status::Downloading { .. } | Status::Ready { .. }) {
             return Ok(());
         }
-        std::mem::take(&mut inner.status)
+        // Claimed under the lock, so two checks can't both start.
+        std::mem::replace(&mut inner.status, Status::Checking)
     };
-    set_status(&app, Status::Checking);
+    publish(&app, &Status::Checking);
     let found = async { updater(&app)?.check().await }.await;
     let (status, result) = match found {
         Ok(update) => {
@@ -149,10 +155,11 @@ pub async fn download_update(app: AppHandle) -> Result<(), String> {
         else {
             return Err("There is no update to install.".into());
         };
+        // Claimed under the lock, so two downloads can't both start.
         inner.status = Status::Downloading { version: version.clone(), percent: None };
         (update, version)
     };
-    set_status(&app, Status::Downloading { version: version.clone(), percent: None });
+    publish(&app, &Status::Downloading { version: version.clone(), percent: None });
     update.timeout = Some(DOWNLOAD_TIMEOUT);
     let (mut received, mut shown) = (0u64, None);
     let on_chunk = |chunk: usize, total: Option<u64>| {
