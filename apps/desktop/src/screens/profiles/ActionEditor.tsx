@@ -471,6 +471,7 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
           ariaLabel={output ? "Play on" : "Record from"}
           devices={devices}
           value={device === null ? { type: "default" } : { type: "device", id: device }}
+          missing={`Not connected: ${device}`}
           onChange={(device) => onChange({ ...action, device })}
         />
       </Field>

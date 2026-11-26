@@ -14,6 +14,7 @@ export function DeviceSelect({
   value,
   onChange,
   ariaLabel,
+  missing = "Not connected",
   className,
 }: {
   devices: readonly AudioDeviceInfo[];
@@ -22,6 +23,8 @@ export function DeviceSelect({
   /** A device id, or null for the system default (which it follows from then on). */
   onChange: (device: string | null) => void;
   ariaLabel: string;
+  /** Shown for a device that is not in `devices`. */
+  missing?: string;
   className?: string;
 }) {
   const options = devices.map((d) => ({ value: d.id, label: `${d.name}${d.isDefault ? " (default)" : ""}` }));
@@ -30,7 +33,7 @@ export function DeviceSelect({
       ariaLabel={ariaLabel}
       className={className}
       value={value.type === "default" ? "" : value.type === "device" ? value.id : NO_OPTION}
-      placeholder={value.type === "device" ? `Not connected: ${value.id}` : "Several devices"}
+      placeholder={value.type === "device" ? missing : "Several devices"}
       options={[{ value: "", label: "System default" }, ...options]}
       onChange={(id) => onChange(id || null)}
     />

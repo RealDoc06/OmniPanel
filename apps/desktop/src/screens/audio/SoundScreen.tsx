@@ -64,9 +64,16 @@ function Mixer() {
   const [mixer, setMixer] = useState<MixerState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const touchedAt = useRef(0);
+  /** Device changes still on their way: a move can take seconds, and polls stay out meanwhile. */
+  const moving = useRef(0);
   const mac = useIsMac();
   const capabilities = mixer?.capabilities;
-  const columns = COLUMNS[Number(capabilities?.perAppOutput ?? false) + Number(capabilities?.perAppInput ?? false)] ?? COLUMNS[0];
+  // A direction has its column when this computer can change it, and also while an
+  // app is still kept on a device there, so that it can be let go.
+  const shown = mixer
+    ? DIRECTIONS.filter(({ direction }) => mixer.capabilities[CAPABILITY[direction]] || mixer.apps.some((a) => a[direction]?.type === "device"))
+    : [];
+  const columns = COLUMNS[shown.length] ?? COLUMNS[0];
   const note = capabilities?.note ?? (capabilities && !capabilities.perAppVolume ? "App volume controls are unavailable." : null);
   // Match omni-audio's macOS PERMISSION_HINT, not unsupported-OS or tap failures.
   const needsPermission = mac && capabilities?.perAppVolume === false &&
@@ -81,7 +88,7 @@ function Mixer() {
   usePolling(async () => {
     try {
       const next = await api.getMixer();
-      if (Date.now() - touchedAt.current > 1500) setMixer(next);
+      if (moving.current === 0 && Date.now() - touchedAt.current > 1500) setMixer(next);
       setError(null);
     } catch (e) {
       setError(errorMessage(e));
@@ -107,18 +114,22 @@ function Mixer() {
   /** Sends an app to a device. A failure is toasted and the next poll shows where the app really is. */
   const setDevice = (app: AppAudio, direction: AudioDirection, device: string | null) => {
     const route: AppRoute = device === null ? { type: "default" } : { type: "device", id: device };
-    // Polls stay out a second longer than for a level: a move can take that long to settle.
-    touchedAt.current = Date.now() + 1000;
+    touchedAt.current = Date.now();
+    moving.current += 1;
     setMixer((m) => m && { ...m, apps: m.apps.map((a) => (a.id === app.id ? { ...a, [direction]: route } : a)) });
-    api.runAction({ type: "appDevice", app: app.id, direction, device }).catch(toastError);
+    api
+      .runAction({ type: "appDevice", app: app.id, direction, device })
+      .catch(toastError)
+      .finally(() => (moving.current -= 1));
   };
 
-  // One select per direction this computer can change, shown while the app has such a stream.
+  // One select per shown direction, while the app has such a stream. Where the
+  // direction cannot be changed (any more), only an app kept on a device gets one.
   const deviceSelects = (app: AppAudio) =>
     mixer &&
-    DIRECTIONS.filter(({ direction }) => mixer.capabilities[CAPABILITY[direction]]).map(({ direction, label, icon }) => {
+    shown.map(({ direction, label, icon }) => {
       const route = app[direction];
-      return route === null ? (
+      return route === null || (!mixer.capabilities[CAPABILITY[direction]] && route.type !== "device") ? (
         <span key={direction} />
       ) : (
         <span key={direction} className="flex min-w-0 items-center gap-1.5" title={`${app.name} ${label}`}>

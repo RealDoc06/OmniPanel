@@ -168,6 +168,14 @@ impl Wanted {
         self.level.is_unity() && self.output.is_none()
     }
 
+    /// What to go back to when applying `self` in place of `previous` fails. Letting
+    /// go of a device needs no tap, so that part holds: an app let go while its level
+    /// cannot be applied (the default output is a multi-output device) must not come
+    /// back pinned.
+    fn undone(&self, previous: &Wanted) -> Wanted {
+        Wanted { output: previous.output.clone().filter(|_| self.output.is_some()), ..previous.clone() }
+    }
+
     /// Where the app's tap plays and at which gain, or `None` when it needs no tap.
     /// `route` is the device it is sent to, while connected. On another device than
     /// `default` it plays at its own level; on the default output the software
@@ -581,7 +589,8 @@ impl Platform {
             state.apply_gains();
             return Ok(());
         }
-        self.commit(state, Key::App(app.id.clone()), |state| state.set_wanted(&app.id, previous))
+        let undone = wanted.undone(&previous);
+        self.commit(state, Key::App(app.id.clone()), |state| state.set_wanted(&app.id, undone))
     }
 
     fn update_master(&self, device: ObjectId, change: impl FnOnce(&mut Level)) -> Result<()> {
@@ -1116,6 +1125,12 @@ mod tests {
         assert_eq!(sent.placement(Some(headphones), headphones, master), None);
         assert!(!sent.is_default(), "the choice is kept for when they are back");
         assert!(wanted(1.0, None).is_default());
+
+        // A change that fails is undone, except for letting go of a device.
+        let pinned = wanted(0.5, Some("headphones"));
+        assert_eq!(wanted(0.2, Some("headphones")).undone(&pinned), pinned);
+        assert_eq!(wanted(0.5, Some("speakers")).undone(&pinned), pinned);
+        assert_eq!(wanted(0.5, None).undone(&pinned), wanted(0.5, None));
     }
 
     /// An output device is saved like a level, also for an app at 100%.

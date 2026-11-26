@@ -474,9 +474,15 @@ impl Backend for Platform {
             // Only a move onto the default device makes a stream follow the default
             // again: both sound servers ignore one that changes nothing. So an app
             // that is already there goes by another device, for a moment, to forget
-            // an earlier choice of this one.
-            let there = matches!(route, Some(AppRoute::Device { id }) if *id == default.id);
-            if there && let Some(other) = devices.iter().find(|d| d.id != default.id) {
+            // an earlier choice of this one. (One spread over several devices is
+            // just gathered: what was there already keeps its choice.)
+            if matches!(route, Some(AppRoute::Device { id }) if *id == default.id) {
+                let other = devices.iter().find(|d| d.id != default.id).ok_or_else(|| {
+                    let app = &app.audio.name;
+                    AudioError::Backend(format!(
+                        "{app} is on the default device already, and making it follow the default again takes a second device"
+                    ))
+                })?;
                 self.move_app(app, direction, other)?;
             }
             return self.move_app(app, direction, default);
