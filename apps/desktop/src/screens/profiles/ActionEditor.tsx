@@ -49,7 +49,7 @@ import {
 import { api, dialog } from "../../lib/backend";
 import { useResource } from "../../lib/hooks";
 import { applyAutoLabel, applyPick, type PickResult } from "../../lib/recipes";
-import { navigate, useApp, useProfiles, useSettings, useVoicePresets } from "../../lib/store";
+import { navigate, useApp, useProfiles, useRuntime, useSettings, useVoicePresets } from "../../lib/store";
 import { cx, moveItem, newId } from "../../lib/util";
 import { ActionPicker } from "./ActionPicker";
 import { useCurrent } from "./editor";
@@ -484,6 +484,7 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
 function VoiceForm({ action, onChange }: FormProps<"voice">) {
   const presets = useVoicePresets();
   const ready = useSettings().voice.outputDevice !== null;
+  const shareUnsupported = useRuntime().voice.shareUnsupported;
   const { op } = action;
   const toOp = (type: VoiceOp["type"]): VoiceOp => {
     switch (type) {
@@ -495,6 +496,10 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
       case "enable":
       case "disable":
         return { type };
+      case "toggleShareApp":
+      case "shareApp":
+      case "unshareApp":
+        return { type, app: "app" in op ? op.app : "" };
     }
   };
   return (
@@ -534,6 +539,11 @@ function VoiceForm({ action, onChange }: FormProps<"voice">) {
               </label>
             ))}
           </div>
+        </Field>
+      )}
+      {"app" in op && (
+        <Field label="App" compact hint={shareUnsupported ?? "People in your call hear this app along with your voice. You keep hearing it too."}>
+          <AppField value={op.app} onChange={(app) => onChange({ ...action, op: { ...op, app } })} />
         </Field>
       )}
       {!ready && (

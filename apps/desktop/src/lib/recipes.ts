@@ -217,6 +217,16 @@ export const RECIPES = [
     button: "Robot",
     make: () => ({ type: "button", action: { type: "voice", op: { type: "setPreset", presetId: "robot" } } }),
   },
+  {
+    id: "share-app",
+    group: "Voice changer",
+    label: "Share an app's sound into your mic",
+    keywords: "share audio music video game call discord hear listen stream route",
+    icon: "cast",
+    button: "Share app",
+    active: { label: "Sharing", bg: ON_AIR },
+    make: () => ({ type: "button", action: { type: "voice", op: { type: "toggleShareApp", app: "" } } }),
+  },
   // Open
   {
     id: "open-app",
@@ -477,7 +487,7 @@ const appIcon = (name: string): IconName =>
     .map((word) => APP_ICONS[word])
     .find((icon) => icon !== undefined) ?? "app-window";
 
-/** Picker entries for installed apps ("Open Spotify") and apps playing sound ("Mute / unmute Spotify"). */
+/** Picker entries for installed apps ("Open Spotify") and apps playing sound ("Mute / unmute Spotify", "Share Spotify into your mic"). */
 export function dynamicRecipes(installed: readonly InstalledApp[], apps: readonly AppAudio[]): Recipe[] {
   const playing = apps.filter((app) => !recordsOnly(app));
   const opens = installed.map(
@@ -517,7 +527,20 @@ export function dynamicRecipes(installed: readonly InstalledApp[], apps: readonl
       make: () => ({ type: "slider", target: { type: "app", app: name }, vertical: true }),
     }),
   );
-  const recipes = [...opens, ...mutes, ...sliders];
+  const shares = playing.map(
+    ({ name }): Recipe => ({
+      id: `share:${name}`,
+      group: "Voice changer",
+      label: `Share ${name} into your mic`,
+      keywords: "share audio sound call hear listen stream route",
+      icon: "cast",
+      button: `Share ${name}`,
+      active: { label: `Sharing ${name}`, bg: ON_AIR },
+      name,
+      make: () => ({ type: "button", action: { type: "voice", op: { type: "toggleShareApp", app: name } } }),
+    }),
+  );
+  const recipes = [...opens, ...mutes, ...sliders, ...shares];
   // Dynamic faces count as automatic labels when changing an existing button too.
   for (const recipe of recipes) {
     if (recipe.button !== null) AUTO_LABELS.add(recipe.button);
@@ -649,7 +672,8 @@ function labelFor(kind: Control["kind"], names: LabelNames): string | null {
     case "appDevice":
       return action.device === null ? (action.direction === "output" ? "Speaker" : "Microphone") : names.device?.(action.device, action.direction) ?? action.device;
     case "voice":
-      return action.op.type === "setPreset" ? names.preset?.(action.op.presetId) ?? action.op.presetId : null;
+      return action.op.type === "setPreset" ? names.preset?.(action.op.presetId) ?? action.op.presetId :
+        "app" in action.op ? `${action.op.type === "unshareApp" ? "Stop sharing" : "Share"} ${action.op.app || "app"}` : null;
     case "obs":
       return action.op.type === "setScene" ? action.op.scene || "Scene" :
         action.op.type === "toggleSource" ? action.op.source || "Show / hide" :

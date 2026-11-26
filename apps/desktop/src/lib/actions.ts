@@ -131,6 +131,9 @@ export const VOICE_OP_LABELS: Record<VoiceOp["type"], string> = {
   disable: "Turn off",
   setPreset: "Switch to a voice",
   cycle: "Next voice",
+  toggleShareApp: "Share an app's sound: on / off",
+  shareApp: "Share an app's sound",
+  unshareApp: "Stop sharing an app's sound",
 };
 
 export const OBS_OP_LABELS: Record<ObsOp["type"], string> = {
@@ -329,6 +332,12 @@ export function describeAction(action: Action | null, names: NameLookup = {}): s
           return "Turn voice changer on";
         case "disable":
           return "Turn voice changer off";
+        case "toggleShareApp":
+          return `Share ${op.app || "an app"} into the mic on / off`;
+        case "shareApp":
+          return `Share ${op.app || "an app"} into the mic`;
+        case "unshareApp":
+          return `Stop sharing ${op.app || "an app"}`;
       }
     }
     case "obs": {
@@ -411,7 +420,8 @@ function actionLiveTitle(action: Action): string | null {
     case "toggle":
       return "While on";
     case "voice":
-      return action.op.type === "setPreset" ? "While this voice is on" : "While the voice changer is on";
+      return action.op.type === "setPreset" ? "While this voice is on" :
+        "app" in action.op ? "While the app is shared" : "While the voice changer is on";
     case "obs":
       return OBS_LIVE_TITLES[action.op.type];
     case "navigate":

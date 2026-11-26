@@ -84,7 +84,10 @@ Action reference (examples are actions, wrap the chosen action in GeneratedContr
   Windows neither direction yet: say so in explanation.
   {"type":"appDevice","app":"Spotify","direction":"output","device":"Headphones"}
 - voice: toggle, enable, disable, setPreset or cycle. Requires voice setup.
+  toggleShareApp, shareApp or unshareApp let a call hear an app's sound through the microphone
+  (the user keeps hearing it; no voice effect needed; macOS and Linux only).
   {"type":"voice","op":{"type":"setPreset","presetId":"robot"}}
+  {"type":"voice","op":{"type":"toggleShareApp","app":"Spotify"}}
 - obs: setScene, toggleRecord/startRecord/stopRecord/pauseRecord, toggleStream/startStream/stopStream,
   toggleReplayBuffer/saveReplay, toggleVirtualCam, toggleMute, toggleSource, toggleStudioMode.
   {"type":"obs","op":{"type":"setScene","scene":"BRB"}}

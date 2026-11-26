@@ -73,11 +73,20 @@ impl Reader {
 
     /// Render `frames` output samples; `put(i, sample)` writes frame `i`.
     /// Call once per output callback.
-    pub fn render(&mut self, frames: usize, mut put: impl FnMut(usize, f32)) {
+    pub fn render(&mut self, frames: usize, put: impl FnMut(usize, f32)) {
+        self.begin(frames, frames);
+        self.fill(frames, put);
+    }
+
+    /// First half of [`Self::render`], for a consumer that produces one callback
+    /// in pieces: look at the ring once for a callback of `frames` frames, then
+    /// [`Self::fill`] the pieces. `block` is how much the consumer takes in one
+    /// go, which is more than `frames` when its callbacks come in bursts.
+    pub fn begin(&mut self, frames: usize, block: usize) {
         let decay = 1.0 - frames as f64 / (HOLD_SECS * self.out_rate);
         let in_block = self.in_block.load(Ordering::Relaxed) as f64;
         self.in_hold = (self.in_hold * decay).max(in_block);
-        self.out_hold = (self.out_hold * decay).max(frames as f64);
+        self.out_hold = (self.out_hold * decay).max(block as f64);
         let fill = self.rx.slots() as f64;
         let in_started = in_block > 0.0;
         // Ring fill (input samples) to aim for: one block each way plus jitter margin.
@@ -88,7 +97,7 @@ impl Reader {
 
         if !self.primed {
             if !in_started || fill < target {
-                return self.silence(0, frames, &mut put);
+                return;
             }
             self.skip((fill - target) as usize);
             self.primed = true;
@@ -105,7 +114,14 @@ impl Reader {
         }
         let steer = ((self.avg_fill - target) / (STEER_SECS * self.in_rate)).clamp(-MAX_STEER, MAX_STEER);
         self.ratio = self.base_ratio * (1.0 + steer);
+    }
 
+    /// Second half of [`Self::render`]: the next `frames` samples of the callback
+    /// [`Self::begin`] announced (silence until the ring is primed).
+    pub fn fill(&mut self, frames: usize, mut put: impl FnMut(usize, f32)) {
+        if !self.primed {
+            return self.silence(0, frames, &mut put);
+        }
         for i in 0..frames {
             self.frac += self.ratio;
             while self.frac >= 1.0 {
@@ -140,6 +156,20 @@ impl Reader {
             put(i, self.last);
         }
         self.gain = 0.0;
+    }
+
+    /// The writer is gone and everything it wrote was played, or will never be:
+    /// what is left of a ring that is not primed stays below its target for good.
+    pub fn finished(&self) -> bool {
+        self.rx.is_abandoned() && (self.rx.is_empty() || !self.primed)
+    }
+
+    /// Throw away what is buffered; playing starts over with what comes after.
+    pub fn flush(&mut self) {
+        self.skip(self.rx.slots());
+        self.primed = false;
+        self.gain = 0.0;
+        self.last = 0.0;
     }
 
     fn skip(&mut self, n: usize) {

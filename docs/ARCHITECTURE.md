@@ -21,7 +21,7 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
 | --- | --- |
 | `crates/omni-core` | Domain model (config, profiles, controls, actions), deck protocol, UI runtime types, built-in themes / voice presets, config persistence. Every cross-boundary type derives `ts_rs::TS`. |
 | `crates/omni-audio` | Master / mic / per-app volume, and the device each app plays on and records from. macOS CoreAudio + process taps, Windows WASAPI, Linux `pactl`. |
-| `crates/omni-voice` | Real-time voice changer: mic → effect chain → output device (virtual cable). |
+| `crates/omni-voice` | Real-time voice changer: mic → effect chain → output device (virtual cable). Also mixes shared app sound into that output. |
 | `crates/omni-actions` | Executes leaf actions: keys, apps, scripts, media, volume, system, HTTP, OBS (obs-websocket v5), Home Assistant. Installed-app discovery. |
 | `crates/omni-ai` | LLM providers (OpenAI default `gpt-6-luna`, Anthropic, Ollama, OpenRouter, custom OpenAI-compatible) that turn a description into a `GeneratedControl`. |
 | `crates/omni-host` | The engine: config store, deck server, pairing, sessions, dispatcher, state feedback, USB (adb) bridge. No Tauri dependency, testable headless. |
@@ -56,6 +56,12 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
   missing. Linux moves an app's streams with `pactl`. macOS plays the app's tap on
   the chosen output and cannot change what another app records from. Windows has
   neither yet: its only route is the undocumented `IAudioPolicyConfig`.
+- **Shared app sound** joins the voice pipeline after the effect chain, on the way
+  to the virtual cable only (never the monitor), so there is one pipeline and one
+  cable setup. Capture only listens: per-stream monitor streams on Linux, an
+  unmuted process tap on macOS (`omni_audio::capture`). Both belong to our
+  process, so stopping or crashing leaves nothing behind. Windows reports "not
+  supported yet".
 - **Flow-control actions** (`multi`, `toggle`, `delay`, `navigate`, `voice`)
   live in `omni-host`; all other actions are leaves run by `omni-actions`.
 

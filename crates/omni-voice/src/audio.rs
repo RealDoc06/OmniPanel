@@ -5,8 +5,10 @@
 //!
 //! Signal path: input callback (downmix -> [`Processor`]) -> one SPSC ring per
 //! output -> output callbacks ([`Reader`]: resample, drift control, upmix).
+//! Shared app sound ([`crate::share`]) joins after the processor, on the way to
+//! the main output only.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -21,6 +23,7 @@ use rtrb::RingBuffer;
 use crate::devices::{self, Direction, backend};
 use crate::dsp::{Chain, ChainPort, Params, Processor};
 use crate::reader::Reader;
+use crate::share::{self, AppCapture, Mixer, MixerPort};
 use crate::{Effect, Result, VoiceError, VoiceLevels, VoiceStatus};
 
 /// Preferred processing rate; outputs are opened at the input's rate when possible.
@@ -43,6 +46,9 @@ const FOLLOW_DEFAULT_INPUT: bool = cfg!(target_os = "macos");
 /// device query opens a new PulseAudio connection.
 const POLL_MONITOR: bool = cfg!(not(target_os = "linux"));
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// Why apps are not shared into an output that is not a virtual device.
+const NOT_A_VIRTUAL_MIC: &str =
+    "the voice output is not a virtual microphone; choose one under Voice changer to share app sound";
 /// Longer than the preset crossfade.
 const DRAIN_AFTER_SWAP: Duration = Duration::from_millis(250);
 
@@ -54,12 +60,33 @@ pub(crate) struct Selection {
     pub monitor: Option<Option<String>>,
 }
 
+/// Everything the audio thread is asked to run. Only a new `selection` reopens
+/// the streams; effects and shared apps change while they run.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Wanted {
+    pub selection: Selection,
+    /// The voice changer is on. Without it the streams only run to share apps,
+    /// which needs a virtual output: on speakers the microphone would just be
+    /// played back at the user.
+    pub voice: bool,
+    pub effects: Vec<Effect>,
+    /// Apps whose sound is mixed into the main output.
+    pub shares: Vec<String>,
+}
+
 /// State shared between the engine handle, the audio thread and the callbacks.
 #[derive(Default)]
 pub(crate) struct Shared {
     pub status: Mutex<VoiceStatus>,
     pub params: AtomicParams,
     pub levels: Levels,
+    /// Linear gain of the shared app sound (`f32` bits), read by the input callback.
+    pub share_gain: AtomicU32,
+    /// The list of shared apps the host committed and the one the capture was last
+    /// lined up with ([`share::key`]). App sound is only mixed while they agree,
+    /// see [`crate::VoiceEngine::commit_shares`].
+    pub shares_committed: AtomicU64,
+    pub shares_applied: AtomicU64,
     /// Whether a general-purpose virtual cable output exists, once known.
     pub has_cable: Mutex<Option<bool>>,
 }
@@ -157,11 +184,13 @@ impl Levels {
 
 enum Command {
     Open {
-        selection: Selection,
-        effects: Vec<Effect>,
+        wanted: Wanted,
         reply: SyncSender<Result<()>>,
     },
     Effects(Vec<Effect>),
+    Shares(Vec<String>),
+    /// What the shared apps play changed (sent by the app capture).
+    SharesChanged,
     /// Fatal error reported by cpal for the stream opened as `generation`
     /// (a session's microphone and output, or one monitor attach).
     StreamError {
@@ -200,9 +229,9 @@ impl Worker {
     }
 
     /// (Re)open all streams; blocks until the devices are running or failed.
-    pub fn open(&self, selection: Selection, effects: Vec<Effect>) -> Result<()> {
+    pub fn open(&self, wanted: Wanted) -> Result<()> {
         let (reply, result) = mpsc::sync_channel(1);
-        self.send(Command::Open { selection, effects, reply })?;
+        self.send(Command::Open { wanted, reply })?;
         result
             .recv_timeout(OPEN_TIMEOUT)
             .unwrap_or_else(|_| Err(VoiceError::Backend("audio devices did not respond".into())))
@@ -211,6 +240,11 @@ impl Worker {
     /// Hot-swap the effect chain without touching the streams.
     pub fn set_effects(&self, effects: Vec<Effect>) -> Result<()> {
         self.send(Command::Effects(effects))
+    }
+
+    /// Change which apps are shared without touching the streams.
+    pub fn set_shares(&self, shares: Vec<String>) -> Result<()> {
+        self.send(Command::Shares(shares))
     }
 
     fn send(&self, command: Command) -> Result<()> {
@@ -235,7 +269,7 @@ impl Drop for Worker {
 /// status updates on exit are left to [`crate::VoiceEngine`].
 fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>) {
     let mut session: Option<Session> = None;
-    let mut wanted: Option<(Selection, Vec<Effect>)> = None;
+    let mut wanted: Option<Wanted> = None;
     // Counts sessions and monitor attaches, so errors of closed streams are ignored.
     let mut generation = 0u64;
     let mut retry_at: Option<Instant> = None;
@@ -250,14 +284,14 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match command {
-            Ok(Command::Open { selection, effects, reply }) => {
+            Ok(Command::Open { wanted: new, reply }) => {
                 session = None; // release the devices before opening them again
                 // A poll due for the old session would find the new microphone "stalled".
                 poll_at = None;
-                let result = open(&selection, &effects, &worker, &events, &mut generation);
+                let result = open(&new, &worker, &events, &mut generation);
                 retry_at = result.as_ref().err().filter(|e| retryable(e)).map(|_| Instant::now() + RETRY_INTERVAL);
                 let reply_result = publish(&worker, result.map(|s| session.insert(s).warning.clone()));
-                wanted = Some((selection, effects));
+                wanted = Some(new);
                 let _ = reply.send(reply_result);
             }
             Ok(Command::Effects(effects)) => {
@@ -265,8 +299,26 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
                     s.set_effects(&effects);
                     drain_at = Some(Instant::now() + DRAIN_AFTER_SWAP);
                 }
-                if let Some((_, current)) = wanted.as_mut() {
-                    *current = effects;
+                if let Some(wanted) = wanted.as_mut() {
+                    wanted.effects = effects;
+                }
+            }
+            Ok(Command::Shares(shares)) => {
+                if let Some(wanted) = wanted.as_mut() {
+                    wanted.shares = shares;
+                }
+                if let (Some(s), Some(wanted)) = (session.as_mut(), wanted.as_ref()) {
+                    s.sync_shares(&wanted.shares, &worker, &events);
+                    // The feeds of apps no longer shared end a moment later.
+                    drain_at = Some(Instant::now() + DRAIN_AFTER_SWAP);
+                }
+            }
+            Ok(Command::SharesChanged) => {
+                // A capture that failed is left to the poll: its last events must not reopen it at once.
+                if let (Some(s), Some(wanted)) = (session.as_mut().filter(|s| s.capture.is_some()), wanted.as_ref()) {
+                    s.sync_shares(&wanted.shares, &worker, &events);
+                    // The feeds of streams that ended come back a moment later.
+                    drain_at = Some(Instant::now() + DRAIN_AFTER_SWAP);
                 }
             }
             Ok(Command::StreamError { generation: g, stream, message }) => match session.as_mut() {
@@ -306,7 +358,7 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
         }
         if poll_at.is_some_and(|at| now >= at) {
             poll_at = None;
-            if let (Some(s), Some((selection, effects))) = (session.as_mut(), wanted.as_ref()) {
+            if let (Some(s), Some(wanted)) = (session.as_mut(), wanted.as_ref()) {
                 if s.input_stalled() {
                     let message = "stopped delivering audio".into();
                     let _ =
@@ -314,7 +366,7 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
                 } else if s.default_input_moved() {
                     // Open on the new default first: if it can't be used (say it is the
                     // cable itself), the running session stays.
-                    match open(selection, effects, &worker, &events, &mut generation) {
+                    match open(wanted, &worker, &events, &mut generation) {
                         Ok(new) => {
                             tracing::info!("voice: switched to the new default microphone");
                             let _ = publish(&worker, Ok(session.insert(new).warning.clone()));
@@ -327,16 +379,21 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
                         }
                     }
                 } else {
-                    s.retry_monitor(selection, &events, &mut generation);
+                    s.retry_monitor(&wanted.selection, &events, &mut generation);
                     worker.update(|shared| shared.status().error.clone_from(&s.warning));
+                    // The safety net of the app capture: reopens a failed one and
+                    // catches what its change events did not report.
+                    if !wanted.shares.is_empty() {
+                        s.sync_shares(&wanted.shares, &worker, &events);
+                    }
                 }
             }
         }
         if session.is_none()
-            && let (Some(at), Some((selection, effects))) = (retry_at, wanted.as_ref())
+            && let (Some(at), Some(wanted)) = (retry_at, wanted.as_ref())
             && now >= at
         {
-            let result = open(selection, effects, &worker, &events, &mut generation);
+            let result = open(wanted, &worker, &events, &mut generation);
             retry_at = result.as_ref().err().filter(|e| retryable(e)).map(|_| Instant::now() + RETRY_INTERVAL);
             if result.is_ok() {
                 tracing::info!("voice devices recovered");
@@ -344,9 +401,7 @@ fn run(rx: Receiver<Command>, events: Sender<Command>, worker: Arc<WorkerState>)
             let _ = publish(&worker, result.map(|s| session.insert(s).warning.clone()));
         }
         poll_at = match (&session, &wanted) {
-            (Some(s), Some((selection, _))) if s.needs_poll(selection) => {
-                poll_at.or_else(|| Some(Instant::now() + POLL_INTERVAL))
-            }
+            (Some(s), Some(wanted)) if s.needs_poll(wanted) => poll_at.or_else(|| Some(Instant::now() + POLL_INTERVAL)),
             _ => None,
         };
     }
@@ -368,20 +423,17 @@ fn publish(worker: &WorkerState, result: Result<Option<String>>) -> Result<()> {
             Err(e) => {
                 status.error = Some(e.to_string());
                 status.virtual_mic = None;
+                status.share_error = None;
+                status.share_waiting.clear();
             }
         }
     });
     result.map(|_| ())
 }
 
-/// Open streams for `selection`. On success the status' `virtual_mic` is set.
-fn open(
-    selection: &Selection,
-    effects: &[Effect],
-    worker: &WorkerState,
-    events: &Sender<Command>,
-    generation: &mut u64,
-) -> Result<Session> {
+/// Open streams for `wanted`. On success the status' `virtual_mic` is set.
+fn open(wanted: &Wanted, worker: &WorkerState, events: &Sender<Command>, generation: &mut u64) -> Result<Session> {
+    let Wanted { selection, voice, effects, shares } = wanted;
     let input = devices::find(selection.input.as_deref(), Direction::Input)?;
     let output = match selection.output.as_deref() {
         Some(id) => devices::find(Some(id), Direction::Output)?,
@@ -394,6 +446,9 @@ fn open(
 
     let output_name = devices::name(&output);
     let output_virtual = devices::is_virtual(&output);
+    if !voice && !output_virtual {
+        return Err(VoiceError::Backend(NOT_A_VIRTUAL_MIC.into()));
+    }
     let input_name = devices::name(&input);
     // A virtual cable plays its output back into its own input; the two directions
     // of a physical interface (mic in, headphones out) are separate.
@@ -433,6 +488,8 @@ fn open(
     worker.update(|shared| {
         shared.status().virtual_mic = output_virtual.then(|| devices::mic_name_for_output(&output_name));
     });
+    session.output_virtual = output_virtual;
+    session.sync_shares(shares, worker, events);
     Ok(session)
 }
 
@@ -459,6 +516,16 @@ struct Session {
     unsent: Option<Box<Chain>>,
     /// Non-fatal problem (monitor missing), shown as the status error while running.
     warning: Option<String>,
+    /// Feeds of shared app sound for the input callback, and the capture making them.
+    /// Declared after the streams: the capture stops once nothing reads its feeds.
+    mixer: MixerPort,
+    capture: Option<AppCapture>,
+    /// The main output is a virtual device. Anything else is speakers: the app and
+    /// the microphone must not be played there.
+    output_virtual: bool,
+    /// A [`Command::SharesChanged`] is on its way: the capture reports bursts of
+    /// changes (every volume step of any app is one), a single sync answers them all.
+    shares_changed: Arc<AtomicBool>,
 }
 
 /// The microphone actually open, with a delay before retrying a failed switch.
@@ -508,6 +575,7 @@ impl Session {
         let (retired_tx, retired) = RingBuffer::new(8);
         let (monitor_rings, monitor_in) = RingBuffer::new(2);
         let (retired_rings_tx, retired_rings) = RingBuffer::new(2);
+        let (mixer, mixer_port) = share::mixer(rate);
         let sample_rate = rate as f32;
         let processor = Processor::new(sample_rate, Chain::new(effects, sample_rate))
             .with_port(ChainPort { incoming, retired: retired_tx });
@@ -517,6 +585,7 @@ impl Session {
             monitor: None,
             monitor_rings: monitor_in,
             retired_rings: retired_rings_tx,
+            mixer,
             in_block: in_block.clone(),
             callbacks: callbacks.clone(),
             shared: shared.clone(),
@@ -541,7 +610,63 @@ impl Session {
             retired,
             unsent: None,
             warning: None,
+            mixer: mixer_port,
+            capture: None,
+            output_virtual: false,
+            shares_changed: Arc::default(),
         })
+    }
+
+    /// Capture exactly the apps in `shares` that play now (none: stop capturing)
+    /// and put any problem in the status. Run again whenever the capture reports
+    /// a change; a failed capture is reopened by the next poll.
+    fn sync_shares(&mut self, shares: &[String], worker: &WorkerState, events: &Sender<Command>) {
+        // Cleared first: a change during the sync asks for another one.
+        self.shares_changed.store(false, Ordering::Relaxed);
+        let result = if shares.is_empty() {
+            self.capture = None;
+            Ok(Vec::new())
+        } else if !self.output_virtual {
+            Err(VoiceError::Backend(NOT_A_VIRTUAL_MIC.into()))
+        } else {
+            self.capture_shares(shares, events)
+        };
+        self.mixer.drop_retired();
+        if result.is_err() {
+            self.capture = None;
+        }
+        let (waiting, error) = match result {
+            Ok(waiting) => (waiting, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
+        worker.update(|shared| {
+            let mut status = shared.status();
+            // A lasting problem (permission not given yet) comes back at every poll.
+            if let Some(e) = error.as_ref().filter(|e| status.share_error.as_ref() != Some(e)) {
+                tracing::warn!("voice: cannot share app sound: {e}");
+            }
+            status.share_error = error;
+            status.share_waiting = waiting;
+            // From here on the feeds in the mixer belong to exactly this list.
+            shared.shares_applied.store(share::key(shares), Ordering::Relaxed);
+        });
+    }
+
+    /// Returns the shared apps with nothing to capture right now.
+    fn capture_shares(&mut self, shares: &[String], events: &Sender<Command>) -> Result<Vec<String>> {
+        if self.capture.is_none() {
+            let (events, pending) = (events.clone(), self.shares_changed.clone());
+            let changed = move || {
+                if !pending.swap(true, Ordering::Relaxed) {
+                    let _ = events.send(Command::SharesChanged);
+                }
+            };
+            self.capture = Some(AppCapture::open(self.rate, changed)?);
+        }
+        match self.capture.as_mut() {
+            Some(capture) => capture.sync(shares, &mut self.mixer),
+            None => Ok(Vec::new()),
+        }
     }
 
     fn set_effects(&mut self, effects: &[Effect]) {
@@ -560,18 +685,22 @@ impl Session {
         }
     }
 
-    /// Chains and rings the callback no longer uses are freed here, never on the audio thread.
+    /// Chains, rings and feeds the callback no longer uses are freed here, never on the audio thread.
     fn drop_retired(&mut self) {
         while self.retired.pop().is_ok() {}
         while self.retired_rings.pop().is_ok() {}
+        self.mixer.drop_retired();
     }
 
     /// Whether the audio thread should poll: for a stalled microphone, a change of
-    /// the default microphone, or to bring back a wanted monitor that is not running.
-    fn needs_poll(&self, selection: &Selection) -> bool {
+    /// the default microphone, to bring back a wanted monitor that is not running,
+    /// or to look after the app capture while apps are shared (reopen a failed
+    /// one, notice a tap or record stream that died without an event).
+    fn needs_poll(&self, wanted: &Wanted) -> bool {
         self.watchdog.is_some()
             || self.default_input.is_some()
-            || (POLL_MONITOR && selection.monitor.is_some() && self.monitor.is_none())
+            || (POLL_MONITOR && wanted.selection.monitor.is_some() && self.monitor.is_none())
+            || !wanted.shares.is_empty()
     }
 
     /// No input callback since the previous poll.
@@ -687,6 +816,8 @@ pub(crate) struct InputSide {
     /// Monitor rings from the audio thread, and the replaced ones going back to be freed.
     monitor_rings: rtrb::Consumer<rtrb::Producer<f32>>,
     retired_rings: rtrb::Producer<rtrb::Producer<f32>>,
+    /// Shared app sound, added for the main output only.
+    mixer: Mixer,
     in_block: Arc<AtomicUsize>,
     callbacks: Arc<AtomicU32>,
     shared: Arc<Shared>,
@@ -715,6 +846,11 @@ impl InputSide {
         self.processor.set_params(self.shared.params.load());
         self.in_block.store(frames, Ordering::Relaxed);
         self.callbacks.fetch_add(1, Ordering::Relaxed);
+        // Shut unless the capture is lined up with the list of apps shared right now.
+        let committed = self.shared.shares_committed.load(Ordering::Relaxed);
+        let open = committed != 0 && committed == self.shared.shares_applied.load(Ordering::Relaxed);
+        let share_gain = if open { f32::from_bits(self.shared.share_gain.load(Ordering::Relaxed)) } else { 0.0 };
+        let sharing = self.mixer.begin(Instant::now(), frames, share_gain);
         let mut left = frames;
         while left > 0 {
             let n = left.min(self.scratch.len());
@@ -723,10 +859,14 @@ impl InputSide {
                 *out = s;
             }
             self.processor.process(buf);
-            for ring in std::iter::once(&mut self.output).chain(self.monitor.as_mut()) {
-                // Full ring = the output stalled (or a lost monitor); dropping is the only realtime-safe option.
-                let _ = ring.push_partial_slice(buf);
+            // Full ring = the output stalled (or a lost monitor); dropping is the only realtime-safe option.
+            if let Some(monitor) = self.monitor.as_mut() {
+                let _ = monitor.push_partial_slice(buf);
             }
+            if sharing {
+                self.mixer.add(buf);
+            }
+            let _ = self.output.push_partial_slice(buf);
             left -= n;
         }
         let (input, output) = self.processor.take_peaks();
@@ -936,6 +1076,60 @@ mod tests {
         // Neither the wanted rate nor 48 kHz: any supported rate beats failing.
         let cfg = choose_config(None, &[range(SampleFormat::I16, 44_100, 44_100)], 48_000).unwrap();
         assert_eq!((cfg.sample_format(), cfg.sample_rate()), (SampleFormat::I16, 44_100));
+    }
+
+    /// The call hears the shared app next to the voice; the monitor (the user's own
+    /// ears) gets the voice only, since the app already plays there.
+    #[test]
+    fn shared_app_sound_reaches_the_output_but_not_the_monitor() {
+        let shared = Arc::new(Shared::default());
+        shared.share_gain.store(1.0f32.to_bits(), Ordering::Relaxed);
+        let spotify = share::key(&["Spotify".into()]);
+        shared.shares_committed.store(spotify, Ordering::Relaxed);
+        shared.shares_applied.store(spotify, Ordering::Relaxed);
+        let (output, mut output_rx) = ring(48_000);
+        let (monitor, mut monitor_rx) = ring(48_000);
+        let (_monitor_rings, monitor_in) = RingBuffer::new(2);
+        let (retired_rings, _retired) = RingBuffer::new(2);
+        let (mixer, mut port) = share::mixer(48_000);
+        let mut side = InputSide {
+            processor: Processor::new(48_000.0, Chain::new(&[], 48_000.0)),
+            output,
+            monitor: Some(monitor),
+            monitor_rings: monitor_in,
+            retired_rings,
+            mixer,
+            in_block: Arc::default(),
+            callbacks: Arc::default(),
+            shared,
+            scratch: vec![0.0; 1024].into_boxed_slice(),
+        };
+        let (mut app, feed) = share::feed(48_000, 48_000);
+        assert!(port.add(feed));
+
+        // A 0.1 "voice" and a 0.5 "app", in callbacks larger than the scratch buffer.
+        for _ in 0..20 {
+            app.write(2048, std::iter::repeat_n(0.5, 2048));
+            side.process_mono(2048, std::iter::repeat_n(0.1, 2048));
+            // Callbacks any closer together would count as one delivery in pieces.
+            std::thread::sleep(Duration::from_millis(12));
+        }
+        let drain = |rx: &mut rtrb::Consumer<f32>| std::iter::from_fn(|| rx.pop().ok()).collect::<Vec<_>>();
+        let (to_call, to_ears) = (drain(&mut output_rx), drain(&mut monitor_rx));
+        assert_eq!(to_call.len(), 20 * 2048);
+        assert!(to_call[10 * 2048..].iter().all(|s| (s - 0.6).abs() < 1e-3), "voice + app: {}", to_call[10 * 2048]);
+        assert!(to_ears[10 * 2048..].iter().all(|s| (s - 0.1).abs() < 1e-3), "voice only: {}", to_ears[10 * 2048]);
+
+        // Another list is committed (here: nothing shared any more): the app is shut
+        // out within one callback, whatever its feed and the capture still do.
+        side.shared.shares_committed.store(0, Ordering::Relaxed);
+        for _ in 0..2 {
+            app.write(2048, std::iter::repeat_n(0.5, 2048));
+            side.process_mono(2048, std::iter::repeat_n(0.1, 2048));
+            std::thread::sleep(Duration::from_millis(12));
+        }
+        let to_call = drain(&mut output_rx);
+        assert!(to_call[2048..].iter().all(|s| (s - 0.1).abs() < 1e-3), "voice only once shut: {}", to_call[2048]);
     }
 
     /// Real-device smoke test of the output path (ring -> Reader -> cpal), no microphone needed.

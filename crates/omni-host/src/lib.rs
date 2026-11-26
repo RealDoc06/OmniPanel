@@ -106,7 +106,11 @@ impl std::ops::Deref for Host {
 impl Host {
     /// Load the config and start every subsystem. Call inside a tokio runtime.
     pub async fn start(options: HostOptions) -> Result<Host> {
-        let (config, repair_warning) = store::load_with_repair_report(&options.data_dir).context("loading config")?;
+        let (mut config, repair_warning) =
+            store::load_with_repair_report(&options.data_dir).context("loading config")?;
+        // Sharing never resumes by itself: a later call must not carry an app's
+        // sound because of a button pressed before the last quit (or crash).
+        config.settings.voice.shared_apps.clear();
         let http = || {
             reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -408,6 +412,8 @@ impl Host {
         }
         let voice_preset_changed = before.voice_presets != after.voice_presets;
         if old.voice != new.voice || voice_preset_changed {
+            // Stopped means stopped now, not when the voice worker gets to it.
+            self.voice.commit_shares(&new.voice.shared_apps);
             self.apply_voice();
         }
         self.refresh_sessions();
@@ -533,6 +539,22 @@ impl Host {
                     voice.preset_id = next.to_string();
                     voice.enabled = true;
                 }
+                VoiceOp::ToggleShareApp { app } | VoiceOp::ShareApp { app } | VoiceOp::UnshareApp { app } => {
+                    let app = app.trim();
+                    let on = match op {
+                        VoiceOp::ToggleShareApp { .. } => !voice.shares(app),
+                        VoiceOp::ShareApp { .. } => true,
+                        _ => false,
+                    };
+                    if app.is_empty() {
+                        bail!("choose an app to share");
+                    }
+                    if let Some(reason) = omni_voice::share_unsupported().filter(|_| on) {
+                        bail!("{reason}");
+                    }
+                    voice.set_shared(app, on);
+                    message = Some(if on { format!("Sharing {app}") } else { format!("Stopped sharing {app}") });
+                }
             }
             if matches!(op, VoiceOp::SetPreset { .. } | VoiceOp::Cycle { .. }) {
                 message = name_of(&voice.preset_id);
@@ -637,7 +659,10 @@ async fn voice_worker(host: Host) {
         host.voice_dirty.notified().await;
         let closing = host.closing.load(Ordering::Relaxed);
         let mut settings = host.config().settings.voice.clone();
-        settings.enabled &= !closing;
+        if closing {
+            settings.enabled = false;
+            settings.shared_apps.clear();
+        }
         let presets = host.voice_presets();
         let preset = presets.iter().find(|p| p.id == settings.preset_id).unwrap_or(&presets[0]).clone();
         let engine = host.clone();

@@ -3,7 +3,8 @@
 //!
 //! Backends:
 //! - macOS: CoreAudio for output/mic, Core Audio process taps (macOS 14.2+) for per-app
-//!   volume and output device. Another app's microphone cannot be changed.
+//!   volume and output device, and for [`capture`] (hearing an app without muting it).
+//!   Another app's microphone cannot be changed.
 //! - Windows: WASAPI (`IAudioEndpointVolume`, `ISimpleAudioVolume` per session). No
 //!   per-app devices yet.
 //! - Linux: PulseAudio / PipeWire through `pactl`
@@ -19,6 +20,10 @@ pub use omni_core::{
 mod macos;
 #[cfg(target_os = "macos")]
 use macos::Platform;
+/// Listening to apps without changing how they play (macOS), for sharing app
+/// sound into the voice output.
+#[cfg(target_os = "macos")]
+pub use macos::capture;
 
 #[cfg(windows)]
 mod wasapi;

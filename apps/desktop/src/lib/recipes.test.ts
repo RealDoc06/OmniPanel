@@ -21,6 +21,8 @@ test("ranks the obvious entry first", () => {
   assert.equal(first("mute my mic"), "mic-mute");
   assert.equal(first("shortcut"), "press-keys");
   assert.equal(first("open spotify"), "open:Spotify");
+  assert.equal(first("share spotify"), "share:Spotify");
+  assert.equal(first("hear my music on a call"), "share-app");
 });
 
 test("tells recipe labels from typed ones", () => {
@@ -40,6 +42,13 @@ test("search requires every word and only includes apps while searching", () => 
 });
 
 const button = (action: Action): Control["kind"] => ({ type: "button", action });
+
+test("share buttons are labelled after their app and what they do", () => {
+  const share = (type: "toggleShareApp" | "unshareApp", app: string) => button({ type: "voice", op: { type, app } });
+  const style = applyAutoLabel({ ...emptyStyle(), label: "Share app" }, share("toggleShareApp", ""), share("toggleShareApp", "Spotify"));
+  assert.equal(style.label, "Share Spotify");
+  assert.equal(applyAutoLabel(style, share("toggleShareApp", "Spotify"), share("unshareApp", "Spotify")).label, "Stop sharing Spotify");
+});
 
 test("automatic labels follow app, website and navigation targets across repeated edits", () => {
   const emptyApp = button({ type: "openApp", app: "", args: [] });
@@ -93,9 +102,9 @@ test("app device actions read as plain sentences and light up only for a device"
   assert.equal(liveStateTitle(button(to("output", null))), null);
 });
 
-test("an app that only records gets no mute or volume entries", () => {
+test("an app that only records gets no mute, volume or share entries", () => {
   const obs: AppAudio = { ...spotify, id: "obs", name: "OBS", playing: false, output: null, input: { type: "default" } };
-  assert.deepEqual(dynamicRecipes([], [spotify, obs]).map((r) => r.id), ["mute:Spotify", "slider:Spotify"]);
+  assert.deepEqual(dynamicRecipes([], [spotify, obs]).map((r) => r.id), ["mute:Spotify", "slider:Spotify", "share:Spotify"]);
 });
 
 test("a device is found by id or by name, like the host finds it", () => {

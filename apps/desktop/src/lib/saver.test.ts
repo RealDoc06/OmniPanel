@@ -36,6 +36,8 @@ const SETTINGS: Settings = {
     outputGainDb: 0,
     noiseGate: false,
     gateThresholdDb: -50,
+    sharedApps: [],
+    shareGainDb: 0,
   },
 };
 

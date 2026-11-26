@@ -371,6 +371,9 @@ pub struct VoiceSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     #[ts(optional)]
     pub gate_threshold_db: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[ts(optional)]
+    pub share_gain_db: Option<f32>,
 }
 
 impl VoiceSettingsPatch {
@@ -405,6 +408,9 @@ impl VoiceSettingsPatch {
         }
         if let Some(value) = self.gate_threshold_db {
             settings.gate_threshold_db = value;
+        }
+        if let Some(value) = self.share_gain_db {
+            settings.share_gain_db = value;
         }
     }
 }

@@ -8,4 +8,18 @@ virtualMic: string | null,
 /**
  * Shown when no virtual cable is installed (install hint per OS).
  */
-hint: string | null, };
+hint: string | null, 
+/**
+ * Why app sound cannot be shared into the microphone on this system
+ * (`None` = it can).
+ */
+shareUnsupported: string | null, 
+/**
+ * Why the shared apps are not being heard right now, e.g. a missing permission.
+ */
+shareError: string | null, 
+/**
+ * Shared apps with nothing to capture right now: not open, or (Linux) not
+ * playing anything yet. They are heard as soon as they play.
+ */
+shareWaiting: Array<string>, };

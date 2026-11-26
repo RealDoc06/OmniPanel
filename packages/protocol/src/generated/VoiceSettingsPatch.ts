@@ -3,4 +3,4 @@
 /**
  * Changed settings fields only; omitted fields retain their current values.
  */
-export type VoiceSettingsPatch = { enabled?: boolean, presetId?: string, inputDevice?: string | null, outputDevice?: string | null, monitor?: boolean, monitorDevice?: string | null, inputGainDb?: number, outputGainDb?: number, noiseGate?: boolean, gateThresholdDb?: number, };
+export type VoiceSettingsPatch = { enabled?: boolean, presetId?: string, inputDevice?: string | null, outputDevice?: string | null, monitor?: boolean, monitorDevice?: string | null, inputGainDb?: number, outputGainDb?: number, noiseGate?: boolean, gateThresholdDb?: number, shareGainDb?: number, };

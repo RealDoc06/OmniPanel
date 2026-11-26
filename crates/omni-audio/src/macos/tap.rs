@@ -49,21 +49,21 @@ use crate::{AudioError, Endpoint, Result};
 /// Gain ramp time constant; long enough to avoid zipper noise and clicks.
 const SMOOTHING_SECS: f64 = 0.015;
 /// UID prefix of our aggregates, used to find leftovers of a crashed run.
-const UID_PREFIX: &str = "dev.omnipanel.tap.";
+pub(super) const UID_PREFIX: &str = "dev.omnipanel.tap.";
 /// IO silence after which a tap counts as stalled (generous for start-up and Bluetooth warm-up).
 const STALL: Duration = Duration::from_secs(2);
 
-type CreateTap = unsafe extern "C-unwind" fn(*const CATapDescription, *mut AudioObjectID) -> i32;
-type DestroyTap = unsafe extern "C-unwind" fn(AudioObjectID) -> i32;
+pub(super) type CreateTap = unsafe extern "C-unwind" fn(*const CATapDescription, *mut AudioObjectID) -> i32;
+pub(super) type DestroyTap = unsafe extern "C-unwind" fn(AudioObjectID) -> i32;
 
 /// `AudioHardwareCreateProcessTap` / `DestroyProcessTap`, resolved at runtime so the
 /// binary still launches on macOS releases without taps.
-struct TapApi {
-    create: CreateTap,
-    destroy: DestroyTap,
+pub(super) struct TapApi {
+    pub(super) create: CreateTap,
+    pub(super) destroy: DestroyTap,
 }
 
-fn api() -> Option<&'static TapApi> {
+pub(super) fn api() -> Option<&'static TapApi> {
     static API: OnceLock<Option<TapApi>> = OnceLock::new();
     API.get_or_init(|| {
         let create = ca::symbol(c"AudioHardwareCreateProcessTap")?;
@@ -433,7 +433,7 @@ fn input_stream_count(device: ObjectId) -> u32 {
 }
 
 /// A fresh aggregate can take a moment to come alive with all its input streams.
-fn wait_until_ready(aggregate: ObjectId, inputs: u32) -> bool {
+pub(super) fn wait_until_ready(aggregate: ObjectId, inputs: u32) -> bool {
     let ready = || {
         ca::get::<u32>(aggregate, ca::global(kAudioDevicePropertyDeviceIsAlive)).is_ok_and(|v| v != 0)
             && input_stream_count(aggregate) == inputs
