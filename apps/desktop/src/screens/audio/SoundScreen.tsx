@@ -74,7 +74,7 @@ function Mixer() {
   // Why a speaker or microphone cannot be chosen here (once, and not what the notice
   // above already says), or when a microphone select shows up.
   const deviceNotes = capabilities
-    ? [...new Set([capabilities.outputNote, capabilities.inputNote])].filter((n) => n !== null && n !== capabilities.note)
+    ? [...new Set([capabilities.outputNote, capabilities.inputNote])].filter((n) => n !== null && !capabilities.note?.includes(n))
     : [];
   if (capabilities?.perAppInput) deviceNotes.push("An app's microphone can be chosen while it is recording.");
 

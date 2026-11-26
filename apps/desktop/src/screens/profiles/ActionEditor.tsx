@@ -42,6 +42,7 @@ import {
   defaultAction,
   describeAction,
   isActionType,
+  findDevice,
   type ActionOf,
   type NameLookup,
 } from "../../lib/actions";
@@ -450,10 +451,12 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
   const supported = !capabilities || (output ? capabilities.perAppOutput : capabilities.perAppInput);
   const note = output ? capabilities?.outputNote : capabilities?.inputNote;
   const devices = (output ? mixer.data?.devices.outputs : mixer.data?.devices.inputs) ?? [];
+  // A device written by name (by hand, or by the assistant) is the one the host will pick.
+  const device = action.device === null ? null : (findDevice(devices, action.device)?.id ?? action.device);
   return (
     <>
       <Field label="App" compact>
-        <AppField value={action.app} onChange={(app) => onChange({ ...action, app })} />
+        <AppField value={action.app} recorders onChange={(app) => onChange({ ...action, app })} />
       </Field>
       <Field label="Change its" compact>
         <EnumSelect
@@ -467,7 +470,7 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
         <DeviceSelect
           ariaLabel={output ? "Play on" : "Record from"}
           devices={devices}
-          value={action.device === null ? { type: "default" } : { type: "device", id: action.device }}
+          value={device === null ? { type: "default" } : { type: "device", id: device }}
           onChange={(device) => onChange({ ...action, device })}
         />
       </Field>

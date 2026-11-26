@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -23,11 +24,19 @@ use crate::{
 
 const NORM: f32 = 65536.0;
 const MISSING: &str = "pactl not found: install pulseaudio-utils (works with PipeWire via pipewire-pulse)";
+const TOO_OLD: &str = "per-app volume and devices need pactl 16 or newer (pulseaudio-utils)";
 /// pactl waits forever on a stuck sound server.
 const PACTL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an app gets to arrive on the device it is moved to, how often that is
+/// checked, and after how long the move is repeated (see `set_app_device`).
+const MOVE_TIMEOUT: Duration = Duration::from_millis(2500);
+const MOVE_POLL: Duration = Duration::from_millis(100);
+const MOVE_REPEAT: Duration = Duration::from_millis(500);
 
 pub(crate) struct Platform {
     installed: bool,
+    /// The installed pactl turned out to have no JSON output (found on first listing).
+    too_old: AtomicBool,
     /// The latest `apps()` listing: where the streams and devices of a found app are.
     latest: Mutex<Listing>,
 }
@@ -178,6 +187,16 @@ struct App {
     recording: Vec<u32>,
 }
 
+impl App {
+    /// Where the app plays (records) and the streams doing it.
+    fn side(&self, direction: Endpoint) -> (&Option<AppRoute>, &[u32]) {
+        match direction {
+            Endpoint::Output => (&self.audio.output, &self.playback),
+            Endpoint::Input => (&self.audio.input, &self.recording),
+        }
+    }
+}
+
 /// Apps (sorted by name) and the devices they can be sent to.
 #[derive(Debug, Default)]
 struct Listing {
@@ -272,11 +291,25 @@ impl Platform {
         let json = pactl(&["-f", "json", "list"]).map_err(|e| match e {
             // JSON output arrived with PulseAudio 15.99 / 16.
             AudioError::Backend(m) if m.contains("unrecognized option") || m.contains("invalid option") => {
-                AudioError::Unsupported("per-app volume needs pactl 16 or newer (pulseaudio-utils)".into())
+                self.too_old.store(true, Relaxed);
+                AudioError::Unsupported(TOO_OLD.into())
             }
             e => e,
         })?;
         parse_listing(&json)
+    }
+
+    /// Marks the default sink and source, which the listing does not name.
+    fn with_defaults(&self, mut devices: AudioDevices) -> Result<AudioDevices> {
+        let info = pactl(&["-f", "json", "info"])?;
+        let info: ServerInfo = serde_json::from_str(&info).unwrap_or_default();
+        for device in &mut devices.outputs {
+            device.is_default = device.id == info.default_sink_name;
+        }
+        for device in &mut devices.inputs {
+            device.is_default = device.id == info.default_source_name;
+        }
+        Ok(devices)
     }
 
     /// Indices of the app's playback streams, from the listing that found it.
@@ -297,17 +330,22 @@ fn pactl_installed() -> bool {
 
 impl Backend for Platform {
     fn new() -> Self {
-        Platform { installed: pactl_installed(), latest: Mutex::default() }
+        Platform { installed: pactl_installed(), too_old: AtomicBool::new(false), latest: Mutex::default() }
     }
 
     fn capabilities(&self) -> AudioCapabilities {
-        let note = (!self.installed).then(|| MISSING.to_string());
+        let note = match (self.installed, self.too_old.load(Relaxed)) {
+            (false, _) => Some(MISSING.to_string()),
+            (true, true) => Some(TOO_OLD.to_string()),
+            (true, false) => None,
+        };
+        let works = note.is_none();
         AudioCapabilities {
-            per_app_volume: self.installed,
+            per_app_volume: works,
             note: note.clone(),
-            per_app_output: self.installed,
+            per_app_output: works,
             output_note: note.clone(),
-            per_app_input: self.installed,
+            per_app_input: works,
             input_note: note,
         }
     }
@@ -356,40 +394,63 @@ impl Backend for Platform {
     }
 
     fn devices(&self) -> Result<AudioDevices> {
-        let mut devices = self.list()?.devices;
-        let info = pactl(&["-f", "json", "info"])?;
-        let info: ServerInfo = serde_json::from_str(&info).unwrap_or_default();
-        for device in &mut devices.outputs {
-            device.is_default = device.id == info.default_sink_name;
-        }
-        for device in &mut devices.inputs {
-            device.is_default = device.id == info.default_source_name;
-        }
-        Ok(devices)
+        self.with_defaults(self.list()?.devices)
     }
 
     fn set_app_device(&self, app: &str, direction: Endpoint, device: Option<&str>) -> Result<()> {
-        let listing = self.list()?;
-        let app = best_match(&listing.apps, app, |a| &a.audio.id, |a| &a.audio.name)
+        let Listing { apps, devices } = self.list()?;
+        let app = best_match(&apps, app, |a| &a.audio.id, |a| &a.audio.name)
             .ok_or_else(|| AudioError::AppNotFound(app.into()))?;
-        let (streams, devices, verb, idle) = match direction {
-            Endpoint::Output => (&app.playback, &listing.devices.outputs, "move-sink-input", "playing"),
-            Endpoint::Input => (&app.recording, &listing.devices.inputs, "move-source-output", "recording"),
+        let (verb, idle) = match direction {
+            Endpoint::Output => ("move-sink-input", "playing"),
+            Endpoint::Input => ("move-source-output", "recording"),
         };
+        let mut streams = app.side(direction).1.to_vec();
         if streams.is_empty() {
             // Nothing to move, and nowhere to keep the choice for later.
             return Err(AudioError::Backend(format!("{} is not {idle} anything", app.audio.name)));
         }
-        let device = match device {
-            Some(query) => find_device(devices, query)?.id.as_str(),
-            None => target(direction).1,
+        let devices = self.with_defaults(devices)?;
+        let devices = match direction {
+            Endpoint::Output => &devices.outputs,
+            Endpoint::Input => &devices.inputs,
         };
-        // One call per stream: when one fails (its stream just ended), the ones before it
-        // have moved, and the next listing shows the app as it is.
-        for index in streams {
-            pactl(&[verb, &index.to_string(), device])?;
+        // The default by name too: where the default input is a monitor (no microphone
+        // connected), `@DEFAULT_SOURCE@` would put the app on a device it is not listed
+        // with, out of reach of the next choice.
+        let device = match device {
+            Some(query) => find_device(devices, query)?,
+            None => devices.iter().find(|d| d.is_default).ok_or_else(|| {
+                AudioError::Backend(format!("the system default is not a device {} can use", app.audio.name))
+            })?,
+        };
+        // pactl reports a move as done when the sound server took the request. PipeWire
+        // now and then applies it a moment later, or not at all (seen when the stream
+        // was just moved, and while other clients come and go). So watch the app
+        // arrive, and ask again while it does not.
+        let deadline = Instant::now() + MOVE_TIMEOUT;
+        loop {
+            // One call per stream: when one fails (its stream just ended), the ones
+            // before it have moved, and the next listing shows the app as it is.
+            for index in &streams {
+                pactl(&[verb, &index.to_string(), &device.id])?;
+            }
+            let asked = Instant::now();
+            while asked.elapsed() < MOVE_REPEAT {
+                let now = self.list()?.apps;
+                let Some(now) = now.into_iter().find(|a| a.audio.id == app.audio.id) else { return Ok(()) };
+                let (route, left) = now.side(direction);
+                if left.is_empty() || matches!(route, Some(AppRoute::Device { id }) if *id == device.id) {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    let (app, device) = (&app.audio.name, &device.name);
+                    return Err(AudioError::Backend(format!("the sound server did not move {app} to {device}")));
+                }
+                streams = left.to_vec();
+                std::thread::sleep(MOVE_POLL);
+            }
         }
-        Ok(())
     }
 }
 
@@ -542,14 +603,14 @@ mod tests {
         let platform = Platform::new();
         let pacat = || platform.apps().unwrap().into_iter().find(|a| a.id == "pacat");
         let on = |output: &str, input: &str| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let device = |id: &str| Some(AppRoute::Device { id: id.into() });
                 let devices = pacat().map(|a| (a.output, a.input));
                 if devices == Some((device(output), device(input))) {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "pacat is on {devices:?}, not on {output} / {input}");
+                assert!(Instant::now() < deadline, "pacat is on {devices:?}, not on {output} / {input}");
                 std::thread::sleep(Duration::from_millis(50));
             }
         };
@@ -572,6 +633,19 @@ mod tests {
         platform.set_app_device("pacat", Endpoint::Output, None).unwrap();
         platform.set_app_device("pacat", Endpoint::Input, None).unwrap();
         on("omni_test_a", "omni_test_mic_a");
+
+        // PipeWire drops the second of two moves of a stream in quick succession about
+        // one time in ten (pactl reports both as done): the app must end up on the
+        // device all the same.
+        let recording = platform.list().unwrap().apps.into_iter().find(|a| a.audio.id == "pacat").unwrap().recording;
+        for round in 0..40 {
+            for index in &recording {
+                pactl(&["move-source-output", &index.to_string(), "omni_test_mic_a"]).unwrap();
+            }
+            platform.set_app_device("pacat", Endpoint::Input, Some("omni_test_mic_b")).unwrap();
+            let moved = Some(AppRoute::Device { id: "omni_test_mic_b".into() });
+            assert_eq!(pacat().and_then(|a| a.input), moved, "round {round}");
+        }
     }
 
     #[test]

@@ -280,8 +280,9 @@ impl State {
         let master = self.master_gain(device);
         for (id, tap) in &self.taps {
             let level = self.desired.get(id).map(|w| w.level).unwrap_or_default();
-            // The software master stands in for the default output's controls only.
-            tap.set_gain(level.gain() * if tap.device == device { master } else { 1.0 });
+            // The software master stands in for the default output's controls only: not
+            // for an app played on another device than the one it is tapped on.
+            tap.set_gain(level.gain() * if tap.device == tap.from { master } else { 1.0 });
         }
         if let Some(tap) = &self.master_tap {
             tap.set_gain(master);
@@ -641,11 +642,16 @@ impl Platform {
         }
         let other = synced.failures.pop().map(|(_, e)| e);
         state.settle(other.as_ref(), synced.skipped);
-        let busy = state.needs_poll();
+        // A level or device held without a tap (an app pinned to what is the default
+        // output right now) still needs the worker: it hears when that changes.
+        let (busy, held) = (state.needs_poll(), !state.desired.is_empty());
         drop(state);
         retire(synced.retired);
-        if busy {
-            self.worker()?.send(Msg::Wake).ok();
+        if busy || held {
+            let wake = self.worker()?;
+            if busy {
+                wake.send(Msg::Wake).ok();
+            }
         }
         own.or(other).map_or(Ok(()), Err)
     }
@@ -666,7 +672,9 @@ impl Platform {
                         let _ = wake.send(Msg::Wake);
                     });
                 }
-                Err(AudioError::Permission("approve the System Audio Recording prompt to change volumes".into()))
+                Err(AudioError::Permission(
+                    "approve the System Audio Recording prompt to change app volumes and speakers".into(),
+                ))
             }
         }
     }
@@ -841,7 +849,10 @@ impl Backend for Platform {
             Some(query) => Some(find_device(&device::outputs()?, query)?.id.clone()),
             None => None,
         };
-        self.update_app(&self.find(app)?, |wanted| wanted.output = output)
+        // From a fresh listing, unlike the levels of a dragged slider: an app started
+        // since the last one must not lose to an older, looser match.
+        let app = find_app(&self.apps()?, app).cloned().ok_or_else(|| AudioError::AppNotFound(app.into()))?;
+        self.update_app(&app, |wanted| wanted.output = output)
     }
 }
 
@@ -1227,6 +1238,58 @@ mod tests {
         platform.set_app_device("afplay", Endpoint::Output, None).unwrap();
         platform.set_app_volume(&platform.find("afplay").unwrap(), 1.0).unwrap();
         assert!(!platform.shared.lock().has_taps());
+    }
+
+    /// Makes a device the system default output until dropped.
+    struct DefaultOutput(ObjectId);
+
+    impl DefaultOutput {
+        fn switch_to(device: ObjectId) -> Self {
+            let previous = DefaultOutput(device::default_device(Endpoint::Output).unwrap());
+            ca::set(ca::SYSTEM, ca::global(kAudioHardwarePropertyDefaultOutputDevice), &device).unwrap();
+            previous
+        }
+    }
+
+    impl Drop for DefaultOutput {
+        fn drop(&mut self) {
+            let _ = ca::set(ca::SYSTEM, ca::global(kAudioHardwarePropertyDefaultOutputDevice), &self.0);
+        }
+    }
+
+    /// An app pinned to an output plays there after the default output changed, also
+    /// when the pin needed no tap until then (it was the default output): the worker
+    /// is what notices. `afplay` keeps the device it opened, so a second one is
+    /// started after the switch. Makes another device the system default output for
+    /// about two seconds.
+    #[test]
+    #[ignore]
+    fn pinned_app_stays_when_the_default_output_changes() {
+        require_permission();
+        let platform = Platform::new();
+        let (default, others) = outputs(&platform);
+        let Some((other, info)) = others.first() else {
+            eprintln!("skipped: needs a second output device");
+            return;
+        };
+        let first = Tone::play();
+        first.object();
+        platform.set_app_device("afplay", Endpoint::Output, Some(&device::uid(default).unwrap())).unwrap();
+        assert!(!platform.shared.lock().has_taps(), "on the default output it plays natively");
+
+        let switched = DefaultOutput::switch_to(*other);
+        eprintln!("default output -> {}", info.name);
+        drop(first);
+        let second = Tone::play();
+        second.object();
+        wait_for("the tap that keeps it on its speaker", || {
+            tap_devices(&platform, "afplay") == Some((*other, default))
+        });
+        assert!((gain_of(|| tap_peaks(&platform, "afplay")) - 1.0).abs() < 0.02);
+        drop(switched);
+        wait_for("native playback again", || !platform.shared.lock().has_taps());
+        platform.set_app_device("afplay", Endpoint::Output, None).unwrap();
+        assert!(platform.app_levels().is_empty());
     }
 
     /// A saved output device waits for its app like a saved level does.

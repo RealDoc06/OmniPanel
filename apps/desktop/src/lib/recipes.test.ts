@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Action, AppAudio, Control } from "@omni/protocol";
-import { ACTION_TYPES, describeAction, liveStateTitle } from "./actions.ts";
+import { ACTION_TYPES, describeAction, findDevice, liveStateTitle } from "./actions.ts";
 import { emptyStyle } from "./controls.ts";
 import { RECIPES, applyAutoLabel, applyPick, dynamicRecipes, isAutoLabel, searchRecipes } from "./recipes.ts";
 
@@ -96,4 +96,17 @@ test("app device actions read as plain sentences and light up only for a device"
 test("an app that only records gets no mute or volume entries", () => {
   const obs: AppAudio = { ...spotify, id: "obs", name: "OBS", playing: false, output: null, input: { type: "default" } };
   assert.deepEqual(dynamicRecipes([], [spotify, obs]).map((r) => r.id), ["mute:Spotify", "slider:Spotify"]);
+});
+
+test("a device is found by id or by name, like the host finds it", () => {
+  const devices = [
+    { id: "alsa_output.usb-0", name: "Scarlett Solo", isDefault: true, isVirtual: false },
+    { id: "bluez_output.1", name: "WH-1000XM4 Headphones", isDefault: false, isVirtual: false },
+  ];
+  const id = (query: string) => findDevice(devices, query)?.id;
+  assert.equal(id("BLUEZ_OUTPUT.1"), "bluez_output.1");
+  assert.equal(id("scarlett solo"), "alsa_output.usb-0");
+  assert.equal(id(" Headphones "), "bluez_output.1");
+  assert.equal(id("HDMI"), undefined);
+  assert.equal(id(""), undefined);
 });

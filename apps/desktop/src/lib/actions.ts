@@ -3,6 +3,7 @@
 import type {
   Action,
   AppAudio,
+  AudioDeviceInfo,
   AudioDirection,
   Control,
   Effect,
@@ -244,6 +245,20 @@ export interface NameLookup {
 
 /** An app that records without playing anything: it has a microphone but no volume or speaker. */
 export const recordsOnly = (app: AppAudio): boolean => app.output === null && app.input !== null;
+
+/**
+ * The device an `appDevice` action means, by id or by name like the host matches it
+ * (`best_match` in crates/omni-audio/src/lib.rs: id, then exact name, then part of a name).
+ */
+export function findDevice(devices: readonly AudioDeviceInfo[], query: string): AudioDeviceInfo | undefined {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") return undefined;
+  return (
+    devices.find((d) => d.id.toLowerCase() === needle) ??
+    devices.find((d) => d.name.toLowerCase() === needle) ??
+    devices.find((d) => d.name.toLowerCase().includes(needle))
+  );
+}
 
 /** Whether the action, or one nested in it, chooses an app's device. */
 export function usesAppDevice(action: Action | null): boolean {

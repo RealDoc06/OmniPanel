@@ -1,7 +1,7 @@
 // Picks an audio device for one app (`appDevice` actions and the Sound screen's app
 // rows), plus the id-to-name lookup action summaries use.
 import type { Action, AppRoute, AudioDeviceInfo } from "@omni/protocol";
-import { usesAppDevice } from "../lib/actions";
+import { findDevice, usesAppDevice } from "../lib/actions";
 import { api } from "../lib/backend";
 import { useResource } from "../lib/hooks";
 import { Select } from "./ui";
@@ -30,17 +30,17 @@ export function DeviceSelect({
       ariaLabel={ariaLabel}
       className={className}
       value={value.type === "default" ? "" : value.type === "device" ? value.id : NO_OPTION}
-      placeholder={value.type === "several" ? "Several devices" : "Not connected"}
+      placeholder={value.type === "device" ? `Not connected: ${value.id}` : "Several devices"}
       options={[{ value: "", label: "System default" }, ...options]}
       onChange={(id) => onChange(id || null)}
     />
   );
 }
 
-/** Device names by id for action summaries. Asks the mixer only when `action` chooses a device. */
-export function useDeviceName(action: Action | null): (id: string) => string | undefined {
+/** Device names for action summaries, by id or as written. Asks the mixer only when `action` chooses a device. */
+export function useDeviceName(action: Action | null): (device: string) => string | undefined {
   const needed = usesAppDevice(action);
   const mixer = useResource(() => (needed ? api.getMixer() : Promise.resolve(null)), [needed]);
   const devices = mixer.data?.devices;
-  return (id) => [...(devices?.outputs ?? []), ...(devices?.inputs ?? [])].find((d) => d.id === id)?.name;
+  return (device) => findDevice([...(devices?.outputs ?? []), ...(devices?.inputs ?? [])], device)?.name;
 }

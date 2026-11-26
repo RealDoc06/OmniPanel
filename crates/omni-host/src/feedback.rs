@@ -63,17 +63,17 @@ impl StateContext {
             Action::Volume { target, op: VolumeOp::ToggleMute | VolumeOp::Mute | VolumeOp::Unmute } => {
                 self.volume(target).map_or((false, true), |v| (v.muted, false))
             }
-            // Lit while the app is on that device, matched like the action matches it.
-            // The system default is no device to be seen on: it runs but never lights up.
+            // Lit while the app plays on (records from) that device, matched like the
+            // action matches it. Not while the device is unplugged, even if the app is
+            // kept for it, and never for the system default: that is no device to be on.
             Action::AppDevice { app, direction, device } => {
                 let app = find_app(&self.audio.apps, app);
                 let (route, devices) = match direction {
                     AudioDirection::Output => (app.and_then(|a| a.output.as_ref()), &self.audio.devices.outputs),
                     AudioDirection::Input => (app.and_then(|a| a.input.as_ref()), &self.audio.devices.inputs),
                 };
-                // A device that is not connected is still the one a saved id names.
-                let wanted = device.as_deref().map(|d| find_device(devices, d).map_or(d, |found| found.id.as_str()));
-                (matches!((route, wanted), (Some(AppRoute::Device { id }), Some(wanted)) if id == wanted), false)
+                let wanted = device.as_deref().and_then(|d| find_device(devices, d).ok());
+                (matches!((route, wanted), (Some(AppRoute::Device { id }), Some(wanted)) if *id == wanted.id), false)
             }
             Action::Voice { op } => match op {
                 VoiceOp::SetPreset { preset_id } => (self.voice.enabled && self.voice.preset_id == *preset_id, false),
@@ -113,9 +113,10 @@ impl StateContext {
         match target {
             VolumeTarget::Master => self.audio.master,
             VolumeTarget::Mic => self.audio.mic,
-            VolumeTarget::App { app } => {
-                find_app(&self.audio.apps, app).map(|a| VolumeState { volume: a.volume, muted: a.muted })
-            }
+            // An app that only records has no volume: its controls show as unavailable.
+            VolumeTarget::App { app } => find_app(&self.audio.apps, app)
+                .filter(|a| a.output.is_some() || a.input.is_none())
+                .map(|a| VolumeState { volume: a.volume, muted: a.muted }),
             VolumeTarget::ObsInput { input } => {
                 let volume = *self.obs.input_volume.get(input)?;
                 Some(VolumeState { volume, muted: self.obs.input_muted.get(input).copied().unwrap_or(false) })
@@ -133,7 +134,7 @@ fn needs_audio(control: &Control) -> bool {
             let mut needed = false;
             action.walk(&mut |a| match a {
                 Action::Volume { target, .. } => needed |= is_audio(target),
-                Action::AppDevice { .. } => needed = true,
+                Action::AppDevice { device: Some(_), .. } => needed = true,
                 _ => {}
             });
             needed
@@ -146,7 +147,7 @@ fn needs_audio(control: &Control) -> bool {
 fn needs_devices(control: &Control) -> bool {
     let mut needed = false;
     if let ControlKind::Button { action: Some(action) } = &control.kind {
-        action.walk(&mut |a| needed |= matches!(a, Action::AppDevice { .. }));
+        action.walk(&mut |a| needed |= matches!(a, Action::AppDevice { device: Some(_), .. }));
     }
     needed
 }
@@ -321,16 +322,26 @@ mod tests {
         assert!(!lit(&cx, &to(AudioDirection::Input, Some("headphones"))), "it is not recording");
         // Never disabled: where it cannot work, pressing it says why.
         assert!(!cx.state_for(&to(AudioDirection::Input, None), "p", "pg").disabled);
-        let button = to(AudioDirection::Output, None);
-        assert!(needs_audio(&button) && needs_devices(&button));
+        // Only a button that can light up keeps the audio readings coming.
+        let headphones = to(AudioDirection::Output, Some("headphones"));
+        assert!(needs_audio(&headphones) && needs_devices(&headphones));
+        let default = to(AudioDirection::Output, None);
+        assert!(!needs_audio(&default) && !needs_devices(&default));
 
         // Split across devices, the app is on none of them.
         cx.audio.apps[0].output = Some(AppRoute::Several);
-        assert!(!lit(&cx, &to(AudioDirection::Output, Some("bluez_output.1"))));
-        // Unplugged: the saved id still names the device the app is kept on.
+        assert!(!lit(&cx, &headphones));
+        // Unplugged: the app is kept for the headphones but does not play there now.
         cx.audio.apps[0].output = Some(AppRoute::Device { id: "bluez_output.1".into() });
         cx.audio.devices.outputs.clear();
-        assert!(lit(&cx, &to(AudioDirection::Output, Some("bluez_output.1"))));
+        assert!(!lit(&cx, &to(AudioDirection::Output, Some("bluez_output.1"))));
+
+        // An app that only records has a microphone, and no volume to show.
+        cx.audio.apps[0].output = None;
+        cx.audio.apps[0].input = Some(AppRoute::Default);
+        let mute =
+            button(Action::Volume { target: VolumeTarget::App { app: "spotify".into() }, op: VolumeOp::ToggleMute });
+        assert!(cx.state_for(&mute, "p", "pg").disabled);
     }
 
     #[test]

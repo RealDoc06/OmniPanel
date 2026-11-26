@@ -229,14 +229,16 @@ impl Tap {
         };
         // The tap listens to the stream holding the tapped device's left channel.
         let tapped = stereo_channels(from);
-        let (stream, first) = output_stream(from, tapped[0]);
+        let (stream, first, channels) = output_stream(from, tapped[0]);
         tap.stream = stream;
         let mapping = if from == device {
             Mapping::Straight { offset: first }
         } else {
-            // A right channel outside that stream (or a mono one) repeats the left.
-            let right = tapped[1].checked_sub(first).unwrap_or(tapped[0] - first);
-            Mapping::Stereo { from: [tapped[0] - first, right], to: stereo_channels(device) }
+            // A right channel outside that stream (another stream, or a mono device)
+            // repeats the left.
+            let left = tapped[0].saturating_sub(first);
+            let right = tapped[1].checked_sub(first).filter(|&right| right < channels).unwrap_or(left);
+            Mapping::Stereo { from: [left, right], to: stereo_channels(device) }
         };
         // On any error below, `Drop` releases whatever was created so far.
         let description = tap.description(None);
@@ -453,9 +455,9 @@ fn stereo_channels(device: ObjectId) -> [u32; 2] {
     ca::get::<[u32; 2]>(device, address).unwrap_or([1, 2]).map(|channel| channel.saturating_sub(1))
 }
 
-/// The output stream holding the device's channel `channel` (0-based): its index
-/// and first channel.
-fn output_stream(device: ObjectId, channel: u32) -> (u32, u32) {
+/// The output stream holding the device's channel `channel` (0-based): its index,
+/// first channel and channel count.
+fn output_stream(device: ObjectId, channel: u32) -> (u32, u32, u32) {
     let output = device::scope(Endpoint::Output);
     let streams = ca::get_list::<u32>(device, ca::prop(kAudioDevicePropertyStreams, output, MAIN)).unwrap_or_default();
     let mut first = 0;
@@ -463,11 +465,11 @@ fn output_stream(device: ObjectId, channel: u32) -> (u32, u32) {
         let channels = ca::get::<AudioStreamBasicDescription>(stream, ca::global(kAudioStreamPropertyVirtualFormat))
             .map_or(0, |f| f.mChannelsPerFrame);
         if channel < first + channels {
-            return (index as u32, first);
+            return (index as u32, first, channels);
         }
         first += channels;
     }
-    (0, 0)
+    (0, 0, 0)
 }
 
 /// Checks the output format and fixes how the IOProc maps the tap.
