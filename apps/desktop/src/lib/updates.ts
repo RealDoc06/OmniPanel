@@ -7,8 +7,14 @@ import { flushAll } from "./store";
 
 export const useUpdate = create<{ status: UpdateStatus }>()(() => ({ status: { state: "idle" } }));
 
-await updater.onStatus((status) => useUpdate.setState({ status }));
-useUpdate.setState({ status: await updater.status() });
+// A status pushed while the first one is being fetched is the newer of the two.
+let pushed = false;
+await updater.onStatus((status) => {
+  pushed = true;
+  useUpdate.setState({ status });
+});
+const initial = await updater.status();
+if (!pushed) useUpdate.setState({ status: initial });
 
 /** A newer version is known and not installed yet. */
 export const useUpdateVersion = () => useUpdate(({ status }) => ("version" in status ? status.version : null));

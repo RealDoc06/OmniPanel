@@ -57,13 +57,8 @@ jobs:
           # tauri.conf.json; apps refuse updates signed with any other key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          # Optional signing / notarization (set these repository secrets to enable):
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # No Apple signing or notarization. To add it, pass Tauri's APPLE_* variables here
+          # together with their secrets: an empty APPLE_CERTIFICATE fails the macOS build.
         with:
           projectPath: apps/desktop
           tauriScript: pnpm tauri

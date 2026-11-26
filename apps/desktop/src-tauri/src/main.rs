@@ -9,6 +9,7 @@ mod tray;
 mod updater;
 mod window;
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -22,6 +23,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 const HIDDEN_ARG: &str = "--hidden";
 /// Quit waits this long at most for the engine to close decks and audio.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The data folder lock, held from start until `RunEvent::Exit`.
+type DataLock = Mutex<Option<store::DataDirLock>>;
 
 #[derive(Default)]
 struct QuitState {
@@ -104,7 +108,14 @@ fn main() {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => window::show(app),
         // tao 0.37 sends Dock Quit directly here, without an ExitRequested to defer.
-        RunEvent::Exit => shutdown_engine(app),
+        RunEvent::Exit => {
+            shutdown_engine(app);
+            // Restarting into an update starts the new process while this one is
+            // still alive (macOS waits for it to launch): it must find the folder free.
+            if let Some(lock) = app.try_state::<DataLock>() {
+                lock.lock().unwrap().take();
+            }
+        }
         _ => {}
     });
 }
@@ -126,7 +137,7 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     let data_dir = app.path().app_data_dir()?;
     match store::lock(&data_dir) {
         Ok(Some(lock)) => {
-            app.manage(lock);
+            app.manage(DataLock::new(Some(lock)));
         }
         // Another OmniPanel owns the data folder: both started before
         // single-instance could tell. Leave without a trace (`app.exit` would
