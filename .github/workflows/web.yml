@@ -1,14 +1,15 @@
 name: Web
 
-# Type checks, builds and tests the desktop UI and the deck client. Runs unless
-# a change only touches files these checks never read: docs, Rust sources and
-# other workflows. One OS is enough: none of this is platform-specific.
+# Type checks, builds and tests the desktop UI and the deck client. One OS is
+# enough: none of this is platform-specific. Runs unless a change only touches
+# docs, Rust sources or other workflows, which these checks never read. Any
+# other path runs them: a wasted run costs less than a skipped one.
 on:
   push:
     branches: [main]
     paths: &paths
       - "**"
-      - "!**.md"
+      - "!*.md"
       - "!docs/**"
       - "!crates/**"
       - "!apps/desktop/src-tauri/**"
@@ -22,9 +23,10 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request replaces its running checks. Pushes to main each run to the end.
+# A new push to a pull request cancels that pull request's earlier run of this
+# workflow. Runs on main are never cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
