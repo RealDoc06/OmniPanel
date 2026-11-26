@@ -205,6 +205,7 @@ fn prompt_contains_actual_schema_every_action_and_machine_facts() {
         "runScript",
         "media",
         "volume",
+        "appDevice",
         "voice",
         "obs",
         "homeAssistant",

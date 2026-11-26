@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Action, AppAudio, Control } from "@omni/protocol";
-import { ACTION_TYPES } from "./actions.ts";
+import { ACTION_TYPES, describeAction, findDevice, liveStateTitle } from "./actions.ts";
 import { emptyStyle } from "./controls.ts";
 import { RECIPES, applyAutoLabel, applyPick, dynamicRecipes, isAutoLabel, searchRecipes } from "./recipes.ts";
 
-const spotify: AppAudio = { id: "com.spotify.client", name: "Spotify", pid: 1, volume: 1, muted: false, playing: true };
+const spotify: AppAudio = { id: "com.spotify.client", name: "Spotify", pid: 1, volume: 1, muted: false, playing: true, output: { type: "default" }, input: null };
 const dynamic = dynamicRecipes([{ name: "Spotify", launch: "Spotify" }], [spotify]);
 const first = (query: string) => searchRecipes(query, dynamic)[0]?.id;
 
@@ -73,11 +73,40 @@ test("automatic labels describe other recipe targets without replacing custom la
     { label: "App", kind: { type: "slider", vertical: true, target: { type: "app", app: "Discord" } }, expected: "Discord" },
     { label: "Scene", kind: button({ type: "obs", op: { type: "setScene", scene: "Camera" } }), expected: "Camera" },
     { label: "Robot", kind: button({ type: "voice", op: { type: "setPreset", presetId: "chipmunk" } }), expected: "Chipmunk" },
+    { label: "Speaker", kind: button({ type: "appDevice", app: "Spotify", direction: "output", device: "bluez_output.1" }), expected: "Headphones" },
     { label: "Light", kind: button({ type: "homeAssistant", op: { type: "toggle", entityId: "light.desk" } }), expected: "Desk light" },
   ];
-  const names = { preset: () => "Chipmunk", entity: () => "Desk light" };
+  const names = { preset: () => "Chipmunk", entity: () => "Desk light", device: () => "Headphones" };
   for (const { label, kind, expected } of cases) {
     assert.equal(applyAutoLabel({ ...emptyStyle(), label }, kind, kind, names).label, expected);
     assert.equal(applyAutoLabel({ ...emptyStyle(), label: "My own label" }, kind, kind, names).label, "My own label");
   }
+});
+
+test("app device actions read as plain sentences and light up only for a device", () => {
+  const names = { device: (id: string) => (id === "bluez_output.1" ? "Headphones" : undefined) };
+  const to = (direction: "output" | "input", device: string | null): Action => ({ type: "appDevice", app: "Spotify", direction, device });
+  assert.equal(describeAction(to("output", "bluez_output.1"), names), "Play Spotify on Headphones");
+  assert.equal(describeAction(to("output", null), names), "Play Spotify on the default speaker");
+  assert.equal(describeAction(to("input", "Shure MV7"), names), "Use Shure MV7 for Spotify");
+  assert.equal(liveStateTitle(button(to("output", "bluez_output.1"))), "While it plays there");
+  assert.equal(liveStateTitle(button(to("output", null))), null);
+});
+
+test("an app that only records gets no mute or volume entries", () => {
+  const obs: AppAudio = { ...spotify, id: "obs", name: "OBS", playing: false, output: null, input: { type: "default" } };
+  assert.deepEqual(dynamicRecipes([], [spotify, obs]).map((r) => r.id), ["mute:Spotify", "slider:Spotify"]);
+});
+
+test("a device is found by id or by name, like the host finds it", () => {
+  const devices = [
+    { id: "alsa_output.usb-0", name: "Scarlett Solo", isDefault: true, isVirtual: false },
+    { id: "bluez_output.1", name: "WH-1000XM4 Headphones", isDefault: false, isVirtual: false },
+  ];
+  const id = (query: string) => findDevice(devices, query)?.id;
+  assert.equal(id("BLUEZ_OUTPUT.1"), "bluez_output.1");
+  assert.equal(id("scarlett solo"), "alsa_output.usb-0");
+  assert.equal(id(" Headphones "), "bluez_output.1");
+  assert.equal(id("HDMI"), undefined);
+  assert.equal(id(""), undefined);
 });

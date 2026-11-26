@@ -79,6 +79,10 @@ Action reference (examples are actions, wrap the chosen action in GeneratedContr
 - volume: master, mic, app or obsInput target; set (0..1), step, toggleMute, mute, unmute.
   {"type":"volume","target":{"type":"app","app":"Discord"},"op":{"type":"toggleMute"}}
   {"type":"volume","target":{"type":"master"},"op":{"type":"step","delta":-0.05}}
+- appDevice: send one app to an output device (direction output) or give it a microphone (direction input).
+  device is a device name, or null for the system default. macOS cannot change an app's microphone,
+  Windows neither direction yet: say so in explanation.
+  {"type":"appDevice","app":"Spotify","direction":"output","device":"Headphones"}
 - voice: toggle, enable, disable, setPreset or cycle. Requires voice setup.
   {"type":"voice","op":{"type":"setPreset","presetId":"robot"}}
 - obs: setScene, toggleRecord/startRecord/stopRecord/pauseRecord, toggleStream/startStream/stopStream,

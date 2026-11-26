@@ -5,6 +5,7 @@
 import type { Control, Icon, LabelPosition, Page, Profile, Style, Theme } from "@omni/protocol";
 import { useMemo, useState } from "react";
 import { DeckControlView } from "../../components/DeckControl";
+import { useDeviceName } from "../../components/DeviceSelect";
 import { HotkeyInput } from "../../components/HotkeyInput";
 import { ControlIcon, I } from "../../components/Icon";
 import { Button, ColorField, Field, Group, IconButton, Kbd, Notice, Segmented, Select, Switch, TextInput } from "../../components/ui";
@@ -221,7 +222,7 @@ function ControlInspector({ control, profile }: { control: Control; profile: Pro
   const appTheme = useAppTheme();
   const theme: Theme = profile.themeId ? findTheme(themes, profile.themeId) : appTheme;
   const previewActive = useEditor((s) => s.previewActive);
-  const names = useNames(profile);
+  const names: NameLookup = { ...useNames(profile), device: useDeviceName(control.kind.type === "button" ? control.kind.action : null) };
   const { style, kind } = control;
 
   const update = (recipe: (c: Control) => Control, key?: string) => updateControl(control.id, recipe, key);

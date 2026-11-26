@@ -4,4 +4,20 @@ export type AudioCapabilities = { perAppVolume: boolean,
 /**
  * Why per-app volume is limited/unavailable, or a permission hint.
  */
-note: string | null, };
+note: string | null, 
+/**
+ * Apps can be sent to an output device of their own.
+ */
+perAppOutput: boolean, 
+/**
+ * Why they cannot, a permission hint, or what such a choice means on this system.
+ */
+outputNote: string | null, 
+/**
+ * Apps can be given a microphone of their own.
+ */
+perAppInput: boolean, 
+/**
+ * Why they cannot, or what such a choice means on this system.
+ */
+inputNote: string | null, };

@@ -1,4 +1,4 @@
-//! Live button state: toggles, mute, voice changer, OBS status, slider values.
+//! Live button state: toggles, mute, app devices, voice changer, OBS status, slider values.
 //!
 //! The loop sleeps until something changes (an action ran, OBS sent an
 //! event, a deck connected). Audio has no change events, so while a visible
@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use omni_actions::obs::ObsState;
+use omni_audio::{find_app, find_device};
 use omni_core::{
-    Action, AppAudio, Config, Control, ControlKind, ControlState, HostToDeck, NavTarget, ObsOp, VoiceOp, VoiceSettings,
-    VolumeOp, VolumeState, VolumeTarget,
+    Action, AppAudio, AppRoute, AudioDevices, AudioDirection, Config, Control, ControlKind, ControlState, HostToDeck,
+    NavTarget, ObsOp, VoiceOp, VoiceSettings, VolumeOp, VolumeState, VolumeTarget,
 };
 
 use crate::Host;
@@ -23,6 +24,8 @@ pub struct AudioSnapshot {
     pub master: Option<VolumeState>,
     pub mic: Option<VolumeState>,
     pub apps: Vec<AppAudio>,
+    /// Read only while a visible control chooses an app's device.
+    pub devices: AudioDevices,
 }
 
 /// Everything needed to compute control states, captured once per pass.
@@ -59,6 +62,18 @@ impl StateContext {
             Action::Toggle { .. } => (self.toggles.get(control_id).copied().unwrap_or(false), false),
             Action::Volume { target, op: VolumeOp::ToggleMute | VolumeOp::Mute | VolumeOp::Unmute } => {
                 self.volume(target).map_or((false, true), |v| (v.muted, false))
+            }
+            // Lit while the app plays on (records from) that device, matched like the
+            // action matches it. Not while the device is unplugged, even if the app is
+            // kept for it, and never for the system default: that is no device to be on.
+            Action::AppDevice { app, direction, device } => {
+                let app = find_app(&self.audio.apps, app);
+                let (route, devices) = match direction {
+                    AudioDirection::Output => (app.and_then(|a| a.output.as_ref()), &self.audio.devices.outputs),
+                    AudioDirection::Input => (app.and_then(|a| a.input.as_ref()), &self.audio.devices.inputs),
+                };
+                let wanted = device.as_deref().and_then(|d| find_device(devices, d).ok());
+                (matches!((route, wanted), (Some(AppRoute::Device { id }), Some(wanted)) if *id == wanted.id), false)
             }
             Action::Voice { op } => match op {
                 VoiceOp::SetPreset { preset_id } => (self.voice.enabled && self.voice.preset_id == *preset_id, false),
@@ -98,23 +113,16 @@ impl StateContext {
         match target {
             VolumeTarget::Master => self.audio.master,
             VolumeTarget::Mic => self.audio.mic,
-            VolumeTarget::App { app } => {
-                find_app(&self.audio.apps, app).map(|a| VolumeState { volume: a.volume, muted: a.muted })
-            }
+            // An app that only records has no volume: its controls show as unavailable.
+            VolumeTarget::App { app } => find_app(&self.audio.apps, app)
+                .filter(|a| a.output.is_some() || a.input.is_none())
+                .map(|a| VolumeState { volume: a.volume, muted: a.muted }),
             VolumeTarget::ObsInput { input } => {
                 let volume = *self.obs.input_volume.get(input)?;
                 Some(VolumeState { volume, muted: self.obs.input_muted.get(input).copied().unwrap_or(false) })
             }
         }
     }
-}
-
-/// Same matching rule as omni-audio: id first, then name substring.
-fn find_app<'a>(apps: &'a [AppAudio], query: &str) -> Option<&'a AppAudio> {
-    let query = query.to_lowercase();
-    apps.iter()
-        .find(|a| a.id.to_lowercase() == query)
-        .or_else(|| apps.iter().find(|a| a.name.to_lowercase().contains(&query)))
 }
 
 /// Does this control need fresh audio readings to show its state?
@@ -124,15 +132,24 @@ fn needs_audio(control: &Control) -> bool {
         ControlKind::Slider { target, .. } => is_audio(target),
         ControlKind::Button { action: Some(action) } => {
             let mut needed = false;
-            action.walk(&mut |a| {
-                if let Action::Volume { target, .. } = a {
-                    needed |= is_audio(target);
-                }
+            action.walk(&mut |a| match a {
+                Action::Volume { target, .. } => needed |= is_audio(target),
+                Action::AppDevice { device: Some(_), .. } => needed = true,
+                _ => {}
             });
             needed
         }
         ControlKind::Button { action: None } => false,
     }
+}
+
+/// Does this control also need the device list (to tell which device its action names)?
+fn needs_devices(control: &Control) -> bool {
+    let mut needed = false;
+    if let ControlKind::Button { action: Some(action) } = &control.kind {
+        action.walk(&mut |a| needed |= matches!(a, Action::AppDevice { device: Some(_), .. }));
+    }
+    needed
 }
 
 impl Host {
@@ -145,14 +162,15 @@ impl Host {
         }
     }
 
-    /// Whether any deck currently shows a control that depends on audio levels.
-    fn decks_need_audio(&self) -> bool {
+    /// Whether any deck currently shows a control that `needs` something
+    /// (`needs_audio`, `needs_devices`).
+    fn decks_show(&self, needs: fn(&Control) -> bool) -> bool {
         let config = self.config();
         let sessions = self.sessions.lock().unwrap();
         sessions.by_id.values().any(|s| {
             profile_of(&config, &s.device_id)
                 .and_then(|p| p.page(&s.page_id))
-                .is_some_and(|page| page.controls.iter().any(needs_audio))
+                .is_some_and(|page| page.controls.iter().any(needs))
         })
     }
 
@@ -181,11 +199,12 @@ impl Host {
     }
 
     async fn refresh_audio(&self) {
-        let audio = self.audio.clone();
+        let (audio, devices) = (self.audio.clone(), self.decks_show(needs_devices));
         let snapshot = tokio::task::spawn_blocking(move || AudioSnapshot {
             master: audio.master().ok(),
             mic: audio.mic().ok(),
             apps: audio.apps().unwrap_or_default(),
+            devices: if devices { audio.devices().unwrap_or_default() } else { AudioDevices::default() },
         })
         .await;
         if let Ok(snapshot) = snapshot {
@@ -197,7 +216,7 @@ impl Host {
 pub async fn run(host: Host) {
     let mut obs = host.executor.obs().subscribe();
     loop {
-        let poll_audio = host.decks_need_audio();
+        let poll_audio = host.decks_show(needs_audio);
         let tick =
             async { if poll_audio { tokio::time::sleep(AUDIO_POLL).await } else { std::future::pending().await } };
         tokio::select! {
@@ -208,7 +227,7 @@ pub async fn run(host: Host) {
             }
             changed = obs.changed() => if changed.is_err() { return },
         }
-        if host.decks_need_audio() {
+        if host.decks_show(needs_audio) {
             host.refresh_audio().await;
         }
         host.push_states();
@@ -218,7 +237,7 @@ pub async fn run(host: Host) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omni_core::{Style, new_id};
+    use omni_core::{AudioDeviceInfo, Style, new_id};
 
     fn button(action: Action) -> Control {
         Control {
@@ -245,7 +264,18 @@ mod tests {
                     volume: 0.3,
                     muted: false,
                     playing: true,
+                    output: Some(AppRoute::Device { id: "bluez_output.1".into() }),
+                    input: None,
                 }],
+                devices: AudioDevices {
+                    outputs: vec![AudioDeviceInfo {
+                        id: "bluez_output.1".into(),
+                        name: "Headphones".into(),
+                        is_default: false,
+                        is_virtual: false,
+                    }],
+                    inputs: Vec::new(),
+                },
             },
             obs: ObsState {
                 connected: true,
@@ -275,6 +305,43 @@ mod tests {
         let missing_app =
             button(Action::Volume { target: VolumeTarget::App { app: "discord".into() }, op: VolumeOp::ToggleMute });
         assert!(cx.state_for(&missing_app, "p", "pg").disabled);
+    }
+
+    #[test]
+    fn app_device_button_lights_while_the_app_is_on_it() {
+        let to = |direction, device: Option<&str>| {
+            button(Action::AppDevice { app: "spotify".into(), direction, device: device.map(str::to_string) })
+        };
+        let mut cx = cx();
+        let lit = |cx: &StateContext, control: &Control| cx.state_for(control, "p", "pg").active;
+        // By id as the editor saves it, or by name as an assistant or a person writes it.
+        assert!(lit(&cx, &to(AudioDirection::Output, Some("bluez_output.1"))));
+        assert!(lit(&cx, &to(AudioDirection::Output, Some("headphones"))));
+        assert!(!lit(&cx, &to(AudioDirection::Output, Some("speakers"))));
+        assert!(!lit(&cx, &to(AudioDirection::Output, None)));
+        assert!(!lit(&cx, &to(AudioDirection::Input, Some("headphones"))), "it is not recording");
+        // Never disabled: where it cannot work, pressing it says why.
+        assert!(!cx.state_for(&to(AudioDirection::Input, None), "p", "pg").disabled);
+        // Only a button that can light up keeps the audio readings coming.
+        let headphones = to(AudioDirection::Output, Some("headphones"));
+        assert!(needs_audio(&headphones) && needs_devices(&headphones));
+        let default = to(AudioDirection::Output, None);
+        assert!(!needs_audio(&default) && !needs_devices(&default));
+
+        // Split across devices, the app is on none of them.
+        cx.audio.apps[0].output = Some(AppRoute::Several);
+        assert!(!lit(&cx, &headphones));
+        // Unplugged: the app is kept for the headphones but does not play there now.
+        cx.audio.apps[0].output = Some(AppRoute::Device { id: "bluez_output.1".into() });
+        cx.audio.devices.outputs.clear();
+        assert!(!lit(&cx, &to(AudioDirection::Output, Some("bluez_output.1"))));
+
+        // An app that only records has a microphone, and no volume to show.
+        cx.audio.apps[0].output = None;
+        cx.audio.apps[0].input = Some(AppRoute::Default);
+        let mute =
+            button(Action::Volume { target: VolumeTarget::App { app: "spotify".into() }, op: VolumeOp::ToggleMute });
+        assert!(cx.state_for(&mute, "p", "pg").disabled);
     }
 
     #[test]

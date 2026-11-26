@@ -1,9 +1,11 @@
-// Sound screen: the mixer (computer sound, microphone, per-app volume) followed by the
-// voice changer section (`sound-voice` anchor).
-import type { AppAudio, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
-import { useRef, useState } from "react";
+// Sound screen: the mixer (computer sound, microphone, per-app volume and devices)
+// followed by the voice changer section (`sound-voice` anchor).
+import type { AppAudio, AppRoute, AudioDirection, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
+import { useRef, useState, type ReactNode } from "react";
+import { DeviceSelect } from "../../components/DeviceSelect";
 import { I } from "../../components/Icon";
 import { Button, IconButton, Notice, ScreenHeader, Section } from "../../components/ui";
+import { recordsOnly } from "../../lib/actions";
 import type { IconName } from "../../lib/icons";
 import { api } from "../../lib/backend";
 import { usePolling, useThrottled } from "../../lib/hooks";
@@ -30,6 +32,20 @@ export function SoundScreen() {
   );
 }
 
+/** The device selects of an app row, in column order, and the capability each needs. */
+const DIRECTIONS: readonly { direction: AudioDirection; label: string; icon: IconName }[] = [
+  { direction: "output", label: "plays on", icon: "speaker" },
+  { direction: "input", label: "microphone", icon: "mic" },
+];
+const CAPABILITY = { output: "perAppOutput", input: "perAppInput" } as const satisfies Record<AudioDirection, keyof MixerState["capabilities"]>;
+
+/** Row grids by number of device columns: icon, name, slider, percentage, then the selects. */
+const COLUMNS = [
+  "grid-cols-[1.75rem_11rem_minmax(6rem,420px)_2.5rem]",
+  "grid-cols-[1.75rem_11rem_minmax(6rem,420px)_2.5rem_minmax(8rem,13rem)]",
+  "grid-cols-[1.75rem_11rem_minmax(6rem,420px)_2.5rem_minmax(8rem,13rem)_minmax(8rem,13rem)]",
+] as const;
+
 function patchMixer(mixer: MixerState, target: VolumeTarget, patch: Partial<VolumeState>): MixerState {
   switch (target.type) {
     case "master":
@@ -48,17 +64,31 @@ function Mixer() {
   const [mixer, setMixer] = useState<MixerState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const touchedAt = useRef(0);
+  /** Device changes still on their way: a move can take seconds, and polls stay out meanwhile. */
+  const moving = useRef(0);
   const mac = useIsMac();
   const capabilities = mixer?.capabilities;
+  // A direction has its column when this computer can change it, and also while an
+  // app is still kept on a device there, so that it can be let go.
+  const shown = mixer
+    ? DIRECTIONS.filter(({ direction }) => mixer.capabilities[CAPABILITY[direction]] || mixer.apps.some((a) => a[direction]?.type === "device"))
+    : [];
+  const columns = COLUMNS[shown.length] ?? COLUMNS[0];
   const note = capabilities?.note ?? (capabilities && !capabilities.perAppVolume ? "App volume controls are unavailable." : null);
   // Match omni-audio's macOS PERMISSION_HINT, not unsupported-OS or tap failures.
   const needsPermission = mac && capabilities?.perAppVolume === false &&
-    capabilities.note?.startsWith("Per-app volume: allow OmniPanel under System Settings > Privacy & Security > Screen & System Audio Recording");
+    capabilities.note?.startsWith("Per-app volume and speakers: allow OmniPanel under System Settings > Privacy & Security > Screen & System Audio Recording");
+  // Why a speaker or microphone cannot be chosen here (once, and not what the notice
+  // above already says), or when a microphone select shows up.
+  const deviceNotes = capabilities
+    ? [...new Set([capabilities.outputNote, capabilities.inputNote])].filter((n) => n !== null && !capabilities.note?.includes(n))
+    : [];
+  if (capabilities?.perAppInput) deviceNotes.push("An app's microphone can be chosen while it is recording.");
 
   usePolling(async () => {
     try {
       const next = await api.getMixer();
-      if (Date.now() - touchedAt.current > 1500) setMixer(next);
+      if (moving.current === 0 && Date.now() - touchedAt.current > 1500) setMixer(next);
       setError(null);
     } catch (e) {
       setError(errorMessage(e));
@@ -81,6 +111,43 @@ function Mixer() {
     api.setMuted(target, muted).catch(toastError);
   };
 
+  /** Sends an app to a device. A failure is toasted and the next poll shows where the app really is. */
+  const setDevice = (app: AppAudio, direction: AudioDirection, device: string | null) => {
+    const route: AppRoute = device === null ? { type: "default" } : { type: "device", id: device };
+    touchedAt.current = Date.now();
+    moving.current += 1;
+    setMixer((m) => m && { ...m, apps: m.apps.map((a) => (a.id === app.id ? { ...a, [direction]: route } : a)) });
+    api
+      .runAction({ type: "appDevice", app: app.id, direction, device })
+      .catch(toastError)
+      .finally(() => {
+        moving.current -= 1;
+        touchedAt.current = Date.now(); // a poll sent during the move may still be on its way
+      });
+  };
+
+  // One select per shown direction, while the app has such a stream. Where the
+  // direction cannot be changed (any more), only an app kept on a device gets one.
+  const deviceSelects = (app: AppAudio) =>
+    mixer &&
+    shown.map(({ direction, label, icon }) => {
+      const route = app[direction];
+      return route === null || (!mixer.capabilities[CAPABILITY[direction]] && route.type !== "device") ? (
+        <span key={direction} />
+      ) : (
+        <span key={direction} className="flex min-w-0 items-center gap-1.5" title={`${app.name} ${label}`}>
+          <I name={icon} className="size-3.5 shrink-0 text-muted" />
+          <DeviceSelect
+            ariaLabel={`${app.name} ${label}`}
+            className="min-w-0"
+            devices={direction === "output" ? mixer.devices.outputs : mixer.devices.inputs}
+            value={route}
+            onChange={(device) => setDevice(app, direction, device)}
+          />
+        </span>
+      );
+    });
+
   const row = (target: VolumeTarget, name: string, icon: IconName, state: VolumeState, app?: AppAudio) => (
     <MixerRow
       key={target.type === "app" ? target.app : target.type}
@@ -89,9 +156,13 @@ function Mixer() {
       state={state}
       playing={app?.playing}
       disabled={target.type === "app" && !mixer?.capabilities.perAppVolume}
+      silent={app !== undefined && recordsOnly(app)}
+      columns={columns}
       onVolume={(v) => setVolume(target, v)}
       onMute={(m) => setMuted(target, m)}
-    />
+    >
+      {app && deviceSelects(app)}
+    </MixerRow>
   );
 
   return (
@@ -117,45 +188,63 @@ function Mixer() {
           ) : (
             mixer.apps.map((app) => row({ type: "app", app: app.id }, app.name, "app-window", app, app))
           )}
+          {deviceNotes.map((text) => (
+            <p key={text} className="mt-2 text-xs text-muted">
+              {text}
+            </p>
+          ))}
         </div>
       )}
     </>
   );
 }
 
-/** One line: mute toggle (doubles as the row's icon), name, slider, percentage. */
+/**
+ * One line: mute toggle (doubles as the row's icon), name, slider, percentage, then
+ * the app's device selects (`children`). Every row uses the same `columns`, so the
+ * sliders line up whether or not a row has selects.
+ */
 function MixerRow({
   name,
   icon,
   state,
   playing,
   disabled = false,
+  silent = false,
+  columns,
   onVolume,
   onMute,
+  children,
 }: {
   name: string;
   icon: IconName;
   state: VolumeState;
   playing?: boolean;
   disabled?: boolean;
+  /** The app only records: it has no volume to change. */
+  silent?: boolean;
+  columns: string;
   onVolume: (value: number) => void;
   onMute: (muted: boolean) => void;
+  children?: ReactNode;
 }) {
   const muteIcon: IconName = icon === "mic" ? (state.muted ? "mic-off" : "mic") : state.muted ? "volume-x" : icon;
+  const fixed = disabled || silent;
+  const faded = fixed && "opacity-40";
   return (
     <div
-      className={cx("flex h-8 items-center gap-3", disabled && "opacity-40")}
-      title={disabled ? "App sliders and mute controls are unavailable." : undefined}
+      className={cx("grid h-8 items-center gap-x-3", columns)}
+      title={disabled ? "App sliders and mute controls are unavailable." : silent ? `${name} is not playing anything.` : undefined}
     >
       <IconButton
         icon={muteIcon}
         label={state.muted ? `Unmute ${name}` : `Mute ${name}`}
         tone={state.muted ? "danger" : "default"}
-        disabled={disabled}
+        disabled={fixed}
         onClick={() => onMute(!state.muted)}
-        className={cx(!state.muted && "text-muted")}
+        className={cx(!state.muted && "text-muted", faded)}
       />
-      <span className="flex w-44 min-w-0 items-baseline gap-2">
+      <span className={cx("flex min-w-0 items-baseline gap-2", disabled && "opacity-40")}>
         <span className="truncate">{name}</span>
         {playing && (
           <span role="img" aria-label="Playing" title="Playing" className="shrink-0 text-muted">
@@ -165,16 +254,17 @@ function MixerRow({
       </span>
       <input
         type="range"
-        disabled={disabled}
+        disabled={fixed}
         aria-label={`${name} volume`}
         min={0}
         max={1}
         step={0.01}
         value={state.volume}
         onChange={(e) => onVolume(Number(e.target.value))}
-        className={cx("max-w-[420px] min-w-0 flex-1", state.muted && "opacity-40")}
+        className={cx("w-full min-w-0", (state.muted || fixed) && "opacity-40")}
       />
-      <span className="w-10 text-right text-xs text-muted tabular-nums">{Math.round(state.volume * 100)}%</span>
+      <span className={cx("text-right text-xs text-muted tabular-nums", faded)}>{Math.round(state.volume * 100)}%</span>
+      {children}
     </div>
   );
 }

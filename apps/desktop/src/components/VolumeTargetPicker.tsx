@@ -1,7 +1,7 @@
 // Picks a `VolumeTarget`: computer sound, microphone, an app (by name, from the mixer)
 // or an OBS audio source.
 import type { VolumeTarget } from "@omni/protocol";
-import { VOLUME_TARGET_LABELS } from "../lib/actions";
+import { VOLUME_TARGET_LABELS, recordsOnly } from "../lib/actions";
 import { api } from "../lib/backend";
 import { useResource } from "../lib/hooks";
 import { ComboInput, EnumSelect } from "./ui";
@@ -31,10 +31,14 @@ export function VolumeTargetPicker({ value, onChange }: { value: VolumeTarget; o
   );
 }
 
-/** App name. Suggestions are the apps the mixer knows; the host matches names too. */
-function AppField({ value, onChange }: { value: string; onChange: (app: string) => void }) {
+/**
+ * App name. Suggestions are the apps the mixer knows; the host matches names too.
+ * `recorders` also suggests apps that only record (they have a microphone, no volume).
+ */
+export function AppField({ value, onChange, recorders = false }: { value: string; onChange: (app: string) => void; recorders?: boolean }) {
   const mixer = useResource(() => api.getMixer());
-  const options = (mixer.data?.apps ?? []).map((a) => ({ value: a.name, label: a.name }));
+  const apps = (mixer.data?.apps ?? []).filter((a) => recorders || !recordsOnly(a));
+  const options = apps.map((a) => ({ value: a.name, label: a.name }));
   return (
     <>
       <ComboInput ariaLabel="App" value={value} onChange={onChange} options={options} placeholder="Pick or type an app" />

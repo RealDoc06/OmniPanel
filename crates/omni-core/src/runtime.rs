@@ -154,6 +154,14 @@ pub struct AudioCapabilities {
     pub per_app_volume: bool,
     /// Why per-app volume is limited/unavailable, or a permission hint.
     pub note: Option<String>,
+    /// Apps can be sent to an output device of their own.
+    pub per_app_output: bool,
+    /// Why they cannot, a permission hint, or what such a choice means on this system.
+    pub output_note: Option<String>,
+    /// Apps can be given a microphone of their own.
+    pub per_app_input: bool,
+    /// Why they cannot, or what such a choice means on this system.
+    pub input_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
@@ -179,10 +187,30 @@ pub struct AppAudio {
     pub muted: bool,
     /// Currently producing sound.
     pub playing: bool,
+    /// Where the app plays. `None` for an app that only records, and where
+    /// `AudioCapabilities::per_app_output` is false.
+    pub output: Option<AppRoute>,
+    /// What the app records from, while it records. Always `None` where
+    /// `AudioCapabilities::per_app_input` is false.
+    pub input: Option<AppRoute>,
 }
 
-/// A per-app level the user set, persisted so it survives restarts on
-/// platforms that don't remember it themselves (macOS).
+/// The device one side of an app's audio is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export)]
+pub enum AppRoute {
+    /// It follows the system default device.
+    Default,
+    /// One device, by `AudioDeviceInfo::id`. Where OmniPanel keeps the choice itself
+    /// (macOS) the device may not be connected right now.
+    Device { id: String },
+    /// Its streams are on different devices.
+    Several,
+}
+
+/// A per-app level and output device the user set, persisted so they survive
+/// restarts on platforms that don't remember them themselves (macOS).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -191,6 +219,9 @@ pub struct AppLevel {
     pub app: String,
     pub volume: f32,
     pub muted: bool,
+    /// Output device the app is sent to; `None` follows the system default.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -201,6 +232,8 @@ pub struct MixerState {
     pub mic: Option<VolumeState>,
     pub apps: Vec<AppAudio>,
     pub capabilities: AudioCapabilities,
+    /// Devices an app can be sent to (`Action::AppDevice`); empty where unsupported.
+    pub devices: AudioDevices,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

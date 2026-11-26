@@ -2,6 +2,9 @@
 // Labels follow the plain-words vocabulary of the desktop UI (no "hotkey", "deck" or "profile").
 import type {
   Action,
+  AppAudio,
+  AudioDeviceInfo,
+  AudioDirection,
   Control,
   Effect,
   FilterKind,
@@ -46,6 +49,7 @@ interface ActionMeta {
 
 export const ACTION_META = {
   volume: { label: "Volume and mute", icon: "volume-2", group: "Sound" },
+  appDevice: { label: "Speaker or microphone of an app", icon: "speaker", group: "Sound" },
   media: { label: "Play, pause and skip", icon: "play", group: "Music and video" },
   voice: { label: "Voice changer", icon: "audio-waveform", group: "Voice changer" },
   openApp: { label: "Open an app", icon: "app-window", group: "Open" },
@@ -116,6 +120,11 @@ export const VOLUME_OP_LABELS: Record<VolumeOp["type"], string> = {
   step: "Turn up or down by",
 };
 
+export const APP_DEVICE_LABELS: Record<AudioDirection, string> = {
+  output: "Speaker",
+  input: "Microphone",
+};
+
 export const VOICE_OP_LABELS: Record<VoiceOp["type"], string> = {
   toggle: "Turn on / off",
   enable: "Turn on",
@@ -171,6 +180,8 @@ export function defaultAction(type: ActionType): Action {
       return { type, command: "playPause" };
     case "volume":
       return { type, target: { type: "master" }, op: { type: "toggleMute" } };
+    case "appDevice":
+      return { type, app: "", direction: "output", device: null };
     case "voice":
       return { type, op: { type: "toggle" } };
     case "obs":
@@ -228,6 +239,39 @@ export interface NameLookup {
   profile?: (id: string) => string | undefined;
   preset?: (id: string) => string | undefined;
   entity?: (id: string) => string | undefined;
+  /** Speaker (`output`) or microphone (`input`) by id, or as it was written. */
+  device?: (device: string, direction: AudioDirection) => string | undefined;
+}
+
+/** An app that records without playing anything: it has a microphone but no volume or speaker. */
+export const recordsOnly = (app: AppAudio): boolean => app.output === null && app.input !== null;
+
+/**
+ * The device an `appDevice` action means, by id or by name like the host matches it
+ * (`best_match` in crates/omni-audio/src/lib.rs: id, then exact name, then part of a name).
+ */
+export function findDevice(devices: readonly AudioDeviceInfo[], query: string): AudioDeviceInfo | undefined {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") return undefined;
+  return (
+    devices.find((d) => d.id.toLowerCase() === needle) ??
+    devices.find((d) => d.name.toLowerCase() === needle) ??
+    devices.find((d) => d.name.toLowerCase().includes(needle))
+  );
+}
+
+/** Whether the action, or one nested in it, chooses an app's device. */
+export function usesAppDevice(action: Action | null): boolean {
+  switch (action?.type) {
+    case "appDevice":
+      return true;
+    case "multi":
+      return action.steps.some(usesAppDevice);
+    case "toggle":
+      return usesAppDevice(action.on) || usesAppDevice(action.off);
+    default:
+      return false;
+  }
 }
 
 const short = (text: string, max = 32) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
@@ -265,6 +309,13 @@ export function describeAction(action: Action | null, names: NameLookup = {}): s
       return MEDIA_LABELS[action.command];
     case "volume":
       return volumeSummary(action.target, action.op);
+    case "appDevice": {
+      const app = action.app || "an app";
+      const device = action.device === null ? null : short(names.device?.(action.device, action.direction) ?? action.device);
+      return action.direction === "output"
+        ? `Play ${app} on ${device ?? "the default speaker"}`
+        : `Use ${device ?? "the default microphone"} for ${app}`;
+    }
     case "voice": {
       const op = action.op;
       switch (op.type) {
@@ -354,6 +405,9 @@ function actionLiveTitle(action: Action): string | null {
   switch (action.type) {
     case "volume":
       return action.op.type === "set" || action.op.type === "step" ? null : "While muted";
+    case "appDevice":
+      // The system default is not a device the app can be seen on.
+      return action.device === null ? null : action.direction === "output" ? "While it plays there" : "While it uses this microphone";
     case "toggle":
       return "While on";
     case "voice":

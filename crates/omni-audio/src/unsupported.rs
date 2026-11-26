@@ -14,9 +14,14 @@ impl Backend for Platform {
     }
 
     fn capabilities(&self) -> AudioCapabilities {
+        let note = "audio control is not available on this platform";
         AudioCapabilities {
             per_app_volume: false,
-            note: Some("audio control is not available on this platform".into()),
+            note: Some(note.into()),
+            per_app_output: false,
+            output_note: Some(note.into()),
+            per_app_input: false,
+            input_note: Some(note.into()),
         }
     }
 

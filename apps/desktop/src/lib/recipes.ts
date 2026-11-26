@@ -2,7 +2,7 @@
 // Each one makes a control kind plus the button face it starts with. Static recipes
 // cover every action type; dynamic ones come from installed apps and the mixer.
 import type { AppAudio, Control, Icon, InstalledApp, Style } from "@omni/protocol";
-import { defaultAction, describeAction, type ActionGroup, type NameLookup } from "./actions.ts";
+import { defaultAction, describeAction, recordsOnly, type ActionGroup, type NameLookup } from "./actions.ts";
 import type { IconName } from "./icons";
 
 /** What picking an entry produces: the new kind and the button face to apply. */
@@ -116,6 +116,40 @@ export const RECIPES = [
     icon: "app-window",
     button: "App",
     make: () => ({ type: "slider", target: { type: "app", app: "" }, vertical: true }),
+  },
+  {
+    id: "app-output",
+    group: "Sound",
+    label: "Play an app on another speaker",
+    keywords: "output device headphones speakers send move audio route",
+    icon: "speaker",
+    button: "Speaker",
+    make: () => ({ type: "button", action: { type: "appDevice", app: "", direction: "output", device: null } }),
+  },
+  {
+    id: "app-output-switch",
+    group: "Sound",
+    label: "Switch an app between two speakers",
+    keywords: "output device headphones speakers toggle swap audio",
+    icon: "arrow-right-left",
+    button: "Switch speaker",
+    make: () => ({
+      type: "button",
+      action: {
+        type: "toggle",
+        on: { type: "appDevice", app: "", direction: "output", device: null },
+        off: { type: "appDevice", app: "", direction: "output", device: null },
+      },
+    }),
+  },
+  {
+    id: "app-input",
+    group: "Sound",
+    label: "Change an app's microphone",
+    keywords: "input device mic recording discord zoom",
+    icon: "mic",
+    button: "Microphone",
+    make: () => ({ type: "button", action: { type: "appDevice", app: "", direction: "input", device: null } }),
   },
   // Music and video
   {
@@ -444,7 +478,8 @@ const appIcon = (name: string): IconName =>
     .find((icon) => icon !== undefined) ?? "app-window";
 
 /** Picker entries for installed apps ("Open Spotify") and apps playing sound ("Mute / unmute Spotify"). */
-export function dynamicRecipes(installed: readonly InstalledApp[], playing: readonly AppAudio[]): Recipe[] {
+export function dynamicRecipes(installed: readonly InstalledApp[], apps: readonly AppAudio[]): Recipe[] {
+  const playing = apps.filter((app) => !recordsOnly(app));
   const opens = installed.map(
     (app): Recipe => ({
       id: `open:${app.name}`,
@@ -611,6 +646,8 @@ function labelFor(kind: Control["kind"], names: LabelNames): string | null {
       return action.op.type === "set" ? `Volume ${Math.round(action.op.value * 100)}%` :
         action.op.type === "step" ? (action.op.delta < 0 ? "Volume down" : "Volume up") :
           `${action.op.type === "unmute" ? "Unmute" : "Mute"} ${soundName(action.target)}`;
+    case "appDevice":
+      return action.device === null ? (action.direction === "output" ? "Speaker" : "Microphone") : names.device?.(action.device, action.direction) ?? action.device;
     case "voice":
       return action.op.type === "setPreset" ? names.preset?.(action.op.presetId) ?? action.op.presetId : null;
     case "obs":

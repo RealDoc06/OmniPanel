@@ -1,4 +1,5 @@
-//! Volume and mute of the default output / input device.
+//! Volume and mute of the default output / input device, and the output devices an
+//! app can be sent to.
 //!
 //! Devices expose volume in different ways: a main element (most devices), only
 //! per-channel controls (some USB interfaces), or nothing at all (HDMI, many audio
@@ -8,13 +9,14 @@
 
 use objc2_core_audio::{
     AudioObjectPropertyAddress, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyMute,
-    kAudioDevicePropertyPreferredChannelsForStereo, kAudioDevicePropertyVolumeScalar,
-    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyName,
-    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput,
+    kAudioDevicePropertyPreferredChannelsForStereo, kAudioDevicePropertyStreams, kAudioDevicePropertyTransportType,
+    kAudioDevicePropertyVolumeScalar, kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeVirtual,
+    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
+    kAudioObjectPropertyName, kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput,
 };
 
 use super::ca::{self, MAIN, ObjectId};
-use crate::{AudioError, Endpoint, Result, VolumeState};
+use crate::{AudioDeviceInfo, AudioError, Endpoint, Result, VolumeState};
 
 /// `kAudioHardwareServiceDeviceProperty_VirtualMainVolume` ('vmvc'): balance-preserving
 /// volume across channels; served by the HAL for devices without a main element.
@@ -47,6 +49,35 @@ pub fn name(device: ObjectId) -> String {
 
 pub fn uid(device: ObjectId) -> Result<String> {
     Ok(ca::get_string(device, ca::global(kAudioDevicePropertyDeviceUID))?)
+}
+
+/// `kAudioDeviceTransportType...` of the device; 0 when unknown.
+pub fn transport(device: ObjectId) -> u32 {
+    ca::get::<u32>(device, ca::global(kAudioDevicePropertyTransportType)).unwrap_or(0)
+}
+
+/// Output devices an app can be sent to, identified by UID. Aggregate and
+/// multi-output devices are left out: a tap plays through an aggregate of its own,
+/// and aggregates cannot nest. That also hides the private aggregates of our taps.
+pub fn outputs() -> Result<Vec<AudioDeviceInfo>> {
+    let default = default_device(Endpoint::Output).ok();
+    let devices = ca::get_list::<u32>(ca::SYSTEM, ca::global(kAudioHardwarePropertyDevices))?;
+    let streams = ca::prop(kAudioDevicePropertyStreams, scope(Endpoint::Output), MAIN);
+    Ok(devices
+        .into_iter()
+        .filter(|&device| ca::get_list::<u32>(device, streams).is_ok_and(|s| !s.is_empty()))
+        .filter_map(|device| {
+            let transport = transport(device);
+            (transport != kAudioDeviceTransportTypeAggregate).then_some(())?;
+            Some(AudioDeviceInfo {
+                // Devices can vanish between the list and the reads; skip those.
+                id: uid(device).ok()?,
+                name: name(device),
+                is_default: Some(device) == default,
+                is_virtual: transport == kAudioDeviceTransportTypeVirtual,
+            })
+        })
+        .collect())
 }
 
 /// Hardware volume; `None` when the device has no settable volume control.
@@ -148,8 +179,6 @@ impl Control {
 
 #[cfg(test)]
 mod tests {
-    use objc2_core_audio::{kAudioDevicePropertyStreams, kAudioHardwarePropertyDevices};
-
     use super::*;
 
     /// Round-trips volume and mute on a device that is not the default (so nothing is

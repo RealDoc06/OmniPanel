@@ -7,8 +7,8 @@ use std::ptr::{self, NonNull};
 use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectHasProperty, AudioObjectID,
     AudioObjectIsPropertySettable, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
-    kAudioHardwareUnspecifiedError, kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectSystemObject,
+    kAudioHardwarePropertyTranslateUIDToDevice, kAudioHardwareUnspecifiedError, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
 };
 use objc2_core_audio_types::AudioStreamBasicDescription;
 use objc2_core_foundation::{CFRetained, CFString};
@@ -156,6 +156,28 @@ pub fn get_string(id: ObjectId, address: AudioObjectPropertyAddress) -> Result<S
     let raw = NonNull::new(raw.cast_mut()).ok_or(Status(kAudioHardwareUnspecifiedError))?;
     // SAFETY: CoreAudio returns an owned (retained) CFString.
     Ok(unsafe { CFRetained::from_raw(raw) }.to_string())
+}
+
+/// The connected device with this UID, if any.
+pub fn device_with_uid(uid: &str) -> Option<ObjectId> {
+    let uid = CFString::from_str(uid);
+    // The qualifier is a `CFStringRef`, borrowed for the call.
+    let qualifier: *const CFString = &*uid;
+    let address = global(kAudioHardwarePropertyTranslateUIDToDevice);
+    let mut device: ObjectId = 0;
+    let mut size = size_of::<ObjectId>() as u32;
+    check(unsafe {
+        AudioObjectGetPropertyData(
+            SYSTEM,
+            NonNull::from(&address),
+            size_of::<*const CFString>() as u32,
+            ptr::from_ref(&qualifier).cast(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut device).cast(),
+        )
+    })
+    .ok()?;
+    (device != 0).then_some(device)
 }
 
 pub fn set<T: Pod>(id: ObjectId, address: AudioObjectPropertyAddress, value: &T) -> Result<(), Status> {

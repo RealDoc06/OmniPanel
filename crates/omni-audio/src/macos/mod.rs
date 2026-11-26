@@ -1,16 +1,24 @@
-//! macOS backend: CoreAudio device volume, process taps for per-app and software
-//! master volume.
+//! macOS backend: CoreAudio device volume, process taps for per-app volume, per-app
+//! output device and software master volume.
 //!
-//! macOS has no per-app volume, so an app's level is ours: kept in `State::desired`
-//! (keyed by app id, so it survives app restarts) and applied with a [`Tap`] while it
-//! is not 100%. At 100% and unmuted the tap is removed and the app plays natively.
-//! Taps only take what an app plays on the default output: audio it sends to another
-//! device keeps its native level and route.
+//! macOS has no per-app volume or output device, so both are ours: kept in
+//! `State::desired` (keyed by app id, so they survive app restarts) and applied with a
+//! [`Tap`], which mutes what the app plays on the default output and plays it back at
+//! our level, on the default output or on the device the app is sent to. An app at
+//! 100%, unmuted and on the default output has no tap and plays natively. Taps only
+//! take what an app plays on the default output: audio it sends to another device by
+//! itself keeps its native level and route. An app sent to a device stays on it when
+//! the default output changes, and plays on the default output while that device is
+//! not connected. Only "system default" (no device) makes it follow the default again.
+//!
+//! What another app records from cannot be changed: macOS has no public way to
+//! redirect a process's input, so `set_app_device` reports that for microphones.
 //!
 //! Outputs without a volume (or mute) control of their own get a software master:
 //! one tap of everything played to the device except OmniPanel and the apps that
 //! have their own tap. Those apps are re-rendered by our process, so their taps carry
-//! the master gain too. At 100% and unmuted the master tap is removed.
+//! the master gain too, unless they play on another device. At 100% and unmuted the
+//! master tap is removed.
 //!
 //! A worker thread, started on first use, keeps taps in sync with the system:
 //! re-attaches restarted apps, follows helper processes and default-output changes.
@@ -36,8 +44,8 @@ use std::time::{Duration, Instant};
 
 use objc2_core_audio::{
     AudioObjectAddPropertyListener, AudioObjectID, AudioObjectPropertyAddress, AudioObjectRemovePropertyListener,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices, kAudioHardwarePropertyProcessObjectList,
-    kAudioHardwarePropertyTranslatePIDToProcessObject,
+    kAudioDeviceTransportTypeAggregate, kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
+    kAudioHardwarePropertyProcessObjectList, kAudioHardwarePropertyTranslatePIDToProcessObject,
 };
 use omni_core::AppLevel;
 
@@ -45,7 +53,10 @@ use self::ca::ObjectId;
 use self::process::{AppGroup, Processes};
 use self::tap::{Source, Tap};
 use self::tcc::Permission;
-use crate::{AppAudio, AudioCapabilities, AudioError, Backend, Endpoint, Result, VolumeState, find_app};
+use crate::{
+    AppAudio, AppRoute, AudioCapabilities, AudioDevices, AudioError, Backend, Endpoint, Result, VolumeState, find_app,
+    find_device,
+};
 
 /// Health check / fallback poll while taps exist or wanted ones are missing: dead or
 /// stalled devices, sample-rate switches, failed builds, anything notifications miss.
@@ -63,6 +74,10 @@ const PERMISSION_TTL: Duration = Duration::from_secs(2);
 const PERMISSION_HINT: &str = "allow OmniPanel under System Settings > Privacy & Security > \
      Screen & System Audio Recording (System Audio Recording Only)";
 const UNSUPPORTED_HINT: &str = "per-app volume needs macOS 14.2 or later";
+const OUTPUT_UNSUPPORTED_HINT: &str = "Choosing a speaker per app needs macOS 14.2 or later.";
+const AGGREGATE_HINT: &str =
+    "Apps cannot be sent to a speaker while the default output is an aggregate or multi-output device.";
+const MICROPHONE_HINT: &str = "macOS has no way to change another app's microphone. Pick it in the app's own settings.";
 
 pub(crate) struct Platform {
     shared: Arc<Shared>,
@@ -92,8 +107,8 @@ struct State {
     processes: Processes,
     /// Latest full listing (with playing state); `find` answers from it.
     listing: Vec<AppGroup>,
-    /// Non-default app levels by app id.
-    desired: HashMap<String, Level>,
+    /// What the user chose per app id, where it is not the default.
+    desired: HashMap<String, Wanted>,
     taps: HashMap<String, Tap>,
     /// Software master level, applied for the controls the default output lacks.
     master: Level,
@@ -139,6 +154,40 @@ impl Level {
     }
 }
 
+/// What the user chose for one app.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Wanted {
+    level: Level,
+    /// UID of the output device the app is sent to; `None` follows the default output.
+    output: Option<String>,
+}
+
+impl Wanted {
+    /// Nothing to apply or remember: the app plays natively.
+    fn is_default(&self) -> bool {
+        self.level.is_unity() && self.output.is_none()
+    }
+
+    /// What to go back to when applying `self` in place of `previous` fails. Letting
+    /// go of a device needs no tap, so that part holds: an app let go while its level
+    /// cannot be applied (the default output is a multi-output device) must not come
+    /// back pinned.
+    fn undone(&self, previous: &Wanted) -> Wanted {
+        Wanted { output: previous.output.clone().filter(|_| self.output.is_some()), ..previous.clone() }
+    }
+
+    /// Where the app's tap plays and at which gain, or `None` when it needs no tap.
+    /// `route` is the device it is sent to, while connected. On another device than
+    /// `default` it plays at its own level; on the default output the software
+    /// `master` applies too, and at 100% it plays there natively.
+    fn placement(&self, route: Option<ObjectId>, default: ObjectId, master: f32) -> Option<(ObjectId, f32)> {
+        match route.filter(|&device| device != default) {
+            Some(device) => Some((device, self.level.gain())),
+            None => (!self.level.is_unity()).then(|| (default, self.level.gain() * master)),
+        }
+    }
+}
+
 /// Result of `State::sync`.
 #[derive(Default)]
 struct Synced {
@@ -152,30 +201,57 @@ struct Synced {
 
 impl State {
     /// The latest listing as the API shows it: Dock apps, anything playing, and apps
-    /// we hold a level for. Background daemons that merely opened CoreAudio are hidden.
+    /// we hold a level or device for. Background daemons that merely opened CoreAudio
+    /// are hidden. An app's output is the device chosen for it, connected or not.
     fn apps(&self) -> Vec<AppAudio> {
         self.listing
             .iter()
             .filter(|g| g.playing || g.regular || self.desired.contains_key(&g.id))
             .map(|g| {
-                let level = self.desired.get(&g.id).copied().unwrap_or_default();
+                let wanted = self.desired.get(&g.id).cloned().unwrap_or_default();
                 AppAudio {
                     id: g.id.clone(),
                     name: g.name.clone(),
                     pid: u32::try_from(g.pid).ok(),
-                    volume: level.volume,
-                    muted: level.muted,
+                    volume: wanted.level.volume,
+                    muted: wanted.level.muted,
                     playing: g.playing,
+                    output: tap::supported()
+                        .then(|| wanted.output.map_or(AppRoute::Default, |id| AppRoute::Device { id })),
+                    input: None,
                 }
             })
             .collect()
     }
 
-    fn set_level(&mut self, app: &str, level: Level) {
-        if level.is_unity() {
+    /// What `desired` holds, to persist.
+    fn levels(&self) -> Vec<AppLevel> {
+        let mut levels: Vec<_> = self
+            .desired
+            .iter()
+            .map(|(app, wanted)| AppLevel {
+                app: app.clone(),
+                volume: wanted.level.volume,
+                muted: wanted.level.muted,
+                output: wanted.output.clone(),
+            })
+            .collect();
+        levels.sort_by(|a, b| a.app.cmp(&b.app));
+        levels
+    }
+
+    fn restore(&mut self, levels: &[AppLevel]) {
+        for saved in levels.iter().filter(|l| l.volume.is_finite()) {
+            let level = Level { volume: saved.volume.clamp(0.0, 1.0), muted: saved.muted };
+            self.set_wanted(&saved.app, Wanted { level, output: saved.output.clone() });
+        }
+    }
+
+    fn set_wanted(&mut self, app: &str, wanted: Wanted) {
+        if wanted.is_default() {
             self.desired.remove(app);
         } else {
-            self.desired.insert(app.to_string(), level);
+            self.desired.insert(app.to_string(), wanted);
         }
     }
 
@@ -210,10 +286,13 @@ impl State {
 
     /// Pushes the current levels into running taps: the hot path of a dragged slider.
     fn apply_gains(&mut self) {
-        let Some(device) = self.master_tap.as_ref().or(self.taps.values().next()).map(|t| t.device) else { return };
+        let Some(device) = self.master_tap.as_ref().or(self.taps.values().next()).map(|t| t.from) else { return };
         let master = self.master_gain(device);
         for (id, tap) in &self.taps {
-            tap.set_gain(self.desired.get(id).copied().unwrap_or_default().gain() * master);
+            let level = self.desired.get(id).map(|w| w.level).unwrap_or_default();
+            // The software master stands in for the default output's controls only: not
+            // for an app played on another device than the one it is tapped on.
+            tap.set_gain(level.gain() * if tap.device == tap.from { master } else { 1.0 });
         }
         if let Some(tap) = &self.master_tap {
             tap.set_gain(master);
@@ -237,20 +316,29 @@ impl State {
         status
     }
 
-    /// Creates, retargets, rebuilds and removes taps on `device` to match the levels.
-    /// `forced` skips the failure backoff (the user just asked for it).
+    /// Creates, retargets, rebuilds and removes taps to match the levels and output
+    /// devices, `device` being the default output. `forced` skips the failure backoff
+    /// (the user just asked for it).
     fn sync(&mut self, device: ObjectId, groups: &[AppGroup], forced: Option<&Key>) -> Synced {
         let master = self.master_gain(device);
         let mut synced = Synced::default();
         let State { desired, taps, master_tap, backoff, .. } = self;
         let present = |id: &str| groups.iter().any(|g| g.id == id);
-        let released: Vec<(String, Tap)> = taps.extract_if(|id, _| !desired.contains_key(id) || !present(id)).collect();
-        for (id, level) in desired.iter() {
+        // Where each running app with a tap to keep plays, and how loud.
+        let wanted: HashMap<&String, (ObjectId, f32)> = desired
+            .iter()
+            .filter(|(id, _)| present(id))
+            .filter_map(|(id, wanted)| {
+                let route = wanted.output.as_deref().and_then(ca::device_with_uid);
+                Some((id, wanted.placement(route, device, master)?))
+            })
+            .collect();
+        let released: Vec<(String, Tap)> = taps.extract_if(|id, _| !wanted.contains_key(id)).collect();
+        for (&id, &(output, gain)) in &wanted {
             let Some(group) = groups.iter().find(|g| &g.id == id) else { continue };
             let key = Key::App(id.clone());
             let slot = Slot { key: &key, label: &group.name, source: Source::Processes(group.objects.clone()) };
-            let gain = level.gain() * master;
-            if let Some(tap) = slot.ensure(taps.remove(id), device, gain, forced, backoff, &mut synced) {
+            if let Some(tap) = slot.ensure(taps.remove(id), device, output, gain, forced, backoff, &mut synced) {
                 taps.insert(id.clone(), tap);
             }
         }
@@ -262,13 +350,13 @@ impl State {
             match own_process() {
                 Some(own) => {
                     let mut excluded: Vec<ObjectId> =
-                        taps.values().filter(|t| t.device == device).flat_map(|t| t.source.objects()).collect();
+                        taps.values().filter(|t| t.from == device).flat_map(|t| t.source.objects()).collect();
                     excluded.push(own);
                     excluded.sort_unstable();
                     excluded.dedup();
                     let source = Source::AllExcept(excluded);
                     let slot = Slot { key: &Key::Master, label: "master", source: source.clone() };
-                    *master_tap = slot.ensure(master_tap.take(), device, master, forced, backoff, &mut synced);
+                    *master_tap = slot.ensure(master_tap.take(), device, device, master, forced, backoff, &mut synced);
                     master_tap.as_ref().is_some_and(|t| t.device == device && t.source == source)
                 }
                 None => {
@@ -286,16 +374,20 @@ impl State {
         };
 
         // Hand-over gains: a released app rejoins the master tap (fade out) or plays
-        // natively at full level (ramp to 1 so nothing jumps). While the master cannot
-        // take it back (failed, or waiting out its backoff), the app's tap stays on and
-        // carries the master gain instead: dropping it would play the app at full level.
-        let handover = if master < 1.0 { 0.0 } else { 1.0 };
+        // natively at full level (ramp to 1 so nothing jumps); one that played on
+        // another device fades out there. While the master cannot take it back (failed,
+        // or waiting out its backoff), the app's tap stays on: dropping it would play
+        // the app at full level. On the default output it carries the master gain
+        // meanwhile; on another device it keeps playing there until the master is back.
         for (id, tap) in released {
+            let elsewhere = tap.device != device;
             if rejoined || !present(&id) {
-                tap.set_gain(handover);
+                tap.set_gain(if elsewhere || master < 1.0 { 0.0 } else { 1.0 });
                 synced.retired.push(tap);
             } else {
-                tap.set_gain(master);
+                if !elsewhere {
+                    tap.set_gain(master);
+                }
                 taps.insert(id, tap);
             }
         }
@@ -314,6 +406,9 @@ impl State {
         if !(permitted && wanted) {
             // Access granted in System Settings sends no notification: keep checking.
             self.retry = wanted;
+            if !wanted {
+                self.error = None; // nothing left that could still be failing
+            }
             return self.take_taps();
         }
         let (device, groups) = match device.and_then(|device| Ok((device, self.processes.groups(false)?))) {
@@ -384,15 +479,21 @@ struct Slot<'a> {
 }
 
 impl Slot<'_> {
-    /// Returns the tap to keep: `current` retargeted, or a new one. Taps are never
-    /// stacked on the same device: a process tapped twice while it starts up can stay
-    /// silent, so a broken tap goes before its replacement is built. A working tap
-    /// whose retarget fails keeps its previous source until a retry succeeds, as
-    /// dropping it would play its audio at full level. Only a move to another output
-    /// crossfades (the old tap keeps playing there meanwhile).
+    /// Returns the tap to keep, listening on `from` (the default output) and playing
+    /// on `device`: `current` retargeted, or a new one. A broken tap goes before its
+    /// replacement is built: a process tapped twice while it starts up can stay
+    /// silent. A working tap whose retarget fails keeps its previous source until a
+    /// retry succeeds, as dropping it would play its audio at full level. A working
+    /// tap that has to move (the default output changed, or the app is sent to
+    /// another device) keeps playing where it was until its replacement runs, then
+    /// fades out. For that moment the app is tapped twice, as it is whenever it joins
+    /// or leaves the master tap; dropping the old tap first would play the app on the
+    /// default output at full level in between.
+    #[allow(clippy::too_many_arguments)]
     fn ensure(
         self,
         current: Option<Tap>,
+        from: ObjectId,
         device: ObjectId,
         gain: f32,
         forced: Option<&Key>,
@@ -400,7 +501,7 @@ impl Slot<'_> {
         synced: &mut Synced,
     ) -> Option<Tap> {
         let current = match current {
-            Some(mut tap) if tap.device == device => {
+            Some(mut tap) if (tap.from, tap.device) == (from, device) => {
                 if tap.healthy() {
                     tap.set_gain(gain);
                     // A cheap property write, so retried every pass (no backoff): a user
@@ -415,13 +516,15 @@ impl Slot<'_> {
                 drop(tap);
                 None
             }
-            other => other,
+            // Has to move: only a working tap is worth keeping meanwhile.
+            Some(mut tap) => tap.healthy().then_some(tap),
+            None => None,
         };
         if forced != Some(self.key) && backoff.get(self.key).is_some_and(|until| Instant::now() < *until) {
             synced.skipped = true;
             return current;
         }
-        match Tap::new(self.label, self.source, device, gain) {
+        match Tap::new(self.label, self.source, from, device, gain) {
             Ok(tap) => {
                 backoff.remove(self.key);
                 if let Some(old) = current {
@@ -437,6 +540,11 @@ impl Slot<'_> {
             }
         }
     }
+}
+
+/// An aggregate or multi-output device: a tap can neither listen to one nor play on one.
+fn aggregate(device: ObjectId) -> bool {
+    device::transport(device) == kAudioDeviceTransportTypeAggregate
 }
 
 /// This process's HAL object (excluded from the master tap: our own output is the
@@ -470,17 +578,19 @@ fn retire(taps: Vec<Tap>) {
 }
 
 impl Platform {
-    fn update_app(&self, app: &AppAudio, change: impl FnOnce(&mut Level)) -> Result<()> {
+    fn update_app(&self, app: &AppAudio, change: impl FnOnce(&mut Wanted)) -> Result<()> {
         let mut state = self.shared.lock();
-        let previous = state.desired.get(&app.id).copied().unwrap_or_default();
-        let mut level = previous;
-        change(&mut level);
-        state.set_level(&app.id, level);
-        if !level.is_unity() && state.taps.contains_key(&app.id) {
+        let previous = state.desired.get(&app.id).cloned().unwrap_or_default();
+        let mut wanted = previous.clone();
+        change(&mut wanted);
+        state.set_wanted(&app.id, wanted.clone());
+        // A level change on a tap that stays where it is.
+        if !wanted.level.is_unity() && wanted.output == previous.output && state.taps.contains_key(&app.id) {
             state.apply_gains();
             return Ok(());
         }
-        self.commit(state, Key::App(app.id.clone()), |state| state.set_level(&app.id, previous))
+        let undone = wanted.undone(&previous);
+        self.commit(state, Key::App(app.id.clone()), |state| state.set_wanted(&app.id, undone))
     }
 
     fn update_master(&self, device: ObjectId, change: impl FnOnce(&mut Level)) -> Result<()> {
@@ -539,22 +649,27 @@ impl Platform {
         for (k, e) in &synced.failures {
             tracing::warn!("{k:?}: {e}");
         }
-        let failure = match synced.failures.iter().position(|(k, _)| *k == key) {
-            Some(own) => {
-                revert(&mut state);
-                state.apply_gains();
-                Some(synced.failures.swap_remove(own).1)
-            }
-            None => synced.failures.pop().map(|(_, e)| e),
-        };
-        state.settle(failure.as_ref(), synced.skipped);
-        let busy = state.needs_poll();
+        // The caller's own failure is undone and returned, so it is not kept as the
+        // mixer note: only what the worker still has to retry is.
+        let own = synced.failures.iter().position(|(k, _)| *k == key).map(|own| synced.failures.swap_remove(own).1);
+        if own.is_some() {
+            revert(&mut state);
+            state.apply_gains();
+        }
+        let other = synced.failures.pop().map(|(_, e)| e);
+        state.settle(other.as_ref(), synced.skipped);
+        // A level or device held without a tap (an app pinned to what is the default
+        // output right now) still needs the worker: it hears when that changes.
+        let (busy, held) = (state.needs_poll(), !state.desired.is_empty());
         drop(state);
         retire(synced.retired);
-        if busy {
-            self.worker()?.send(Msg::Wake).ok();
+        if busy || held {
+            let wake = self.worker()?;
+            if busy {
+                wake.send(Msg::Wake).ok();
+            }
         }
-        failure.map_or(Ok(()), Err)
+        own.or(other).map_or(Ok(()), Err)
     }
 
     /// Ok when taps may be created now. Otherwise asks once (the system prompt) and
@@ -573,7 +688,9 @@ impl Platform {
                         let _ = wake.send(Msg::Wake);
                     });
                 }
-                Err(AudioError::Permission("approve the System Audio Recording prompt to change volumes".into()))
+                Err(AudioError::Permission(
+                    "approve the System Audio Recording prompt to change app volumes and speakers".into(),
+                ))
             }
         }
     }
@@ -612,7 +729,14 @@ impl Backend for Platform {
 
     fn capabilities(&self) -> AudioCapabilities {
         if !tap::supported() {
-            return AudioCapabilities { per_app_volume: false, note: Some(UNSUPPORTED_HINT.into()) };
+            return AudioCapabilities {
+                per_app_volume: false,
+                note: Some(UNSUPPORTED_HINT.into()),
+                per_app_output: false,
+                output_note: Some(OUTPUT_UNSUPPORTED_HINT.into()),
+                per_app_input: false,
+                input_note: Some(MICROPHONE_HINT.into()),
+            };
         }
         let device = device::default_device(Endpoint::Output).ok().map(|d| (d, device::name(d)));
         let mut state = self.shared.lock();
@@ -621,19 +745,35 @@ impl Backend for Platform {
             .filter(|(d, _)| !state.controls(*d).volume)
             .map(|(_, name)| format!("Master volume is applied in software ({name} has no volume control)."));
         let (per_app_volume, note) = match state.permission() {
-            Some(Permission::Denied) => (false, Some(format!("Per-app volume: {PERMISSION_HINT}."))),
-            Some(Permission::Undetermined) => {
-                (true, Some("macOS asks for System Audio Recording permission the first time a volume changes.".into()))
-            }
+            Some(Permission::Denied) => (false, Some(format!("Per-app volume and speakers: {PERMISSION_HINT}."))),
+            Some(Permission::Undetermined) => (
+                true,
+                Some(
+                    "macOS asks for System Audio Recording permission the first time a volume or speaker changes."
+                        .into(),
+                ),
+            ),
             _ => (true, state.error.clone()),
         };
-        // Taps follow the default output only (see the module docs).
+        // Taps listen to the default output only (see the module docs).
         let scope = device
             .as_ref()
             .filter(|_| per_app_volume)
-            .map(|(_, name)| format!("App volumes only affect audio played on {name}."));
+            .map(|(_, name)| format!("App volumes and speakers only affect audio played on {name}."));
+        // Both are taps: what stops per-app volume (the permission) stops per-app outputs.
+        // So does a default output a tap cannot listen to.
+        let aggregate = device.as_ref().is_some_and(|(d, _)| aggregate(*d));
+        let output_note =
+            note.clone().filter(|_| !per_app_volume).or_else(|| aggregate.then(|| AGGREGATE_HINT.to_string()));
         let note = [note, scope, soft_master].into_iter().flatten().collect::<Vec<_>>().join(" ");
-        AudioCapabilities { per_app_volume, note: (!note.is_empty()).then_some(note) }
+        AudioCapabilities {
+            per_app_volume,
+            note: (!note.is_empty()).then_some(note),
+            per_app_output: per_app_volume && !aggregate,
+            output_note,
+            per_app_input: false,
+            input_note: Some(MICROPHONE_HINT.into()),
+        }
     }
 
     fn endpoint(&self, endpoint: Endpoint) -> Result<VolumeState> {
@@ -687,31 +827,22 @@ impl Backend for Platform {
     }
 
     fn set_app_volume(&self, app: &AppAudio, volume: f32) -> Result<()> {
-        self.update_app(app, |level| level.volume = volume)
+        self.update_app(app, |wanted| wanted.level.volume = volume)
     }
 
     fn set_app_muted(&self, app: &AppAudio, muted: bool) -> Result<()> {
-        self.update_app(app, |level| level.muted = muted)
+        self.update_app(app, |wanted| wanted.level.muted = muted)
     }
 
     fn app_levels(&self) -> Vec<AppLevel> {
-        let state = self.shared.lock();
-        let mut levels: Vec<_> = state
-            .desired
-            .iter()
-            .map(|(app, level)| AppLevel { app: app.clone(), volume: level.volume, muted: level.muted })
-            .collect();
-        levels.sort_by(|a, b| a.app.cmp(&b.app));
-        levels
+        self.shared.lock().levels()
     }
 
-    /// Levels wait in `desired`; the worker applies them as their apps appear, once
-    /// permission is granted. Never prompts.
+    /// Levels and devices wait in `desired`; the worker applies them as their apps
+    /// appear, once permission is granted. Never prompts.
     fn restore_app_levels(&self, levels: &[AppLevel]) {
         let mut state = self.shared.lock();
-        for level in levels.iter().filter(|l| l.volume.is_finite()) {
-            state.set_level(&level.app, Level { volume: level.volume.clamp(0.0, 1.0), muted: level.muted });
-        }
+        state.restore(levels);
         let pending = !state.desired.is_empty();
         drop(state);
         if pending
@@ -720,6 +851,35 @@ impl Backend for Platform {
         {
             let _ = wake.send(Msg::Wake);
         }
+    }
+
+    /// Outputs only: see `MICROPHONE_HINT`.
+    fn devices(&self) -> Result<AudioDevices> {
+        let outputs = if tap::supported() { device::outputs()? } else { Vec::new() };
+        Ok(AudioDevices { outputs, inputs: Vec::new() })
+    }
+
+    /// A device pins the app to it, the default output included; `None` lets it
+    /// follow the default output again.
+    fn set_app_device(&self, app: &str, direction: Endpoint, device: Option<&str>) -> Result<()> {
+        if direction == Endpoint::Input {
+            return Err(AudioError::Unsupported(MICROPHONE_HINT.into()));
+        }
+        if !tap::supported() {
+            return Err(AudioError::Unsupported(OUTPUT_UNSUPPORTED_HINT.into()));
+        }
+        let output = match device {
+            // Going back to the default output stays possible.
+            Some(_) if device::default_device(Endpoint::Output).is_ok_and(aggregate) => {
+                return Err(AudioError::Unsupported(AGGREGATE_HINT.into()));
+            }
+            Some(query) => Some(find_device(&device::outputs()?, query)?.id.clone()),
+            None => None,
+        };
+        // From a fresh listing, unlike the levels of a dragged slider: an app started
+        // since the last one must not lose to an older, looser match.
+        let app = find_app(&self.apps()?, app).cloned().ok_or_else(|| AudioError::AppNotFound(app.into()))?;
+        self.update_app(&app, |wanted| wanted.output = output)
     }
 }
 
@@ -924,7 +1084,7 @@ mod tests {
     fn restored_level_applies_when_app_starts() {
         require_permission();
         let platform = Platform::new();
-        let saved = AppLevel { app: "afplay".into(), volume: 0.5, muted: false };
+        let saved = AppLevel { app: "afplay".into(), volume: 0.5, muted: false, output: None };
         platform.restore_app_levels(std::slice::from_ref(&saved));
         assert_eq!(platform.app_levels(), [saved]);
         assert!(!platform.shared.lock().has_taps());
@@ -940,6 +1100,254 @@ mod tests {
         assert_eq!(app.volume, 0.5);
         platform.set_app_volume(&app, 1.0).unwrap();
         assert!(platform.app_levels().is_empty());
+    }
+
+    /// A tap is needed for a level, or to play on another device than the default
+    /// output; the software master only reaches what plays on the default output.
+    #[test]
+    fn taps_play_where_the_app_is_sent() {
+        let (default, headphones, master) = (10, 20, 0.5);
+        let wanted = |volume, output: Option<&str>| Wanted {
+            level: Level { volume, muted: false },
+            output: output.map(str::to_string),
+        };
+        let quiet = wanted(0.5, None);
+        assert_eq!(quiet.placement(None, default, master), Some((default, 0.125 * master)));
+        // Sent to the headphones: played there, at its own level only.
+        let sent = wanted(1.0, Some("headphones"));
+        assert_eq!(sent.placement(Some(headphones), default, master), Some((headphones, 1.0)));
+        assert_eq!(
+            wanted(0.5, Some("headphones")).placement(Some(headphones), default, master),
+            Some((headphones, 0.125))
+        );
+        // Unplugged, or the headphones became the default output: it plays natively.
+        assert_eq!(sent.placement(None, default, master), None);
+        assert_eq!(sent.placement(Some(headphones), headphones, master), None);
+        assert!(!sent.is_default(), "the choice is kept for when they are back");
+        assert!(wanted(1.0, None).is_default());
+
+        // A change that fails is undone, except for letting go of a device.
+        let pinned = wanted(0.5, Some("headphones"));
+        assert_eq!(wanted(0.2, Some("headphones")).undone(&pinned), pinned);
+        assert_eq!(wanted(0.5, Some("speakers")).undone(&pinned), pinned);
+        assert_eq!(wanted(0.5, None).undone(&pinned), wanted(0.5, None));
+    }
+
+    /// An output device is saved like a level, also for an app at 100%.
+    #[test]
+    fn saved_levels_keep_the_output() {
+        let saved = [
+            AppLevel { app: "com.hnc.Discord".into(), volume: 0.5, muted: true, output: None },
+            AppLevel {
+                app: "com.spotify.client".into(),
+                volume: 1.0,
+                muted: false,
+                output: Some("BuiltInSpeakerDevice".into()),
+            },
+        ];
+        let mut state = State::default();
+        state.restore(&saved);
+        state.restore(&[AppLevel { app: "afplay".into(), volume: 1.0, muted: false, output: None }]);
+        assert_eq!(state.levels(), saved);
+    }
+
+    fn route_of(platform: &Platform, id: &str) -> Option<AppRoute> {
+        platform.apps().unwrap().into_iter().find(|a| a.id == id).expect("app listed").output
+    }
+
+    fn tap_devices(platform: &Platform, id: &str) -> Option<(ObjectId, ObjectId)> {
+        platform.shared.lock().taps.get(id).map(|t| (t.from, t.device))
+    }
+
+    /// The default output and the other real outputs, as (device, info).
+    fn outputs(platform: &Platform) -> (ObjectId, Vec<(ObjectId, crate::AudioDeviceInfo)>) {
+        let outputs = platform.devices().unwrap().outputs;
+        let object = |d: &crate::AudioDeviceInfo| ca::device_with_uid(&d.id).expect("listed device");
+        let default = outputs.iter().find(|d| d.is_default).map(object).expect("a default output");
+        let others = outputs.into_iter().filter(|d| !d.is_default && !d.is_virtual).map(|d| (object(&d), d)).collect();
+        (default, others)
+    }
+
+    /// An app sent to another output is played there by its tap, at its own level and
+    /// without dropouts, stays pinned to an output chosen by id, and follows the
+    /// default output again once that is chosen. Plays the quiet tone on a second
+    /// output device for about ten seconds.
+    #[test]
+    #[ignore]
+    fn app_plays_on_the_output_it_is_sent_to() {
+        require_permission();
+        let platform = Platform::new();
+        let (default, others) = outputs(&platform);
+        let Some((other, info)) = others.first() else {
+            eprintln!("skipped: needs a second output device");
+            return;
+        };
+        let device = |id: &str| Some(AppRoute::Device { id: id.into() });
+        let tone = Tone::play();
+        tone.object();
+        assert_eq!(route_of(&platform, "afplay"), Some(AppRoute::Default));
+
+        // By name, like a hand-written action.
+        platform.set_app_device("afplay", Endpoint::Output, Some(&info.name)).unwrap();
+        eprintln!("afplay -> {}", info.name);
+        assert_eq!(
+            tap_devices(&platform, "afplay"),
+            Some((default, *other)),
+            "tapped on the default, played on the other"
+        );
+        assert_eq!(route_of(&platform, "afplay"), device(&info.id));
+        assert!((gain_of(|| tap_peaks(&platform, "afplay")) - 1.0).abs() < 0.02);
+        assert!(testing::running(*other), "{} is not playing", info.name);
+
+        // Its level is its own there. Four times the largest step of the 440 Hz tone
+        // still is far below what a dropout or a drifting clock makes.
+        platform.set_app_volume(&platform.find("afplay").unwrap(), 0.5).unwrap();
+        assert!((gain_of(|| tap_peaks(&platform, "afplay")) - 0.125).abs() < 0.01);
+        let step = || platform.shared.lock().taps.get("afplay").map(|t| t.take_step()).expect("tap running");
+        step();
+        thread::sleep(Duration::from_secs(8));
+        let (step, limit) = (step(), 4.0 * testing::TONE_STEP);
+        eprintln!("largest step in 8 s: {step:.5} (limit {limit:.5})");
+        assert!(step < limit, "the tone is not continuous on {}", info.name);
+        let saved = AppLevel { app: "afplay".into(), volume: 0.5, muted: false, output: Some(info.id.clone()) };
+        assert_eq!(platform.app_levels(), [saved]);
+
+        let microphone = platform.set_app_device("afplay", Endpoint::Input, None);
+        assert!(matches!(microphone, Err(AudioError::Unsupported(_))), "{microphone:?}");
+        let missing = platform.set_app_device("afplay", Endpoint::Output, Some("no such speaker"));
+        assert!(matches!(missing, Err(AudioError::DeviceNotFound(_))), "{missing:?}");
+        assert_eq!(tap_devices(&platform, "afplay"), Some((default, *other)));
+
+        // Pinned to the default output: nothing to move, only the level keeps its tap.
+        let default_uid = device::uid(default).unwrap();
+        platform.set_app_device("afplay", Endpoint::Output, Some(&default_uid)).unwrap();
+        assert_eq!(tap_devices(&platform, "afplay"), Some((default, default)));
+        assert_eq!(route_of(&platform, "afplay"), device(&default_uid));
+        assert!((gain_of(|| tap_peaks(&platform, "afplay")) - 0.125).abs() < 0.01);
+        platform.set_app_volume(&platform.find("afplay").unwrap(), 1.0).unwrap();
+        assert!(platform.shared.lock().taps.is_empty(), "at 100% on the default output it plays natively");
+        assert_eq!(platform.app_levels().len(), 1, "the pin is kept");
+
+        platform.set_app_device("afplay", Endpoint::Output, None).unwrap();
+        assert_eq!(route_of(&platform, "afplay"), Some(AppRoute::Default));
+        assert!(platform.app_levels().is_empty());
+    }
+
+    /// Switching a playing app between outputs over and over never leaves it silent:
+    /// the old tap hands over to the new one while both listen to the app.
+    /// Plays the quiet tone on every real output in turn for a few seconds.
+    #[test]
+    #[ignore]
+    fn switching_outputs_never_silences_the_app() {
+        require_permission();
+        let platform = Platform::new();
+        let (default, others) = outputs(&platform);
+        if others.is_empty() {
+            eprintln!("skipped: needs a second output device");
+            return;
+        }
+        let tone = Tone::play();
+        tone.object();
+        // A level first, so every switch replaces a running tap (also back to the default).
+        platform.set_app_volume(&platform.find("afplay").unwrap(), 0.5).unwrap();
+        let default_uid = device::uid(default).unwrap();
+        let stops: Vec<(ObjectId, &str)> = others
+            .iter()
+            .map(|(object, info)| (*object, info.id.as_str()))
+            .chain([(default, default_uid.as_str())])
+            .collect();
+        for round in 0..4 {
+            for (object, uid) in &stops {
+                platform.set_app_device("afplay", Endpoint::Output, Some(uid)).unwrap();
+                assert_eq!(tap_devices(&platform, "afplay"), Some((default, *object)));
+                thread::sleep(Duration::from_millis(150));
+                tap_peaks(&platform, "afplay");
+                thread::sleep(Duration::from_millis(250));
+                let (input, output) = tap_peaks(&platform, "afplay").expect("tap running");
+                eprintln!("round {round}: on {uid}: in {input:.4} out {output:.4}");
+                assert!(input > 0.005 && output > 0.0005, "silent after switching to {uid}");
+            }
+        }
+        platform.set_app_device("afplay", Endpoint::Output, None).unwrap();
+        platform.set_app_volume(&platform.find("afplay").unwrap(), 1.0).unwrap();
+        assert!(!platform.shared.lock().has_taps());
+    }
+
+    /// Makes a device the system default output until dropped.
+    struct DefaultOutput(ObjectId);
+
+    impl DefaultOutput {
+        fn switch_to(device: ObjectId) -> Self {
+            let previous = DefaultOutput(device::default_device(Endpoint::Output).unwrap());
+            ca::set(ca::SYSTEM, ca::global(kAudioHardwarePropertyDefaultOutputDevice), &device).unwrap();
+            previous
+        }
+    }
+
+    impl Drop for DefaultOutput {
+        fn drop(&mut self) {
+            let _ = ca::set(ca::SYSTEM, ca::global(kAudioHardwarePropertyDefaultOutputDevice), &self.0);
+        }
+    }
+
+    /// An app pinned to an output plays there after the default output changed, also
+    /// when the pin needed no tap until then (it was the default output): the worker
+    /// is what notices. `afplay` keeps the device it opened, so a second one is
+    /// started after the switch. Makes another device the system default output for
+    /// about two seconds.
+    #[test]
+    #[ignore]
+    fn pinned_app_stays_when_the_default_output_changes() {
+        require_permission();
+        let platform = Platform::new();
+        let (default, others) = outputs(&platform);
+        let Some((other, info)) = others.first() else {
+            eprintln!("skipped: needs a second output device");
+            return;
+        };
+        let first = Tone::play();
+        first.object();
+        platform.set_app_device("afplay", Endpoint::Output, Some(&device::uid(default).unwrap())).unwrap();
+        assert!(!platform.shared.lock().has_taps(), "on the default output it plays natively");
+
+        let switched = DefaultOutput::switch_to(*other);
+        eprintln!("default output -> {}", info.name);
+        drop(first);
+        let second = Tone::play();
+        second.object();
+        wait_for("the tap that keeps it on its speaker", || {
+            tap_devices(&platform, "afplay") == Some((*other, default))
+        });
+        assert!((gain_of(|| tap_peaks(&platform, "afplay")) - 1.0).abs() < 0.02);
+        drop(switched);
+        wait_for("native playback again", || !platform.shared.lock().has_taps());
+        platform.set_app_device("afplay", Endpoint::Output, None).unwrap();
+        assert!(platform.app_levels().is_empty());
+    }
+
+    /// A saved output device waits for its app like a saved level does.
+    #[test]
+    #[ignore]
+    fn restored_output_applies_when_app_starts() {
+        require_permission();
+        let platform = Platform::new();
+        let (_, others) = outputs(&platform);
+        let Some((other, info)) = others.first() else {
+            eprintln!("skipped: needs a second output device");
+            return;
+        };
+        let saved = AppLevel { app: "afplay".into(), volume: 1.0, muted: false, output: Some(info.id.clone()) };
+        platform.restore_app_levels(std::slice::from_ref(&saved));
+        assert_eq!(platform.app_levels(), [saved]);
+
+        let _tone = Tone::play();
+        wait_for("the restored output", || {
+            tap_devices(&platform, "afplay").is_some_and(|(_, device)| device == *other)
+        });
+        assert!((gain_of(|| tap_peaks(&platform, "afplay")) - 1.0).abs() < 0.02);
+
+        platform.set_app_device("afplay", Endpoint::Output, None).unwrap();
+        assert!(platform.shared.lock().taps.is_empty() && platform.app_levels().is_empty());
     }
 
     /// The level outlives the process: a restarted app is tapped again by the worker.

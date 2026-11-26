@@ -6,7 +6,8 @@ import type { Action, Control, HaOp, JsonValue, NavTarget, ObsOp, VoiceOp, Volum
 import { useId, useRef, useState, type ReactNode } from "react";
 import { HotkeyInput } from "../../components/HotkeyInput";
 import { I } from "../../components/Icon";
-import { VolumeTargetPicker } from "../../components/VolumeTargetPicker";
+import { DeviceSelect, useDeviceName } from "../../components/DeviceSelect";
+import { AppField, VolumeTargetPicker } from "../../components/VolumeTargetPicker";
 import {
   Button,
   ComboInput,
@@ -15,6 +16,7 @@ import {
   Field,
   Group,
   IconButton,
+  Notice,
   NumberField,
   Range,
   Segmented,
@@ -27,6 +29,7 @@ import {
 import {
   ACTION_GROUPS,
   ACTION_META,
+  APP_DEVICE_LABELS,
   ACTION_TYPES,
   HTTP_METHODS,
   INTERPRETER_LABELS,
@@ -39,6 +42,7 @@ import {
   defaultAction,
   describeAction,
   isActionType,
+  findDevice,
   type ActionOf,
   type NameLookup,
 } from "../../lib/actions";
@@ -77,7 +81,11 @@ export function WhatItDoes({ control, onChange }: { control: Control; onChange: 
   const ha = action?.type === "homeAssistant";
   const entities = useResource(() => (ha ? api.haEntities() : Promise.resolve([])), [ha]);
   const apps = useResource(() => action?.type === "openApp" ? api.installedApps() : Promise.resolve([]), [action?.type === "openApp"]);
-  const names: NameLookup = { ...useActionNames(), entity: (id) => entities.data?.find((e) => e.entityId === id)?.name };
+  const names: NameLookup = {
+    ...useActionNames(),
+    entity: (id) => entities.data?.find((e) => e.entityId === id)?.name,
+    device: useDeviceName(action),
+  };
   const changeKind = (next: Control["kind"]) => onChange({
     kind: next,
     style: applyAutoLabel(style, kind, next, { ...names, app: (launch) => apps.data?.find((app) => app.launch === launch)?.name }),
@@ -204,6 +212,8 @@ function ActionForm({ action, onChange, depth }: { action: Action; onChange: (ac
       );
     case "volume":
       return <VolumeForm action={action} onChange={onChange} depth={depth} />;
+    case "appDevice":
+      return <AppDeviceForm action={action} onChange={onChange} depth={depth} />;
     case "voice":
       return <VoiceForm action={action} onChange={onChange} depth={depth} />;
     case "obs":
@@ -429,6 +439,44 @@ function VolumeForm({ action, onChange }: FormProps<"volume">) {
           />
         </Field>
       )}
+    </>
+  );
+}
+
+/** The device one app plays on or records from. Says so when this computer cannot do it. */
+function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
+  const mixer = useResource(() => api.getMixer());
+  const capabilities = mixer.data?.capabilities;
+  const output = action.direction === "output";
+  const supported = !capabilities || (output ? capabilities.perAppOutput : capabilities.perAppInput);
+  const note = output ? capabilities?.outputNote : capabilities?.inputNote;
+  const devices = (output ? mixer.data?.devices.outputs : mixer.data?.devices.inputs) ?? [];
+  // A device written by name (by hand, or by the assistant) is the one the host will pick.
+  const device = action.device === null ? null : (findDevice(devices, action.device)?.id ?? action.device);
+  return (
+    <>
+      <Field label="App" compact>
+        <AppField value={action.app} recorders={!output} onChange={(app) => onChange({ ...action, app })} />
+      </Field>
+      <Field label="Change its" compact>
+        <EnumSelect
+          ariaLabel="Change its"
+          value={action.direction}
+          labels={APP_DEVICE_LABELS}
+          onChange={(direction) => onChange({ ...action, direction, device: null })}
+        />
+      </Field>
+      <Field label={output ? "Play on" : "Record from"} compact>
+        <DeviceSelect
+          ariaLabel={output ? "Play on" : "Record from"}
+          devices={devices}
+          value={device === null ? { type: "default" } : { type: "device", id: device }}
+          missing={`Not connected: ${device}`}
+          onChange={(device) => onChange({ ...action, device })}
+        />
+      </Field>
+      {!supported && <Notice tone="warn">{note ?? "This computer cannot do that."}</Notice>}
+      {supported && note && <p className="text-xs text-muted">{note}</p>}
     </>
   );
 }

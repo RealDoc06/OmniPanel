@@ -20,7 +20,7 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
 | Path | What |
 | --- | --- |
 | `crates/omni-core` | Domain model (config, profiles, controls, actions), deck protocol, UI runtime types, built-in themes / voice presets, config persistence. Every cross-boundary type derives `ts_rs::TS`. |
-| `crates/omni-audio` | Master / mic / per-app volume. macOS CoreAudio + process taps, Windows WASAPI, Linux `pactl`. |
+| `crates/omni-audio` | Master / mic / per-app volume, and the device each app plays on and records from. macOS CoreAudio + process taps, Windows WASAPI, Linux `pactl`. |
 | `crates/omni-voice` | Real-time voice changer: mic → effect chain → output device (virtual cable). |
 | `crates/omni-actions` | Executes leaf actions: keys, apps, scripts, media, volume, system, HTTP, OBS (obs-websocket v5), Home Assistant. Installed-app discovery. |
 | `crates/omni-ai` | LLM providers (OpenAI default `gpt-6-luna`, Anthropic, Ollama, OpenRouter, custom OpenAI-compatible) that turn a description into a `GeneratedControl`. |
@@ -51,6 +51,11 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
   rewrites when a release is published and its packages verify (GitHub's "latest release" link skips
   prereleases). The user starts every install from Settings; deb and rpm installs only get a link, the
   package manager owns those files.
+- **Per-app devices** are reported per platform through `AudioCapabilities`, and
+  both the Sound screen and the `appDevice` action show its reason where one is
+  missing. Linux moves an app's streams with `pactl`. macOS plays the app's tap on
+  the chosen output and cannot change what another app records from. Windows has
+  neither yet: its only route is the undocumented `IAudioPolicyConfig`.
 - **Flow-control actions** (`multi`, `toggle`, `delay`, `navigate`, `voice`)
   live in `omni-host`; all other actions are leaves run by `omni-actions`.
 

@@ -84,7 +84,7 @@ pub struct Inner {
     voice_dirty: Notify,
     audio_snapshot: Mutex<feedback::AudioSnapshot>,
     sliders: mpsc::UnboundedSender<(VolumeTarget, f32)>,
-    /// An app volume changed: persist `audio.app_levels()` soon.
+    /// An app volume or device changed: persist `audio.app_levels()` soon.
     app_levels_dirty: Notify,
     ui_active: AtomicBool,
     last_runtime: Mutex<Option<RuntimeState>>,
@@ -467,10 +467,10 @@ impl Host {
         Ok(())
     }
 
-    /// Run a leaf action; persist app volume changes even if applying them fails.
+    /// Run a leaf action; persist app volume and device changes even if applying them fails.
     pub(crate) async fn run_leaf(&self, action: &Action) -> Result<ActionOutcome> {
         let outcome = self.executor.run(action).await;
-        if let Action::Volume { target: VolumeTarget::App { .. }, .. } = action {
+        if let Action::Volume { target: VolumeTarget::App { .. }, .. } | Action::AppDevice { .. } = action {
             self.app_levels_dirty.notify_one();
         }
         Ok(outcome?)
@@ -655,8 +655,8 @@ async fn voice_worker(host: Host) {
     }
 }
 
-/// Saves per-app levels to the config a moment after they stop changing
-/// (sliders send bursts), so they can be restored on the next start.
+/// Saves per-app levels and devices to the config a moment after they stop
+/// changing (sliders send bursts), so they can be restored on the next start.
 async fn persist_app_levels(host: Host) {
     loop {
         host.app_levels_dirty.notified().await;
