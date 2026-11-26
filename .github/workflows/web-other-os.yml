@@ -2,7 +2,7 @@ name: Web (macOS, Windows)
 
 # web.yml only runs on Linux, but TypeScript, Vite, esbuild, swc and Tailwind
 # ship one binary per OS and releases are built on all three. When dependencies
-# or the build scripts change, this runs the same checks on the other two.
+# or the build setup change, this runs the same checks on the other two.
 on:
   push:
     branches: [main]
@@ -10,8 +10,11 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "**/package.json"
+      - "**/tsconfig*.json"
+      - ".npmrc"
       - "apps/deck/build.mjs"
       - "apps/desktop/vite.config.ts"
+      - ".github/workflows/web.yml"
       - ".github/workflows/web-other-os.yml"
   pull_request:
     paths: *paths
@@ -42,6 +45,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm build:deck
       - run: pnpm typecheck
       - run: pnpm build:ui
       - run: pnpm -r test

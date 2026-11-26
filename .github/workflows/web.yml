@@ -42,7 +42,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm build:deck
       - run: pnpm typecheck
       - run: pnpm build:ui
-      # The deck test builds the deck client and checks that the output is ES5.
+      # The deck test checks that the built deck client is ES5.
       - run: pnpm -r test

@@ -44,8 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # Dependencies only. Restores the closest cache in reach (this pull
-      # request's, else main's) and saves a new one only when that was no exact match.
+      # Caches Rust dependencies between runs.
       - uses: Swatinem/rust-cache@v2
       - name: Linux system deps
         if: runner.os == 'Linux'
