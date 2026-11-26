@@ -10,7 +10,7 @@ note: string | null,
  */
 perAppOutput: boolean, 
 /**
- * Why they cannot, or a permission hint.
+ * Why they cannot, a permission hint, or what such a choice means on this system.
  */
 outputNote: string | null, 
 /**
@@ -18,6 +18,6 @@ outputNote: string | null,
  */
 perAppInput: boolean, 
 /**
- * Why they cannot.
+ * Why they cannot, or what such a choice means on this system.
  */
 inputNote: string | null, };

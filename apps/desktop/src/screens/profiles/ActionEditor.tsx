@@ -476,6 +476,7 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
         />
       </Field>
       {!supported && <Notice tone="warn">{note ?? "This computer cannot do that."}</Notice>}
+      {supported && note && <p className="text-xs text-muted">{note}</p>}
     </>
   );
 }

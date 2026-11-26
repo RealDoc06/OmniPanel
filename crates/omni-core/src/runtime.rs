@@ -156,11 +156,11 @@ pub struct AudioCapabilities {
     pub note: Option<String>,
     /// Apps can be sent to an output device of their own.
     pub per_app_output: bool,
-    /// Why they cannot, or a permission hint.
+    /// Why they cannot, a permission hint, or what such a choice means on this system.
     pub output_note: Option<String>,
     /// Apps can be given a microphone of their own.
     pub per_app_input: bool,
-    /// Why they cannot.
+    /// Why they cannot, or what such a choice means on this system.
     pub input_note: Option<String>,
 }
 

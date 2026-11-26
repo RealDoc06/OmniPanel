@@ -120,7 +120,10 @@ function Mixer() {
     api
       .runAction({ type: "appDevice", app: app.id, direction, device })
       .catch(toastError)
-      .finally(() => (moving.current -= 1));
+      .finally(() => {
+        moving.current -= 1;
+        touchedAt.current = Date.now(); // a poll sent during the move may still be on its way
+      });
   };
 
   // One select per shown direction, while the app has such a stream. Where the

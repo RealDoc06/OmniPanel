@@ -311,6 +311,7 @@ const audioDevices: { inputs: AudioDeviceInfo[]; outputs: AudioDeviceInfo[] } = 
 };
 
 const NO_WINDOWS_DEVICES = "Choosing a device per app is not available on Windows yet.";
+const DEFAULT_FOLLOWS = "An app sent to the default device follows the default from then on.";
 
 const os = /mac/i.test(navigator.platform) ? "macos" : /win/i.test(navigator.platform) ? "windows" : "linux";
 
@@ -366,12 +367,12 @@ function runtime(): RuntimeState {
       note: os === "macos" ? "Per-app volume needs System Settings > Privacy & Security > Screen & System Audio Recording." : null,
       // As the real backends: Linux moves both, macOS only what an app plays, Windows neither yet.
       perAppOutput: os !== "windows",
-      outputNote: os === "windows" ? NO_WINDOWS_DEVICES : null,
+      outputNote: os === "windows" ? NO_WINDOWS_DEVICES : os === "linux" ? DEFAULT_FOLLOWS : null,
       perAppInput: os === "linux",
       inputNote:
         os === "macos" ? "macOS has no way to change another app's microphone. Pick it in the app's own settings."
         : os === "windows" ? NO_WINDOWS_DEVICES
-        : null,
+        : DEFAULT_FOLLOWS,
     },
   };
 }

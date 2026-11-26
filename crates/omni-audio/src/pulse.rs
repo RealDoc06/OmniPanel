@@ -25,6 +25,9 @@ use crate::{
 const NORM: f32 = 65536.0;
 const MISSING: &str = "pactl not found: install pulseaudio-utils (works with PipeWire via pipewire-pulse)";
 const TOO_OLD: &str = "per-app volume and devices need pactl 16 or newer (pulseaudio-utils)";
+/// Both sound servers' rule for a stream moved onto the default device, which makes
+/// that device, chosen by name, the same choice as "system default".
+const DEFAULT_FOLLOWS: &str = "An app sent to the default device follows the default from then on.";
 /// pactl waits forever on a stuck sound server.
 const PACTL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an app gets to arrive on the device it is moved to, how often that is
@@ -182,22 +185,41 @@ impl Stream {
     }
 }
 
-/// One app and the indices of its streams.
+/// One stream of an app and the device (sink or source name) it is on. A stream
+/// between devices (PipeWire, mid-move) is on none for a moment.
+#[derive(Debug, Clone, PartialEq)]
+struct AppStream {
+    index: u32,
+    device: Option<String>,
+}
+
+/// One app and its streams.
 #[derive(Debug)]
 struct App {
     audio: AppAudio,
-    playback: Vec<u32>,
-    recording: Vec<u32>,
+    playback: Vec<AppStream>,
+    recording: Vec<AppStream>,
 }
 
 impl App {
-    /// Where the app plays (records) and the streams doing it.
-    fn side(&self, direction: Endpoint) -> (&Option<AppRoute>, &[u32]) {
+    /// The streams the app plays (records) with.
+    fn side(&self, direction: Endpoint) -> &[AppStream] {
         match direction {
-            Endpoint::Output => (&self.audio.output, &self.playback),
-            Endpoint::Input => (&self.audio.input, &self.recording),
+            Endpoint::Output => &self.playback,
+            Endpoint::Input => &self.recording,
         }
     }
+}
+
+/// Where an app with these streams is: on the device they all share, else on several.
+/// pactl does not say which streams follow the default, so it is never
+/// `AppRoute::Default` here.
+fn route(streams: &[AppStream]) -> Option<AppRoute> {
+    let first = streams.first()?;
+    Some(match &first.device {
+        Some(device) if streams.iter().all(|s| s.device == first.device) => AppRoute::Device { id: device.clone() },
+        _ => AppRoute::Several,
+    })
 }
 
 /// Apps (sorted by name) and the devices they can be sent to.
@@ -205,17 +227,6 @@ impl App {
 struct Listing {
     apps: Vec<App>,
     devices: AudioDevices,
-}
-
-/// The route of an app with one more stream on `device`: that device while all its
-/// streams share it. pactl does not say which streams follow the default, so an app
-/// is never reported as `AppRoute::Default` here.
-fn joined(route: Option<AppRoute>, device: Option<&str>) -> AppRoute {
-    match (route, device) {
-        (None, Some(device)) => AppRoute::Device { id: device.into() },
-        (Some(AppRoute::Device { id }), Some(device)) if id == device => AppRoute::Device { id },
-        _ => AppRoute::Several,
-    }
 }
 
 /// Groups the streams of `pactl -f json list` by binary into apps. Recording from a
@@ -226,13 +237,13 @@ fn parse_listing(json: &str) -> Result<Listing> {
     let mut apps: Vec<App> = Vec::new();
     for stream in &raw.sink_inputs {
         let id = stream.app_id().map_or_else(|| format!("sink-input-{}", stream.index), str::to_string);
-        let sink = raw.sinks.iter().find(|d| Some(d.index) == stream.device).map(|d| d.name.as_str());
+        let sink = raw.sinks.iter().find(|d| Some(d.index) == stream.device).map(|d| d.name.clone());
+        let playing = AppStream { index: stream.index, device: sink };
         if let Some(app) = apps.iter_mut().find(|a| a.audio.id == id) {
-            app.playback.push(stream.index);
+            app.playback.push(playing);
             app.audio.volume = app.audio.volume.max(stream.volume());
             app.audio.muted &= stream.mute;
             app.audio.playing |= !stream.corked;
-            app.audio.output = Some(joined(app.audio.output.take(), sink));
             continue;
         }
         let audio = AppAudio {
@@ -242,10 +253,10 @@ fn parse_listing(json: &str) -> Result<Listing> {
             volume: stream.volume(),
             muted: stream.mute,
             playing: !stream.corked,
-            output: Some(joined(None, sink)),
+            output: None,
             input: None,
         };
-        apps.push(App { audio, playback: vec![stream.index], recording: Vec::new() });
+        apps.push(App { audio, playback: vec![playing], recording: Vec::new() });
     }
     let microphones: Vec<&Device> = raw.sources.iter().filter(|d| !d.is_monitor()).collect();
     for stream in &raw.source_outputs {
@@ -274,8 +285,11 @@ fn parse_listing(json: &str) -> Result<Listing> {
                 apps.last_mut().expect("just pushed")
             }
         };
-        app.recording.push(stream.index);
-        app.audio.input = Some(joined(app.audio.input.take(), source.map(|d| d.name.as_str())));
+        app.recording.push(AppStream { index: stream.index, device: source.map(|d| d.name.clone()) });
+    }
+    for app in &mut apps {
+        app.audio.output = route(&app.playback);
+        app.audio.input = route(&app.recording);
     }
     apps.sort_by_cached_key(|a| a.audio.name.to_lowercase());
     let devices = AudioDevices {
@@ -307,41 +321,54 @@ impl Platform {
         parse_listing(&json)
     }
 
-    /// Moves the app's playback (recording) streams to `device` and watches them arrive.
+    /// Moves the app's playback (recording) streams to `device`, all of them or `only`
+    /// some, and watches them arrive.
     ///
     /// pactl reports a move as done when the sound server took the request. PipeWire
     /// now and then applies it a moment later, or not at all (it drops about one move
     /// in three that follows another of the same stream at once, none 0.3 s later).
-    /// So the move is asked again while the app is not there, each time after twice
-    /// as long, and fails when it never gets there.
-    fn move_app(&self, app: &App, direction: Endpoint, device: &AudioDeviceInfo) -> Result<()> {
+    /// So the move is asked again for the streams that are not there, each time
+    /// after twice as long, and fails when they never get there.
+    fn move_streams(
+        &self,
+        app: &App,
+        direction: Endpoint,
+        only: Option<&[u32]>,
+        device: &AudioDeviceInfo,
+    ) -> Result<()> {
         let verb = if direction == Endpoint::Output { "move-sink-input" } else { "move-source-output" };
-        let mut streams = app.side(direction).1.to_vec();
+        let meant = |s: &&AppStream| only.is_none_or(|only| only.contains(&s.index));
+        // What is left to move: also streams the app opens meanwhile, unless `only`.
+        let elsewhere = |app: &App| -> Vec<u32> {
+            let streams = app.side(direction).iter().filter(meant);
+            streams.filter(|s| s.device.as_ref() != Some(&device.id)).map(|s| s.index).collect()
+        };
         let (deadline, mut patience) = (Instant::now() + MOVE_TIMEOUT, MOVE_REPEAT);
-        loop {
+        // Every stream first, wherever `app` (listed a moment ago) has it.
+        let mut streams: Vec<u32> = app.side(direction).iter().filter(meant).map(|s| s.index).collect();
+        while !streams.is_empty() {
             // A stream that just ended fails its move: where the others went is what counts.
             let mut failed = None;
             for index in &streams {
                 failed = pactl(&[verb, &index.to_string(), &device.id]).err().or(failed);
             }
             let asked = Instant::now();
-            while asked.elapsed() < patience {
+            while !streams.is_empty() && asked.elapsed() < patience {
                 let now = self.list()?.apps;
                 let Some(now) = now.into_iter().find(|a| a.audio.id == app.audio.id) else { return Ok(()) };
-                let (route, left) = now.side(direction);
-                if left.is_empty() || matches!(route, Some(AppRoute::Device { id }) if *id == device.id) {
-                    return Ok(());
+                streams = elsewhere(&now);
+                if !streams.is_empty() {
+                    if Instant::now() >= deadline {
+                        let (app, device) = (&app.audio.name, &device.name);
+                        let stuck = || AudioError::Backend(format!("the sound server did not move {app} to {device}"));
+                        return Err(failed.unwrap_or_else(stuck));
+                    }
+                    std::thread::sleep(MOVE_POLL);
                 }
-                if Instant::now() >= deadline {
-                    let (app, device) = (&app.audio.name, &device.name);
-                    let stuck = || AudioError::Backend(format!("the sound server did not move {app} to {device}"));
-                    return Err(failed.unwrap_or_else(stuck));
-                }
-                streams = left.to_vec();
-                std::thread::sleep(MOVE_POLL);
             }
             patience *= 2;
         }
+        Ok(())
     }
 
     /// Marks the default sink and source, which the listing does not name.
@@ -361,7 +388,8 @@ impl Platform {
     fn playback_of(&self, app: &AppAudio) -> Result<Vec<u32>> {
         let latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         let found = latest.apps.iter().find(|a| a.audio.id == app.id);
-        let streams = found.ok_or_else(|| AudioError::AppNotFound(app.id.clone()))?.playback.clone();
+        let streams = &found.ok_or_else(|| AudioError::AppNotFound(app.id.clone()))?.playback;
+        let streams: Vec<u32> = streams.iter().map(|s| s.index).collect();
         if streams.is_empty() {
             return Err(AudioError::Backend(format!("{} is not playing anything", app.name)));
         }
@@ -390,13 +418,14 @@ impl Backend for Platform {
             (true, false) => None,
         };
         let works = note.is_none();
+        let device_note = note.clone().or_else(|| Some(DEFAULT_FOLLOWS.to_string()));
         AudioCapabilities {
             per_app_volume: works,
-            note: note.clone(),
+            note,
             per_app_output: works,
-            output_note: note.clone(),
+            output_note: device_note.clone(),
             per_app_input: works,
-            input_note: note,
+            input_note: device_note,
         }
     }
 
@@ -453,7 +482,7 @@ impl Backend for Platform {
         let Listing { apps, devices } = self.list()?;
         let app = best_match(&apps, app, |a| &a.audio.id, |a| &a.audio.name)
             .ok_or_else(|| AudioError::AppNotFound(app.into()))?;
-        let (route, streams) = app.side(direction);
+        let streams = app.side(direction);
         if streams.is_empty() {
             // Nothing to move, and nowhere to keep the choice for later.
             let idle = if direction == Endpoint::Output { "playing" } else { "recording" };
@@ -472,22 +501,23 @@ impl Backend for Platform {
                 AudioError::Backend(format!("the system default is not a device {} can use", app.audio.name))
             })?;
             // Only a move onto the default device makes a stream follow the default
-            // again: both sound servers ignore one that changes nothing. So an app
-            // that is already there goes by another device, for a moment, to forget
-            // an earlier choice of this one. (One spread over several devices is
-            // just gathered: what was there already keeps its choice.)
-            if matches!(route, Some(AppRoute::Device { id }) if *id == default.id) {
+            // again: both sound servers ignore one that changes nothing. So streams
+            // that are already there go by another device, for a moment, to forget
+            // an earlier choice of this one.
+            let there: Vec<u32> =
+                streams.iter().filter(|s| s.device.as_ref() == Some(&default.id)).map(|s| s.index).collect();
+            if !there.is_empty() {
                 let other = devices.iter().find(|d| d.id != default.id).ok_or_else(|| {
                     let app = &app.audio.name;
                     AudioError::Backend(format!(
                         "{app} is on the default device already, and making it follow the default again takes a second device"
                     ))
                 })?;
-                self.move_app(app, direction, other)?;
+                self.move_streams(app, direction, Some(&there), other)?;
             }
-            return self.move_app(app, direction, default);
+            return self.move_streams(app, direction, None, default);
         };
-        self.move_app(app, direction, find_device(devices, query)?)
+        self.move_streams(app, direction, None, find_device(devices, query)?)
     }
 }
 
@@ -519,21 +549,23 @@ mod tests {
         let firefox = &apps[0];
         let audio = &firefox.audio;
         assert_eq!((audio.id.as_str(), audio.name.as_str(), audio.pid), ("firefox", "Firefox", Some(4321)));
-        assert_eq!(firefox.playback, [75, 81]);
+        let indices = |streams: &[AppStream]| streams.iter().map(|s| s.index).collect::<Vec<_>>();
+        assert_eq!(indices(&firefox.playback), [75, 81]);
         assert_eq!(audio.volume, 1.0); // loudest stream
         assert!(!audio.muted); // only one of two streams is muted
         assert!(audio.playing); // one stream is not corked
 
         let spotify = &apps[1];
         assert_eq!((spotify.audio.id.as_str(), spotify.audio.volume, spotify.audio.playing), ("spotify", 1.0, true));
-        assert_eq!(spotify.playback, [88]);
+        assert_eq!(indices(&spotify.playback), [88]);
 
         assert!(parse_listing("{}").unwrap().apps.is_empty());
         // A recording stream between sources still belongs to its app, on no device.
         let unlinked =
             r#"{"source_outputs":[{"index":7,"source":4294967295,"properties":{"application.name":"Recorder"}}]}"#;
         let apps = parse_listing(unlinked).unwrap().apps;
-        assert_eq!((apps[0].recording.as_slice(), &apps[0].audio.input), ([7].as_slice(), &Some(AppRoute::Several)));
+        assert_eq!(apps[0].recording, [AppStream { index: 7, device: None }]);
+        assert_eq!(apps[0].audio.input, Some(AppRoute::Several));
         assert!(parse_listing("Connection failure: Connection refused").is_err());
     }
 
@@ -558,10 +590,11 @@ mod tests {
         let firefox = &apps[0];
         assert_eq!(firefox.audio.output, on("alsa_output.pci-0000_00_1f.3.analog-stereo")); // both tabs
         assert_eq!(firefox.audio.input, on("alsa_input.pci-0000_00_1f.3.analog-stereo"));
-        assert_eq!(firefox.recording, [104]);
+        assert_eq!(firefox.recording.len(), 1);
         // A third tab on the headphones: the app is on no single device any more.
-        assert_eq!(joined(firefox.audio.output.clone(), Some("headphones")), AppRoute::Several);
-        assert_eq!(joined(Some(AppRoute::Several), Some("headphones")), AppRoute::Several);
+        let mut tabs = firefox.playback.clone();
+        tabs.push(AppStream { index: 90, device: Some("headphones".into()) });
+        assert_eq!(route(&tabs), Some(AppRoute::Several));
 
         let spotify = &apps[1];
         assert_eq!((&spotify.audio.input, spotify.recording.len()), (&None, 0));
@@ -572,7 +605,7 @@ mod tests {
         assert_eq!((discord.audio.id.as_str(), discord.audio.pid), ("Discord", Some(7001)));
         assert_eq!((&discord.audio.output, discord.audio.playing), (&None, false));
         assert_eq!(discord.audio.input, on("alsa_input.usb-046d_C922-02.analog-stereo"));
-        assert_eq!((discord.playback.len(), discord.recording.as_slice()), (0, [100].as_slice()));
+        assert_eq!((discord.playback.len(), discord.recording[0].index), (0, 100));
     }
 
     /// Two null sinks and two microphones (remapped monitors) loaded into the running
@@ -676,12 +709,25 @@ mod tests {
         platform.set_app_device("pacat", Endpoint::Input, None).unwrap();
         on("omni_test_a", "omni_test_mic_a");
 
-        // An app that is on the default device by choice (it was sent to b, which then
-        // became the default) follows the default again after "system default".
+        // A stream that is on the default device by choice (it was sent to b, which then
+        // became the default) follows the default again after "system default". So
+        // does the rest of an app spread over two devices.
         platform.set_app_device("pacat", Endpoint::Output, Some("omni_test_b")).unwrap();
         pactl(&["set-default-sink", "omni_test_b"]).unwrap();
+        let zero = std::fs::File::open("/dev/zero").unwrap();
+        let mut second =
+            Command::new("pacat").args(["--playback", "--device=omni_test_a", "--raw"]).stdin(zero).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pacat().and_then(|a| a.output) != Some(AppRoute::Several) {
+            assert!(Instant::now() < deadline, "the second stream never showed up");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         platform.set_app_device("pacat", Endpoint::Output, None).unwrap();
+        on("omni_test_b", "omni_test_mic_a");
         pactl(&["set-default-sink", "omni_test_a"]).unwrap();
+        on("omni_test_a", "omni_test_mic_a");
+        second.kill().unwrap();
+        second.wait().unwrap();
         on("omni_test_a", "omni_test_mic_a");
 
         // PipeWire drops the second of two moves of a stream in quick succession about
@@ -689,8 +735,8 @@ mod tests {
         // device all the same.
         let recording = platform.list().unwrap().apps.into_iter().find(|a| a.audio.id == "pacat").unwrap().recording;
         for round in 0..40 {
-            for index in &recording {
-                pactl(&["move-source-output", &index.to_string(), "omni_test_mic_a"]).unwrap();
+            for stream in &recording {
+                pactl(&["move-source-output", &stream.index.to_string(), "omni_test_mic_a"]).unwrap();
             }
             platform.set_app_device("pacat", Endpoint::Input, Some("omni_test_mic_b")).unwrap();
             let moved = Some(AppRoute::Device { id: "omni_test_mic_b".into() });
