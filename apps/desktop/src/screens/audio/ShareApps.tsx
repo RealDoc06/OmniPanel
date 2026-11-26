@@ -87,8 +87,7 @@ export function ShareAppsSection() {
             label="Share an app"
             hint={
               <>
-                {mixer.data?.apps.length === 0 && "Apps show up here while they play sound. You can also type the app's name. "}
-                Don't share the app your call is in: the others would hear themselves.
+                Not listed? Type its exact name. Don't share the app your call is in: the others would hear themselves.
               </>
             }
           >

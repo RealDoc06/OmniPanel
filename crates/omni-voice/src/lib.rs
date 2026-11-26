@@ -155,7 +155,8 @@ impl VoiceEngine {
     /// output once the capture is lined up with this very change. So "stopped"
     /// is heard within one audio callback, and nothing comes through of an app
     /// that was shared before, or shared and stopped again while the capture was
-    /// still busy with it.
+    /// still busy with it. The price: every change, also adding an app, shuts the
+    /// mix for the apps that stay shared until the capture caught up (a short gap).
     pub fn commit_shares(&self, apps: &[String]) {
         let mut committed = self.committed.lock().unwrap_or_else(PoisonError::into_inner);
         if committed.apps != apps {

@@ -121,7 +121,7 @@ impl AppCapture {
         let (mut objects, mut waiting) = (Vec::new(), Vec::new());
         for app in apps {
             let query = app.trim().to_lowercase();
-            let named = groups.iter().filter(|g| g.name.trim().to_lowercase() == query);
+            let named = groups.iter().filter(|g| !query.is_empty() && g.name.trim().to_lowercase() == query);
             let before = objects.len();
             objects.extend(named.flat_map(|g| g.objects.iter().copied()));
             if objects.len() == before {

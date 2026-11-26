@@ -124,7 +124,10 @@ impl AppCapture {
                 break;
             }
             let (writer, feed) = feed(self.rate, self.rate);
-            match Stream::open(&self.client.client, index, &self.tag, self.rate, writer) {
+            // No answer at all ends the sync, and with it the capture (its owner lets
+            // go of it, which hangs up): asking for the other streams as well would
+            // wait as long for each, and a stop must not have to sit that out.
+            match Stream::open(&self.client.client, index, &self.tag, self.rate, writer)? {
                 // The mixer takes feeds every microphone callback; a full queue means it stalled.
                 Ok(stream) if port.add(feed) => drop(self.streams.insert(index, stream)),
                 Ok(_) => return Err(VoiceError::Backend("the microphone stream stalled".into())),
@@ -201,8 +204,9 @@ struct Stream {
 
 impl Stream {
     /// Record sink input `index` as mono f32 at `rate` (the server downmixes and
-    /// resamples), marked with the capture's `tag`.
-    fn open(client: &pulseaudio::Client, index: u32, tag: &str, rate: u32, writer: FeedWriter) -> Result<Self> {
+    /// resamples), marked with the capture's `tag`. The outer error: the server
+    /// did not answer. The inner one: it refused this stream.
+    fn open(client: &pulseaudio::Client, index: u32, tag: &str, rate: u32, writer: FeedWriter) -> Result<Result<Self>> {
         let fragment_frames = ((rate as f32 * FRAGMENT_SECS) as u32).max(1);
         let mut props = protocol::Props::new();
         props.set(Prop::MediaName, c"Shared app sound");
@@ -232,9 +236,10 @@ impl Stream {
             }
         };
         let creator = client.clone();
-        let stream = with_timeout(CREATE_TIMEOUT, move || block_on(creator.create_record_stream(params, callback)))?
-            .map_err(|e| pulse_error(e, "app stream"))?;
-        Ok(Self { stream, writer, opened: Instant::now() })
+        let created = with_timeout(CREATE_TIMEOUT, move || block_on(creator.create_record_stream(params, callback)))?;
+        Ok(created
+            .map(|stream| Self { stream, writer, opened: Instant::now() })
+            .map_err(|e| pulse_error(e, "app stream")))
     }
 
     /// Whether the server still runs this stream for sink input `index`
@@ -339,7 +344,7 @@ impl Watcher {
                         changed();
                     }
                 }
-                if !closed.load(Ordering::Relaxed) {
+                if !closed.load(Ordering::Acquire) {
                     changed();
                 }
             })
@@ -351,7 +356,7 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         // Ends the blocking read, and with it the thread.
-        self.closing.store(true, Ordering::Relaxed);
+        self.closing.store(true, Ordering::Release);
         let _ = self.socket.shutdown(Shutdown::Both);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

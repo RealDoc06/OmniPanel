@@ -653,6 +653,10 @@ impl Session {
         let Shares { apps, revision } = shares;
         // Cleared first: a change during the sync asks for another one.
         self.shares_changed.store(false, Ordering::Relaxed);
+        // The capture is about to change: shut until it is lined up with the new list.
+        if *apps != self.shares_synced {
+            self.gate.applied.store(0, Ordering::Release);
+        }
         let result = if apps.is_empty() {
             self.capture = None;
             Ok(Vec::new())
