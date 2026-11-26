@@ -8,7 +8,7 @@
 //! (stalls, start-up) are fixed by skipping samples or padding silence.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rtrb::Consumer;
 
@@ -45,6 +45,8 @@ pub(crate) struct Reader {
     last: f32,
     /// Anti-aliasing when the output rate is lower than the input rate.
     aa: Option<[Biquad; 2]>,
+    /// See [`Self::starting_over_on`].
+    stale: Option<Arc<AtomicBool>>,
 }
 
 impl Reader {
@@ -68,12 +70,23 @@ impl Reader {
             gain_step: (1.0 / (0.005 * out_rate)) as f32,
             last: 0.0,
             aa: (base_ratio > 1.01).then(|| Biquad::butterworth4((0.45 * out_rate) as f32, in_rate as f32)),
+            stale: None,
         }
+    }
+
+    /// Makes the reader throw away what is buffered and start over whenever `stale`
+    /// is set (which it clears): the writer's way to take back what it wrote.
+    pub fn starting_over_on(mut self, stale: Arc<AtomicBool>) -> Self {
+        self.stale = Some(stale);
+        self
     }
 
     /// Render `frames` output samples; `put(i, sample)` writes frame `i`.
     /// Call once per output callback.
     pub fn render(&mut self, frames: usize, put: impl FnMut(usize, f32)) {
+        if self.stale.as_ref().is_some_and(|stale| stale.swap(false, Ordering::Relaxed)) {
+            self.flush();
+        }
         self.begin(frames, frames);
         self.fill(frames, put);
     }

@@ -465,7 +465,9 @@ unsafe extern "C-unwind" fn on_change(
     _addresses: NonNull<AudioObjectPropertyAddress>,
     _client: *mut c_void,
 ) -> i32 {
-    if let Some((_, changed)) = LISTENER.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+    // Called after the lock is let go: `changed` may make or drop a capture.
+    let changed = LISTENER.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|(_, changed)| changed.clone());
+    if let Some(changed) = changed {
         changed();
     }
     0

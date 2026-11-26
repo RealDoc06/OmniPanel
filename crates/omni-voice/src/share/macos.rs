@@ -26,7 +26,13 @@ impl AppCapture {
 
     /// Capture exactly the apps in `apps` that run now; a new tap's feed goes to
     /// `port`. Returns the apps that are not running.
-    pub fn sync(&mut self, apps: &[String], port: &mut MixerPort) -> Result<Vec<String>> {
+    /// (`_superseded` is for captures that take several requests; a tap is one.)
+    pub fn sync(
+        &mut self,
+        apps: &[String],
+        port: &mut MixerPort,
+        _superseded: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>> {
         let rate = self.rate;
         // The mixer takes feeds every microphone callback; a full queue means it stalled.
         let mut stalled = false;

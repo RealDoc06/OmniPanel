@@ -54,7 +54,7 @@ export function ShareAppsSection() {
               </Button>
             </div>
           )}
-          {(state === "Stopped" || status.shareError) && (
+          {shared.length > 0 && (state === "Stopped" || status.shareError) && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1">
               <Notice tone="error">Sharing stopped{status.shareError || status.error ? `: ${status.shareError ?? status.error}` : "."}</Notice>
               {mac && status.shareError?.includes("System Audio Recording") && (
@@ -85,11 +85,7 @@ export function ShareAppsSection() {
           )}
           <Field
             label="Share an app"
-            hint={
-              <>
-                Not listed? Type its exact name. Don't share the app your call is in: the others would hear themselves.
-              </>
-            }
+            hint="Not listed? Type its exact name. Don't share the app your call is in: the others would hear themselves."
           >
             <form
               className="flex items-center gap-2"

@@ -99,9 +99,32 @@ pub(crate) struct Shared {
 pub(crate) struct ShareGate {
     /// The [`Shares::revision`] the capture was last lined up with.
     applied: AtomicU64,
-    /// Counts the times an app stopped being shared: the input callback then
-    /// throws away what its mixer holds, so nothing captured of it is still heard.
-    removed: AtomicU32,
+    /// Counts the revisions the capture was lined up with: at each new one the input
+    /// callback throws away what its mixer holds, so nothing captured before the
+    /// change is heard after it (an app stopped meanwhile, or stopped and shared
+    /// again in one go).
+    changes: AtomicU32,
+}
+
+impl ShareGate {
+    /// Before the capture changes for `revision`: shut, if that is another revision
+    /// than it is lined up with (true).
+    fn shut_for(&self, revision: u64) -> bool {
+        let changed = self.applied.load(Ordering::Relaxed) != revision;
+        if changed {
+            self.applied.store(0, Ordering::Release);
+        }
+        changed
+    }
+
+    /// The capture is lined up with `revision`: from here on the feeds in the mixer
+    /// belong to exactly its list. `changed` is what [`Self::shut_for`] said.
+    fn line_up(&self, revision: u64, changed: bool) {
+        if changed {
+            self.changes.fetch_add(1, Ordering::Relaxed);
+        }
+        self.applied.store(revision, Ordering::Release);
+    }
 }
 
 impl Shared {
@@ -130,6 +153,10 @@ impl WorkerState {
         if *active {
             f(&self.shared);
         }
+    }
+
+    fn cancelled(&self) -> bool {
+        !*self.active.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn cancel(&self) {
@@ -540,8 +567,6 @@ struct Session {
     /// A [`Command::SharesChanged`] is on its way: the capture reports bursts of
     /// changes (every volume step of any app is one), a single sync answers them all.
     shares_changed: Arc<AtomicBool>,
-    /// The apps the capture was last lined up with.
-    shares_synced: Vec<String>,
 }
 
 impl Drop for Session {
@@ -591,7 +616,9 @@ impl Session {
         let in_block = Arc::new(AtomicUsize::new(0));
         let callbacks = Arc::new(AtomicU32::new(0));
         let (ring, rx) = ring(rate);
-        let reader = Reader::new(rx, rate, out_cfg.sample_rate(), in_block.clone());
+        let output_stale = Arc::<AtomicBool>::default();
+        let reader =
+            Reader::new(rx, rate, out_cfg.sample_rate(), in_block.clone()).starting_over_on(output_stale.clone());
         let on_error = stream_error_handler(events.clone(), generation, "output");
         let stream = output_stream(output, out_cfg, fixed, reader, on_error)?;
 
@@ -612,7 +639,8 @@ impl Session {
             retired_rings: retired_rings_tx,
             mixer,
             gate: gate.clone(),
-            removed: 0,
+            changes: 0,
+            output_stale,
             in_block: in_block.clone(),
             callbacks: callbacks.clone(),
             shared: shared.clone(),
@@ -642,7 +670,6 @@ impl Session {
             gate,
             output_virtual: false,
             shares_changed: Arc::default(),
-            shares_synced: Vec::new(),
         })
     }
 
@@ -654,16 +681,17 @@ impl Session {
         // Cleared first: a change during the sync asks for another one.
         self.shares_changed.store(false, Ordering::Relaxed);
         // The capture is about to change: shut until it is lined up with the new list.
-        if *apps != self.shares_synced {
-            self.gate.applied.store(0, Ordering::Release);
-        }
+        let changed = self.gate.shut_for(*revision);
+        // Nothing more is started for a list the user has moved on from, or once this
+        // worker was let go: the next command, or the stop, must not wait behind it.
+        let superseded = || worker.cancelled() || worker.shared.shares_committed.load(Ordering::Relaxed) != *revision;
         let result = if apps.is_empty() {
             self.capture = None;
             Ok(Vec::new())
         } else if !self.output_virtual {
             Err(VoiceError::Backend(NOT_A_VIRTUAL_MIC.into()))
         } else {
-            self.capture_shares(apps, events)
+            self.capture_shares(apps, events, &superseded)
         };
         self.mixer.drop_retired();
         if result.is_err() {
@@ -681,20 +709,18 @@ impl Session {
             }
             status.share_error = error;
             status.share_waiting = waiting;
-            // The capture of an app that is no longer shared has ended above; what the
-            // mixer still holds of it goes too, before the mix may open for the new list.
-            if self.shares_synced.iter().any(|app| !apps.contains(app)) {
-                self.gate.removed.fetch_add(1, Ordering::Relaxed);
-            }
-            // From here on the feeds in the mixer belong to exactly this list. (Not
-            // for a worker that was let go: its session stays shut.)
-            self.gate.applied.store(*revision, Ordering::Release);
+            // Not for a worker that was let go: its session stays shut.
+            self.gate.line_up(*revision, changed);
         });
-        self.shares_synced.clone_from(apps);
     }
 
     /// Returns the shared apps with nothing to capture right now.
-    fn capture_shares(&mut self, shares: &[String], events: &Sender<Command>) -> Result<Vec<String>> {
+    fn capture_shares(
+        &mut self,
+        shares: &[String],
+        events: &Sender<Command>,
+        superseded: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>> {
         if self.capture.is_none() {
             let (events, pending) = (events.clone(), self.shares_changed.clone());
             let changed = move || {
@@ -705,7 +731,7 @@ impl Session {
             self.capture = Some(AppCapture::open(self.rate, changed)?);
         }
         match self.capture.as_mut() {
-            Some(capture) => capture.sync(shares, &mut self.mixer),
+            Some(capture) => capture.sync(shares, &mut self.mixer, superseded),
             None => Ok(Vec::new()),
         }
     }
@@ -858,10 +884,12 @@ pub(crate) struct InputSide {
     monitor_rings: rtrb::Consumer<rtrb::Producer<f32>>,
     retired_rings: rtrb::Producer<rtrb::Producer<f32>>,
     /// Shared app sound, added for the main output only; how far the session's
-    /// capture is, and the count of [`ShareGate::removed`] the mixer is up to date with.
+    /// capture is, and the count of [`ShareGate::changes`] the mixer is up to date with.
     mixer: Mixer,
     gate: Arc<ShareGate>,
-    removed: u32,
+    changes: u32,
+    /// Tells the main output's reader to start over, see [`Reader::starting_over_on`].
+    output_stale: Arc<AtomicBool>,
     in_block: Arc<AtomicUsize>,
     callbacks: Arc<AtomicU32>,
     shared: Arc<Shared>,
@@ -893,12 +921,17 @@ impl InputSide {
         // New feeds come in before the look at the gate: it then holds for all of them.
         self.mixer.admit();
         // Shut unless the capture is lined up with the list of apps shared right now.
-        // The applied list is read first and written last: whoever sees it also
-        // sees the removals that came with it.
+        // The applied revision is read first and written last: whoever sees it also
+        // sees the change that came with it.
         let applied = self.gate.applied.load(Ordering::Acquire);
-        let removed = self.gate.removed.load(Ordering::Relaxed);
-        if std::mem::replace(&mut self.removed, removed) != removed {
+        let changes = self.gate.changes.load(Ordering::Relaxed);
+        if std::mem::replace(&mut self.changes, changes) != changes {
             self.mixer.flush();
+            // An output that fell far behind (it stalled) still holds what was mixed
+            // before the change: it starts over rather than play that late.
+            if self.output.slots() < self.output.buffer().capacity() / 2 {
+                self.output_stale.store(true, Ordering::Relaxed);
+            }
         }
         let committed = self.shared.shares_committed.load(Ordering::Relaxed);
         let open = committed != 0 && committed == applied;
@@ -1131,21 +1164,20 @@ mod tests {
         assert_eq!((cfg.sample_format(), cfg.sample_rate()), (SampleFormat::I16, 44_100));
     }
 
-    /// The call hears the shared app next to the voice; the monitor (the user's own
-    /// ears) gets the voice only, since the app already plays there.
-    #[test]
-    fn shared_app_sound_reaches_the_output_but_not_the_monitor() {
+    /// An input side at 48 kHz with sharing open at 0 dB (revision 1), its mixer's
+    /// port, and what reaches the call and the user's own ears.
+    fn sharing_side() -> (InputSide, share::MixerPort, rtrb::Consumer<f32>, rtrb::Consumer<f32>) {
         let shared = Arc::new(Shared::default());
         shared.share_gain.store(1.0f32.to_bits(), Ordering::Relaxed);
         shared.shares_committed.store(1, Ordering::Relaxed);
         let gate = Arc::<ShareGate>::default();
-        gate.applied.store(1, Ordering::Relaxed);
-        let (output, mut output_rx) = ring(48_000);
-        let (monitor, mut monitor_rx) = ring(48_000);
+        gate.line_up(1, gate.shut_for(1));
+        let (output, output_rx) = ring(48_000);
+        let (monitor, monitor_rx) = ring(48_000);
         let (_monitor_rings, monitor_in) = RingBuffer::new(2);
         let (retired_rings, _retired) = RingBuffer::new(2);
-        let (mixer, mut port) = share::mixer(48_000);
-        let mut side = InputSide {
+        let (mixer, port) = share::mixer(48_000);
+        let side = InputSide {
             processor: Processor::new(48_000.0, Chain::new(&[], 48_000.0)),
             output,
             monitor: Some(monitor),
@@ -1153,23 +1185,40 @@ mod tests {
             retired_rings,
             mixer,
             gate,
-            removed: 0,
+            changes: 0,
+            output_stale: Arc::default(),
             in_block: Arc::default(),
             callbacks: Arc::default(),
             shared,
             scratch: vec![0.0; 1024].into_boxed_slice(),
         };
-        let (mut app, feed) = share::feed(48_000, 48_000);
-        assert!(port.add(feed));
+        (side, port, output_rx, monitor_rx)
+    }
 
-        // A 0.1 "voice" and a 0.5 "app", in callbacks larger than the scratch buffer.
-        for _ in 0..20 {
-            app.write(2048, std::iter::repeat_n(0.5, 2048));
+    fn drain(rx: &mut rtrb::Consumer<f32>) -> Vec<f32> {
+        std::iter::from_fn(|| rx.pop().ok()).collect()
+    }
+
+    /// `callbacks` callbacks of a 0.1 "voice" while the app plays `level`, larger
+    /// than the scratch buffer.
+    fn run(side: &mut InputSide, app: &mut share::FeedWriter, level: f32, callbacks: usize) {
+        for _ in 0..callbacks {
+            app.write(2048, std::iter::repeat_n(level, 2048));
             side.process_mono(2048, std::iter::repeat_n(0.1, 2048));
             // Callbacks any closer together would count as one delivery in pieces.
             std::thread::sleep(Duration::from_millis(12));
         }
-        let drain = |rx: &mut rtrb::Consumer<f32>| std::iter::from_fn(|| rx.pop().ok()).collect::<Vec<_>>();
+    }
+
+    /// The call hears the shared app next to the voice; the monitor (the user's own
+    /// ears) gets the voice only, since the app already plays there.
+    #[test]
+    fn shared_app_sound_reaches_the_output_but_not_the_monitor() {
+        let (mut side, mut port, mut output_rx, mut monitor_rx) = sharing_side();
+        let (mut app, feed) = share::feed(48_000, 48_000);
+        assert!(port.add(feed));
+
+        run(&mut side, &mut app, 0.5, 20);
         let (to_call, to_ears) = (drain(&mut output_rx), drain(&mut monitor_rx));
         assert_eq!(to_call.len(), 20 * 2048);
         assert!(to_call[10 * 2048..].iter().all(|s| (s - 0.6).abs() < 1e-3), "voice + app: {}", to_call[10 * 2048]);
@@ -1178,13 +1227,48 @@ mod tests {
         // The list changes: the app is shut out within one callback, whatever its
         // feed and the capture still do.
         side.shared.shares_committed.store(2, Ordering::Relaxed);
-        for _ in 0..2 {
-            app.write(2048, std::iter::repeat_n(0.5, 2048));
-            side.process_mono(2048, std::iter::repeat_n(0.1, 2048));
-            std::thread::sleep(Duration::from_millis(12));
-        }
+        run(&mut side, &mut app, 0.5, 2);
         let to_call = drain(&mut output_rx);
         assert!(to_call[2048..].iter().all(|s| (s - 0.1).abs() < 1e-3), "voice only once shut: {}", to_call[2048]);
+    }
+
+    /// An app stopped and shared again so fast that the capture never saw it stopped
+    /// (the same list under a new revision): what it played in between is not heard.
+    #[test]
+    fn a_new_revision_of_the_same_list_starts_from_what_plays_now() {
+        let (mut side, mut port, mut output_rx, _monitor_rx) = sharing_side();
+        let (mut app, feed) = share::feed(48_000, 48_000);
+        assert!(port.add(feed));
+        run(&mut side, &mut app, 0.5, 20);
+
+        // Off (revision 2) for a single callback, in which the app plays 0.9; then
+        // on again (revision 3), which is all the capture gets to see.
+        side.shared.shares_committed.store(2, Ordering::Relaxed);
+        run(&mut side, &mut app, 0.9, 1);
+        side.shared.shares_committed.store(3, Ordering::Relaxed);
+        let gate = side.gate.clone();
+        gate.line_up(3, gate.shut_for(3));
+        drain(&mut output_rx);
+        run(&mut side, &mut app, 0.3, 20);
+        let to_call = drain(&mut output_rx);
+        assert!(to_call.iter().all(|&s| s < 0.41), "nothing of the 0.9: {:?}", to_call.iter().find(|s| **s >= 0.41));
+        assert!(to_call.ends_with(&[0.4]), "voice + app again: {:?}", to_call.last());
+    }
+
+    /// The output stalled while an app was shared: when the list changes, what
+    /// waits in its ring (mixed before the change) is not to be played late.
+    #[test]
+    fn a_stalled_output_starts_over_when_the_shared_list_changes() {
+        let (mut side, mut port, _output_rx, _monitor_rx) = sharing_side();
+        let (mut app, feed) = share::feed(48_000, 48_000);
+        assert!(port.add(feed));
+        // Nobody reads the output: its 2 s ring fills up.
+        run(&mut side, &mut app, 0.5, 40);
+        assert!(!side.output_stale.load(Ordering::Relaxed));
+        let gate = side.gate.clone();
+        gate.line_up(2, gate.shut_for(2));
+        run(&mut side, &mut app, 0.5, 1);
+        assert!(side.output_stale.load(Ordering::Relaxed));
     }
 
     /// Real-device smoke test of the output path (ring -> Reader -> cpal), no microphone needed.

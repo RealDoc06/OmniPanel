@@ -71,6 +71,8 @@ pub(crate) fn host() -> Arc<cpal::Host> {
         if let Some(host) = kept.as_ref().filter(|host| before.as_ref().is_none_or(|old| !Arc::ptr_eq(old, host))) {
             return host.clone();
         }
+        // Under the lock, so two lookups do not both connect; cpal limits how long
+        // its own connecting takes.
         let host = Arc::new(cpal::default_host());
         // The fallback (ALSA, while the sound server is down) is not kept: the next
         // lookup tries PulseAudio again.

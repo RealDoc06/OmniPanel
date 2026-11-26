@@ -23,7 +23,12 @@ impl AppCapture {
         Err(VoiceError::Unsupported(REASON.into()))
     }
 
-    pub fn sync(&mut self, _apps: &[String], _port: &mut MixerPort) -> Result<Vec<String>> {
+    pub fn sync(
+        &mut self,
+        _apps: &[String],
+        _port: &mut MixerPort,
+        _superseded: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 }

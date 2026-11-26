@@ -107,7 +107,16 @@ impl AppCapture {
     /// Record exactly the playback streams of `apps` that exist now; new feeds go to
     /// `port`. Returns the apps nothing is recorded of (not open, silent since they
     /// started, or their streams could not be recorded).
-    pub fn sync(&mut self, apps: &[String], port: &mut MixerPort) -> Result<Vec<String>> {
+    ///
+    /// Each stream is a request to the server: once `superseded` says the answer no
+    /// longer matters (the list changed again, sharing is being stopped) no further
+    /// one is made.
+    pub fn sync(
+        &mut self,
+        apps: &[String],
+        port: &mut MixerPort,
+        superseded: &dyn Fn() -> bool,
+    ) -> Result<Vec<String>> {
         let playing: Vec<Playback> = self.server.sink_inputs()?.iter().filter_map(Playback::of).collect();
         let wanted: HashSet<u32> = apps.iter().flat_map(|app| named(&playing, app)).map(|p| p.index).collect();
         // PulseAudio ends the monitor of a stream that moves to another sink (PipeWire
@@ -121,6 +130,9 @@ impl AppCapture {
             }
             if self.streams.len() == MAX_FEEDS {
                 tracing::debug!("voice: sharing {MAX_FEEDS} streams already, ignoring more");
+                break;
+            }
+            if superseded() {
                 break;
             }
             let (writer, feed) = feed(self.rate, self.rate);
