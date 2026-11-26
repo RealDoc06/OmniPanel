@@ -140,6 +140,9 @@ pub struct SettingsPatch {
     pub start_hidden: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     #[ts(optional)]
+    pub check_for_updates: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[ts(optional)]
     pub theme_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     #[ts(optional)]
@@ -175,6 +178,9 @@ impl SettingsPatch {
         }
         if let Some(value) = self.start_hidden {
             settings.start_hidden = value;
+        }
+        if let Some(value) = self.check_for_updates {
+            settings.check_for_updates = value;
         }
         if let Some(value) = self.theme_id {
             settings.theme_id = value;

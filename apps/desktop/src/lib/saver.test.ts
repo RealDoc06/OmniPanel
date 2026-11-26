@@ -18,6 +18,7 @@ const SETTINGS: Settings = {
   port: 7710,
   launchAtLogin: false,
   startHidden: false,
+  checkForUpdates: true,
   themeId: "midnight",
   defaultProfileId: null,
   usb: { enabled: true, adbPath: null },

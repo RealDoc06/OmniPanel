@@ -8,4 +8,4 @@ import type { VoiceSettingsPatch } from "./VoiceSettingsPatch";
 /**
  * Changed settings fields only; omitted fields retain their current values.
  */
-export type SettingsPatch = { hostName?: string, port?: number, launchAtLogin?: boolean, startHidden?: boolean, themeId?: string, defaultProfileId?: string | null, usb?: UsbSettingsPatch, ai?: AiSettingsPatch, obs?: ObsSettingsPatch, homeAssistant?: HomeAssistantSettingsPatch, voice?: VoiceSettingsPatch, };
+export type SettingsPatch = { hostName?: string, port?: number, launchAtLogin?: boolean, startHidden?: boolean, checkForUpdates?: boolean, themeId?: string, defaultProfileId?: string | null, usb?: UsbSettingsPatch, ai?: AiSettingsPatch, obs?: ObsSettingsPatch, homeAssistant?: HomeAssistantSettingsPatch, voice?: VoiceSettingsPatch, };

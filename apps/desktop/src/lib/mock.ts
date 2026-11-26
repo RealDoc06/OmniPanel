@@ -26,7 +26,7 @@ import type {
   VolumeTarget,
 } from "@omni/protocol";
 import type { Api } from "./api";
-import type { Backend } from "./backend";
+import type { Backend, UpdateStatus } from "./backend";
 import { emptyStyle } from "./controls";
 import { MIDNIGHT } from "./theme";
 import { rebase } from "./saver";
@@ -244,6 +244,7 @@ function initialConfig(): Config {
       port: 7710,
       launchAtLogin: false,
       startHidden: false,
+      checkForUpdates: true,
       themeId: "midnight",
       defaultProfileId: main.id,
       usb: { enabled: true, adbPath: null },
@@ -760,6 +761,15 @@ function pickFile(accept: string): Promise<string | null> {
   });
 }
 
+// Pretends a newer version exists once "Check now" is clicked, so the update UI can be tried.
+let updateStatus: UpdateStatus = { state: "idle" };
+const updateListeners = new Set<(status: UpdateStatus) => void>();
+const setUpdateStatus = (status: UpdateStatus) => {
+  updateStatus = status;
+  updateListeners.forEach((listener) => listener(status));
+};
+const MOCK_UPDATE = "9.9.9";
+
 export const backend: Backend = {
   api,
   onHostEvent: async (handler) => {
@@ -774,6 +784,30 @@ export const backend: Backend = {
     save: async (defaultPath) => defaultPath,
   },
   imageUrl: (_port, id) => images.get(id) ?? "",
+  updater: {
+    status: async () => updateStatus,
+    onStatus: async (handler) => {
+      updateListeners.add(handler);
+      return () => updateListeners.delete(handler);
+    },
+    check: async () => {
+      setUpdateStatus({ state: "checking" });
+      await reply(null, 600);
+      setUpdateStatus({ state: "available", version: MOCK_UPDATE, canInstall: true });
+    },
+    download: async () => {
+      for (const percent of [0, 35, 70, 100]) {
+        setUpdateStatus({ state: "downloading", version: MOCK_UPDATE, percent });
+        await reply(null, 400);
+      }
+      setUpdateStatus({ state: "ready", version: MOCK_UPDATE });
+    },
+    install: async () => {
+      setUpdateStatus({ state: "installing", version: MOCK_UPDATE });
+      await reply(null, 800);
+      setUpdateStatus({ state: "upToDate" });
+    },
+  },
 };
 
 // A few log lines so the log view isn't empty.

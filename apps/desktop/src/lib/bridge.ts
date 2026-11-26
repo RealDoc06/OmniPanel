@@ -5,6 +5,8 @@ import type { HostEvent } from "@omni/protocol";
 import { type Send, makeApi } from "./api";
 import type { Backend } from "./backend";
 
+const noUpdater = () => Promise.reject("Updates only work in the OmniPanel app.");
+
 export function bridge(base: string, imageUrl: Backend["imageUrl"]): Backend {
   const send: Send = async (request, options) => {
     const response = await fetch(`${base}/invoke`, {
@@ -29,5 +31,13 @@ export function bridge(base: string, imageUrl: Backend["imageUrl"]): Backend {
       save: async (defaultPath) => window.prompt("Save to", defaultPath),
     },
     imageUrl,
+    // The engine alone has no updater: it belongs to the app shell.
+    updater: {
+      status: async () => ({ state: "idle" }),
+      onStatus: async () => () => {},
+      check: noUpdater,
+      download: noUpdater,
+      install: noUpdater,
+    },
   };
 }

@@ -1,13 +1,15 @@
 // OmniPanel desktop shell: starts the omni-host engine, then owns the window,
-// tray, global hotkeys and launch-at-login. Closing the window destroys the
+// tray, global hotkeys, launch-at-login and app updates. Closing the window destroys the
 // webview (freeing its memory); the engine keeps running in the tray.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
 mod hotkeys;
 mod tray;
+mod updater;
 mod window;
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -22,12 +24,17 @@ const HIDDEN_ARG: &str = "--hidden";
 /// Quit waits this long at most for the engine to close decks and audio.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The data folder lock, held from start until `RunEvent::Exit`.
+type DataLock = Mutex<Option<store::DataDirLock>>;
+
 #[derive(Default)]
 struct QuitState {
     requested: AtomicBool,
     ready: AtomicBool,
     /// No tray to come back from, so closing the window quits.
     no_tray: AtomicBool,
+    /// An exit was held back while an update replaced the app's files.
+    held: AtomicBool,
 }
 
 fn main() {
@@ -51,8 +58,10 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![HIDDEN_ARG])))
         .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(hotkeys::on_shortcut).build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hotkeys::Registered::default())
         .manage(QuitState::default())
+        .manage(updater::Updates::default())
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "app-quit" {
                 request_quit(app);
@@ -86,13 +95,15 @@ fn main() {
         RunEvent::ExitRequested { code, api, .. } => {
             if code.is_none() {
                 // Last window closed: keep running in the tray on every platform.
-                if !app.state::<QuitState>().no_tray.load(Ordering::Relaxed) {
+                if !app.state::<QuitState>().no_tray.load(Ordering::SeqCst) || hold_for_install(app) {
                     api.prevent_exit();
                 }
-            } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::Relaxed) {
+            } else if code == Some(0) && !app.state::<QuitState>().ready.load(Ordering::SeqCst) {
                 // An explicit exit must use the same handshake as the menus.
                 api.prevent_exit();
                 request_quit(app);
+            } else if hold_for_install(app) {
+                api.prevent_exit();
             }
         }
         RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == window::MAIN => {
@@ -102,25 +113,38 @@ fn main() {
         RunEvent::Reopen { .. } => window::show(app),
         // tao 0.37 sends Dock Quit directly here, without an ExitRequested to defer.
         RunEvent::Exit => {
-            if let Some(host) = app.try_state::<Host>() {
-                // The timer is created inside `block_on`: tokio panics when a
-                // timeout is made outside the runtime (this is the main thread).
-                let shutdown = async { tokio::time::timeout(SHUTDOWN_TIMEOUT, host.shutdown()).await };
-                if tauri::async_runtime::block_on(shutdown).is_err() {
-                    tracing::warn!("engine shutdown timed out");
-                }
+            // This exit is a quit: an install that ends during the wait must not restart.
+            app.state::<QuitState>().requested.store(true, Ordering::SeqCst);
+            updater::wait_for_install(app);
+            shutdown_engine(app);
+            // Restarting into an update starts the new process while this one is
+            // still alive (macOS waits for it to launch): it must find the folder free.
+            if let Some(lock) = app.try_state::<DataLock>() {
+                lock.lock().unwrap().take();
             }
         }
         _ => {}
     });
 }
 
-/// Lock the data folder, start the engine, then the tray, hotkeys and window.
+/// Closes decks and audio before the process ends. Blocks the calling thread.
+fn shutdown_engine(app: &AppHandle) {
+    if let Some(host) = app.try_state::<Host>() {
+        // The timer is created inside `block_on`: tokio panics when a
+        // timeout is made outside the runtime (callers are not on it).
+        let shutdown = async { tokio::time::timeout(SHUTDOWN_TIMEOUT, host.shutdown()).await };
+        if tauri::async_runtime::block_on(shutdown).is_err() {
+            tracing::warn!("engine shutdown timed out");
+        }
+    }
+}
+
+/// Lock the data folder, start the engine, then the tray, hotkeys, update check and window.
 fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     let data_dir = app.path().app_data_dir()?;
     match store::lock(&data_dir) {
         Ok(Some(lock)) => {
-            app.manage(lock);
+            app.manage(DataLock::new(Some(lock)));
         }
         // Another OmniPanel owns the data folder: both started before
         // single-instance could tell. Leave without a trace (`app.exit` would
@@ -135,19 +159,26 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     let version = app.package_info().version.to_string();
     let host = tauri::async_runtime::block_on(Host::start(HostOptions { data_dir, version }))?;
     app.manage(host.clone());
+    let after_update = updater::take_after_update_note(host.data_dir());
+    if let Some(problem) = after_update.as_deref().filter(|note| !note.is_empty()) {
+        host.log(omni_core::LogLevel::Error, problem);
+    }
     #[cfg(target_os = "macos")]
     install_app_menu(app)?;
     // Desktops without a tray still get the app, as a normal window.
     let tray = tray::create(app);
     if let Err(e) = &tray {
-        app.state::<QuitState>().no_tray.store(true, Ordering::Relaxed);
+        app.state::<QuitState>().no_tray.store(true, Ordering::SeqCst);
         host.log(omni_core::LogLevel::Warn, format!("No tray icon, so closing the window quits OmniPanel: {e}"));
     }
     sync_with_config(app, &host);
     forward_events(app.clone(), host.clone());
+    updater::start(app);
     #[cfg(unix)]
     quit_on_signal(app.clone());
-    if tray.is_ok() && (launched_hidden || host.config().settings.start_hidden) {
+    let hidden = launched_hidden || host.config().settings.start_hidden;
+    // After an update the window comes back, so the user sees the app return.
+    if tray.is_ok() && hidden && after_update.is_none() {
         window::set_dock_visible(app, false);
     } else {
         window::show(app);
@@ -222,7 +253,7 @@ fn install_app_menu(app: &AppHandle) -> anyhow::Result<()> {
 
 /// Give the webview time to flush, with a fallback if it cannot answer.
 fn request_quit(app: &AppHandle) {
-    if app.state::<QuitState>().requested.swap(true, Ordering::Relaxed) {
+    if app.state::<QuitState>().requested.swap(true, Ordering::SeqCst) {
         return;
     }
     if let Some(window) = app.get_webview_window(window::MAIN) {
@@ -243,8 +274,41 @@ fn request_quit(app: &AppHandle) {
 
 /// The UI has finished its bounded drain, or the fallback timer has elapsed.
 fn finish_quit(app: &AppHandle) {
-    app.state::<QuitState>().ready.store(true, Ordering::Relaxed);
+    app.state::<QuitState>().ready.store(true, Ordering::SeqCst);
     app.exit(0);
+}
+
+/// True when an exit has to wait because an update is replacing the app's files
+/// (which may need this thread, for the macOS admin prompt). `end_after_install`
+/// then finishes the exit.
+fn hold_for_install(app: &AppHandle) -> bool {
+    let quit = app.state::<QuitState>();
+    quit.held.store(true, Ordering::SeqCst);
+    // Looked at after raising the flag: the install either sees the flag when it
+    // ends, or has already ended.
+    if updater::is_replacing(app) {
+        return true;
+    }
+    quit.held.store(false, Ordering::SeqCst);
+    false
+}
+
+/// An install has ended, well or not. A quit that came in meanwhile wins: one that
+/// was held back is finished here, one still saving finishes itself. Otherwise the
+/// app restarts if `restart` asks for it. Returns whether it restarts.
+fn end_after_install(app: &AppHandle, restart: bool) -> bool {
+    let quit = app.state::<QuitState>();
+    if quit.held.load(Ordering::SeqCst) {
+        finish_quit(app);
+        false
+    } else if quit.requested.load(Ordering::SeqCst) {
+        false
+    } else {
+        if restart {
+            app.request_restart();
+        }
+        restart
+    }
 }
 
 fn sync_with_config(app: &AppHandle, host: &Host) {

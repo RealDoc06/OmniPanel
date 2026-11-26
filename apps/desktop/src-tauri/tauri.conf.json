@@ -33,5 +33,12 @@
       "deb": { "depends": ["pulseaudio-utils", "libasound2t64 | libasound2", "libssl3t64 | libssl3"] },
       "rpm": { "depends": ["pulseaudio-utils", "libasound.so.2()(64bit)", "libssl.so.3()(64bit)"] }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1MUZGODE4ODRDMjk4MjgKUldRb21NS0VHUGdmRmFVQWpKTFFJb28vZTJJL3V1Z3dHc1IxZlhnZmlkNzg0am9KMkMwdHQwYmUK",
+      "endpoints": ["https://raw.githubusercontent.com/RealDoc06/OmniPanel/updater/latest.json"],
+      "requireSignedVersion": true
+    }
   }
 }

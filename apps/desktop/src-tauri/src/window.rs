@@ -43,6 +43,7 @@ fn show_now(app: &AppHandle) {
 }
 
 pub fn on_destroyed(app: &AppHandle) {
+    crate::updater::on_window_closed(app);
     if let Some(host) = app.try_state::<Host>() {
         host.set_ui_active(false);
     }
