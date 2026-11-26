@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.3
+
+- The macOS app is signed with a Developer ID and notarized by Apple, so it opens without a Gatekeeper warning.
+
 ## 0.1.0-alpha.2
 
 - Auto-update: OmniPanel checks for a new version at launch and once a day, and installs it from Settings → Updates.

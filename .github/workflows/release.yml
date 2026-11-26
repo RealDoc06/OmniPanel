@@ -74,14 +74,21 @@ jobs:
           # tauri.conf.json; apps refuse updates signed with any other key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          # No Apple signing or notarization. To add it, pass Tauri's APPLE_* variables here
-          # together with their secrets: an empty APPLE_CERTIFICATE fails the macOS build.
+          # Signs the macOS app with the Developer ID certificate and notarizes it, so
+          # Gatekeeper opens it without a warning. Other platforms ignore these. An empty
+          # APPLE_CERTIFICATE fails the macOS build, so all six secrets must stay set.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
           tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: OmniPanel v__VERSION__
-          releaseBody: See CHANGELOG.md. Alpha builds are unsigned; the README explains how to run them.
+          releaseBody: See CHANGELOG.md. The macOS build is signed and notarized. Windows and Linux builds are unsigned; the README explains how to run them.
           releaseDraft: true
           prerelease: true
           args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
