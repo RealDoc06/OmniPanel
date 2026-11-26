@@ -22,3 +22,5 @@ tauri-plugin-dialog = "2.8"
 tauri-plugin-global-shortcut = "2.4"
 tauri-plugin-autostart = "2.7"
 tauri-plugin-single-instance = "2.5"
+# native-tls like the rest of the workspace (the default pulls in rustls).
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy", "zip"] }

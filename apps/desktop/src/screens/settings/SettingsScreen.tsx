@@ -1,13 +1,14 @@
 // App settings: theme, general, OBS Studio, Home Assistant, AI assistant, advanced
-// (network port, USB, settings folder, activity log) and about. Every section has a
+// (network port, USB, settings folder, activity log), updates and about. Every section has a
 // `settings-{anchor}` id, so `navigate("settings", anchor)` scrolls to it.
 import type { AiProvider, AiSettings as AiConfig } from "@omni/protocol";
 import { useEffect, useId, useState } from "react";
 import { Button, ComboInput, Disclosure, EnumSelect, Field, inputClass, Notice, ScreenHeader, Section, Select, Switch, TextInput } from "../../components/ui";
-import { api } from "../../lib/backend";
+import { api, updater } from "../../lib/backend";
 import { confirm, type ConfirmRequest } from "../../lib/confirm";
 import { useResource } from "../../lib/hooks";
 import { flushSettings, navigate, patchSection, patchSettings, quit, run, useAnchor, useApp, useIsMac, useProfiles, useRuntime, useSettings } from "../../lib/store";
+import { installUpdate, useUpdate } from "../../lib/updates";
 import { cx, errorMessage } from "../../lib/util";
 import { HaSettings, ObsSettings } from "./Connections";
 import { ThemeSettings } from "./Themes";
@@ -41,6 +42,7 @@ export function SettingsScreen() {
         <HaSettings />
         <AiSettings />
         <AdvancedSettings />
+        <UpdateSettings />
         <About />
       </div>
     </>
@@ -353,6 +355,58 @@ function AdvancedSettings() {
         <Button size="sm" onClick={() => navigate("log")}>
           Open
         </Button>
+      </Field>
+    </Section>
+  );
+}
+
+/** What is installed, or the newer version with its one next step: install it, or get the package by hand. */
+function UpdateSettings() {
+  const settings = useSettings();
+  const status = useUpdate((s) => s.status);
+  const current = useApp((s) => s.info.version);
+  const [installing, setInstalling] = useState(false);
+  const install = async () => {
+    setInstalling(true);
+    await run(installUpdate());
+    setInstalling(false);
+  };
+  // deb and rpm installs, which the package manager owns.
+  const manual = status.state === "available" && !status.canInstall;
+  return (
+    <Section title="Updates" id="settings-updates">
+      {"version" in status ? (
+        <Field label="New version" hint={manual ? "This copy can't update itself. Download the new installer and open it." : undefined}>
+          <div className="flex items-center gap-2">
+            <span role="status" data-selectable>
+              OmniPanel {status.version}
+              {status.state === "downloading" && ` · downloading${status.percent === null ? "…" : ` ${status.percent}%`}`}
+            </span>
+            {manual ? (
+              <Button size="sm" icon="external-link" onClick={() => openLink(`${REPO}/releases/tag/v${status.version}`)}>
+                Download
+              </Button>
+            ) : (
+              <Button size="sm" variant="primary" icon="download" disabled={installing || status.state === "downloading"} onClick={() => void install()}>
+                Install and restart
+              </Button>
+            )}
+          </div>
+        </Field>
+      ) : (
+        <Field label="This version">
+          <div className="flex items-center gap-2">
+            <span role="status" data-selectable>
+              {status.state === "checking" ? "Checking…" : `OmniPanel ${current}${status.state === "upToDate" ? " is the newest version." : ""}`}
+            </span>
+            <Button size="sm" icon="refresh-cw" disabled={status.state === "checking"} onClick={() => void run(updater.check())}>
+              Check now
+            </Button>
+          </div>
+        </Field>
+      )}
+      <Field label="Check automatically" hint="Once a day. Nothing is installed until you say so.">
+        <Switch label="Check automatically" checked={settings.checkForUpdates} onChange={(checkForUpdates) => patchSettings({ checkForUpdates })} />
       </Field>
     </Section>
   );

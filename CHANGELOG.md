@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Auto-update: OmniPanel checks for a new version at launch and once a day, and installs it from Settings → Updates.
+  deb and rpm installs get a link to the new package.
+
 ## 0.1.0-alpha.1
 
 First public alpha.

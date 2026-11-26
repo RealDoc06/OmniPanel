@@ -54,9 +54,18 @@ Download the installer for your OS from the [releases page](https://github.com/R
 - The deb and rpm pull in their dependencies, including `pactl`. The AppImage bundles the rest except `pactl` and the graphics, font and sound libraries every desktop already has.
 - Optional tools: `playerctl` (better media keys), `adb` (USB decks).
 
+**Updates**
+
+OmniPanel looks for a new version when it starts and once a day. When there is one, the tray menu and the sidebar
+say so, and **Settings → Updates** installs it and restarts. **Check automatically** in the same place turns the
+check off.
+
+- Update packages are signed. One that doesn't match OmniPanel's key is refused.
+- deb and rpm installs are left to your package manager: Settings links to the new package instead.
+- 0.1.0-alpha.1 has no updater, so the step up from it is still by hand.
+
 **Known limitations**
 
-- No auto-update yet: install new versions by hand.
 - Global hotkeys and key simulation do not work on pure Wayland.
 - Voice effects need a virtual cable on macOS and Windows (see below).
 
@@ -119,6 +128,12 @@ scripts/verify-release.sh                                    # install and launc
 ```
 
 macOS cannot be cross-built. Tagging `v*` runs the release workflow, which builds every platform into a draft prerelease.
+
+Publishing that draft is what sends the update to installed apps: the workflow copies the release's `latest.json` to
+the `updater` branch, which they read. Only workflow builds can be updates. They are signed with the
+`TAURI_SIGNING_PRIVATE_KEY` repository secret, whose public half is `plugins.updater.pubkey` in `tauri.conf.json`;
+`pnpm build` and `pnpm build:release` make plain installers. Keep a copy of that private key: installed apps accept
+nothing signed with another one.
 
 deb and rpm sort `0.1.0-alpha.N` above `0.1.0`, so the first stable release must be `0.2.0` or later.
 

@@ -1,14 +1,20 @@
 name: Release
 
-# Publishes a draft prerelease named after the version in tauri.conf.json.
-# Review the draft and its assets before publishing it by hand.
+# A `v*` tag builds every platform into a draft prerelease named after the version in
+# tauri.conf.json, with signed update packages and `latest.json`, the update manifest.
+# Review the draft and its assets, then publish it by hand. Publishing copies its
+# `latest.json` to the `updater` branch, where installed apps look: that is the moment
+# the update goes out.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  release:
+    types: [published]
 
 jobs:
   build:
+    if: github.event_name != 'release'
     permissions:
       contents: write
     strategy:
@@ -47,6 +53,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Runners may lack FUSE, which Tauri's AppImage tools otherwise need.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # Signs the update packages. The public half is `plugins.updater.pubkey` in
+          # tauri.conf.json; apps refuse updates signed with any other key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           # Optional signing / notarization (set these repository secrets to enable):
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -62,4 +72,50 @@ jobs:
           releaseBody: See CHANGELOG.md. Alpha builds are unsigned; the README explains how to run them.
           releaseDraft: true
           prerelease: true
-          args: ${{ matrix.args }}
+          args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
+
+  # Each build merges its platforms into the draft's latest.json, and two builds finishing
+  # together can drop one. Fail here, before anyone publishes, if a platform is missing or
+  # a package doesn't verify against the key the apps trust.
+  check-update:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # drafts are only visible with write access
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y minisign
+          conf=apps/desktop/src-tauri/tauri.conf.json
+          gh release download "v$(jq -r .version $conf)" --pattern latest.json
+          pubkey="$(jq -r .plugins.updater.pubkey $conf | base64 -d | tail -n 1)"
+          for target in linux-x86_64 linux-aarch64 windows-x86_64 darwin-aarch64 darwin-x86_64; do
+            jq -er --arg t "$target" '.platforms[$t].signature' latest.json | base64 -d > "$target.minisig"
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+              -o "$target.package" "$(jq -er --arg t "$target" '.platforms[$t].url' latest.json)"
+            minisign -V -P "$pubkey" -m "$target.package" -x "$target.minisig"
+          done
+
+  # Installed apps read https://raw.githubusercontent.com/<repo>/updater/latest.json.
+  # GitHub's /releases/latest/download/ link can't serve it: it skips prereleases, and
+  # every alpha is one. The branch holds that single file and nothing else.
+  publish-update:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Point the updater branch at this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json
+          git init -q -b updater
+          git add latest.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Update manifest for $TAG"
+          git push --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY" updater

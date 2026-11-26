@@ -25,7 +25,7 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
 | `crates/omni-actions` | Executes leaf actions: keys, apps, scripts, media, volume, system, HTTP, OBS (obs-websocket v5), Home Assistant. Installed-app discovery. |
 | `crates/omni-ai` | LLM providers (OpenAI default `gpt-6-luna`, Anthropic, Ollama, OpenRouter, custom OpenAI-compatible) that turn a description into a `GeneratedControl`. |
 | `crates/omni-host` | The engine: config store, deck server, pairing, sessions, dispatcher, state feedback, USB (adb) bridge. No Tauri dependency, testable headless. |
-| `apps/desktop/src-tauri` | Tauri shell: commands, tray, window lifecycle, global shortcuts, autostart. |
+| `apps/desktop/src-tauri` | Tauri shell: commands, tray, window lifecycle, global shortcuts, autostart, app updates. |
 | `apps/desktop/src` | Desktop UI (React 19, Vite, Tailwind 4, Zustand). |
 | `apps/deck` | Deck web client. Vanilla TypeScript compiled to ES5, served by the host. |
 | `packages/protocol` | TypeScript types generated from `omni-core` (`pnpm gen:types`). |
@@ -46,6 +46,10 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
 - **Per-device presets.** Each device is assigned a profile (grid + pages).
 - **Voice effects** need a virtual cable on macOS/Windows (BlackHole, VB-CABLE);
   on Linux OmniPanel creates a PipeWire/PulseAudio virtual mic itself.
+- **Updates** live in the shell (`updater.rs`, `tauri-plugin-updater`), because the daily check has to run
+  while the webview is gone. Apps read `latest.json` from the `updater` branch, which the release workflow
+  rewrites when a release is published (GitHub's "latest release" link skips prereleases). The user starts
+  every install from Settings; deb and rpm installs only get a link, the package manager owns those files.
 - **Flow-control actions** (`multi`, `toggle`, `delay`, `navigate`, `voice`)
   live in `omni-host`; all other actions are leaves run by `omni-actions`.
 

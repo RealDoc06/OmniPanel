@@ -13,9 +13,7 @@ pub fn create(app: &AppHandle) -> anyhow::Result<()> {
     if !indicator_library_installed() {
         anyhow::bail!("install libayatana-appindicator3 to get one");
     }
-    let open = MenuItem::with_id(app, "open", "Open OmniPanel", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit OmniPanel", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = menu(app, None)?;
     let macos = cfg!(target_os = "macos");
     let icon = if macos { Some(template_icon()) } else { app.default_window_icon().cloned() };
     let mut tray = TrayIconBuilder::with_id("main")
@@ -24,7 +22,7 @@ pub fn create(app: &AppHandle) -> anyhow::Result<()> {
         .icon_as_template(macos)
         .show_menu_on_left_click(macos)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => window::show(app),
+            "open" | "update" => window::show(app),
             "quit" => crate::request_quit(app),
             _ => {}
         })
@@ -38,6 +36,28 @@ pub fn create(app: &AppHandle) -> anyhow::Result<()> {
     }
     tray.build(app)?;
     Ok(())
+}
+
+/// With `update`, the menu starts with a line announcing that version. It opens
+/// the window, where Settings installs it.
+fn menu(app: &AppHandle, update: Option<&str>) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::new(app)?;
+    if let Some(version) = update {
+        menu.append(&MenuItem::with_id(app, "update", format!("Update available: {version}"), true, None::<&str>)?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&MenuItem::with_id(app, "open", "Open OmniPanel", true, None::<&str>)?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "Quit OmniPanel", true, None::<&str>)?)?;
+    Ok(menu)
+}
+
+/// Shows or removes (`None`) the "Update available" line. No-op without a tray.
+pub fn set_update(app: &AppHandle, version: Option<&str>) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    if let Err(e) = menu(app, version).and_then(|menu| tray.set_menu(Some(menu))) {
+        tracing::warn!("can't update the tray menu: {e}");
+    }
 }
 
 /// The tray crate loads this library at runtime and panics when it's missing,

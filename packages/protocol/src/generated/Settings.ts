@@ -19,6 +19,10 @@ port: number, launchAtLogin: boolean,
  */
 startHidden: boolean, 
 /**
+ * Look for a new OmniPanel version at launch and once a day.
+ */
+checkForUpdates: boolean, 
+/**
  * Theme of the desktop app.
  */
 themeId: string, 

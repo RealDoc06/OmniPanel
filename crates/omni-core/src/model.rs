@@ -39,6 +39,8 @@ pub struct Settings {
     pub launch_at_login: bool,
     /// Start in the tray without opening the window.
     pub start_hidden: bool,
+    /// Look for a new OmniPanel version at launch and once a day.
+    pub check_for_updates: bool,
     /// Theme of the desktop app.
     pub theme_id: String,
     /// Profile assigned to newly paired devices.
@@ -557,6 +559,7 @@ impl Default for Settings {
             port: 7710,
             launch_at_login: false,
             start_hidden: false,
+            check_for_updates: true,
             theme_id: "midnight".into(),
             default_profile_id: None,
             usb: UsbSettings::default(),

@@ -1,11 +1,12 @@
 // OmniPanel desktop shell: starts the omni-host engine, then owns the window,
-// tray, global hotkeys and launch-at-login. Closing the window destroys the
+// tray, global hotkeys, launch-at-login and app updates. Closing the window destroys the
 // webview (freeing its memory); the engine keeps running in the tray.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
 mod hotkeys;
 mod tray;
+mod updater;
 mod window;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,8 +52,10 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![HIDDEN_ARG])))
         .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(hotkeys::on_shortcut).build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hotkeys::Registered::default())
         .manage(QuitState::default())
+        .manage(updater::Updates::default())
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "app-quit" {
                 request_quit(app);
@@ -101,21 +104,24 @@ fn main() {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => window::show(app),
         // tao 0.37 sends Dock Quit directly here, without an ExitRequested to defer.
-        RunEvent::Exit => {
-            if let Some(host) = app.try_state::<Host>() {
-                // The timer is created inside `block_on`: tokio panics when a
-                // timeout is made outside the runtime (this is the main thread).
-                let shutdown = async { tokio::time::timeout(SHUTDOWN_TIMEOUT, host.shutdown()).await };
-                if tauri::async_runtime::block_on(shutdown).is_err() {
-                    tracing::warn!("engine shutdown timed out");
-                }
-            }
-        }
+        RunEvent::Exit => shutdown_engine(app),
         _ => {}
     });
 }
 
-/// Lock the data folder, start the engine, then the tray, hotkeys and window.
+/// Closes decks and audio before the process ends. Blocks the calling thread.
+fn shutdown_engine(app: &AppHandle) {
+    if let Some(host) = app.try_state::<Host>() {
+        // The timer is created inside `block_on`: tokio panics when a
+        // timeout is made outside the runtime (callers are not on it).
+        let shutdown = async { tokio::time::timeout(SHUTDOWN_TIMEOUT, host.shutdown()).await };
+        if tauri::async_runtime::block_on(shutdown).is_err() {
+            tracing::warn!("engine shutdown timed out");
+        }
+    }
+}
+
+/// Lock the data folder, start the engine, then the tray, hotkeys, update check and window.
 fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     let data_dir = app.path().app_data_dir()?;
     match store::lock(&data_dir) {
@@ -145,6 +151,7 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     }
     sync_with_config(app, &host);
     forward_events(app.clone(), host.clone());
+    updater::start(app);
     #[cfg(unix)]
     quit_on_signal(app.clone());
     if tray.is_ok() && (launched_hidden || host.config().settings.start_hidden) {

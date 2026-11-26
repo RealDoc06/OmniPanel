@@ -1,10 +1,11 @@
 // Left navigation: the four screens, with the layouts listed under Buttons once there are
 // several. The Devices row carries a dot while a device is connected. Arrow keys move between
-// items, Cmd/Ctrl+1..4 jump directly (App.tsx). The footer only appears for unread warnings
-// or errors and opens the Activity log.
-import type { KeyboardEvent } from "react";
+// items, Cmd/Ctrl+1..4 jump directly (App.tsx). The footer only appears for a newer OmniPanel
+// version (opens Settings, Updates) and for unread warnings or errors (opens the Activity log).
+import type { KeyboardEvent, ReactNode } from "react";
 import type { IconName } from "../lib/icons";
 import { navigate, useApp, useProfiles, type Screen } from "../lib/store";
+import { useUpdateVersion } from "../lib/updates";
 import { cx } from "../lib/util";
 import { createProfile, openProfile, useEditor } from "../screens/profiles/editor";
 import { I } from "./Icon";
@@ -24,6 +25,7 @@ export function Sidebar() {
   // The Activity log is reached from Settings, so Settings stays highlighted there.
   const current = screen === "log" ? "settings" : screen;
   const problems = useApp((s) => s.unreadErrors);
+  const update = useUpdateVersion();
   // With several layouts listed, the open layout's row is the current page, not "Buttons" itself.
   const layoutRows = useProfiles().length > 1;
 
@@ -63,19 +65,28 @@ export function Sidebar() {
           </li>
         ))}
       </ul>
-      {problems > 0 && (
-        <button
-          type="button"
-          onClick={() => navigate("log")}
-          className="m-3 flex h-7 items-center gap-2 rounded-ui-sm px-2 text-left text-xs text-muted hover:bg-hover hover:text-fg"
-        >
-          <StatusDot tone="warn" />
-          <span className="truncate">
+      <div className="flex flex-col gap-px p-3 empty:hidden">
+        {update && (
+          <FooterLink tone="ok" onClick={() => navigate("settings", "updates")}>
+            Update available
+          </FooterLink>
+        )}
+        {problems > 0 && (
+          <FooterLink tone="warn" onClick={() => navigate("log")}>
             {problems} {problems === 1 ? "problem" : "problems"}
-          </span>
-        </button>
-      )}
+          </FooterLink>
+        )}
+      </div>
     </nav>
+  );
+}
+
+function FooterLink({ tone, onClick, children }: { tone: "ok" | "warn"; onClick: () => void; children: ReactNode }) {
+  return (
+    <button type="button" onClick={onClick} className="flex h-7 items-center gap-2 rounded-ui-sm px-2 text-left text-xs text-muted hover:bg-hover hover:text-fg">
+      <StatusDot tone={tone} />
+      <span className="truncate">{children}</span>
+    </button>
   );
 }
 

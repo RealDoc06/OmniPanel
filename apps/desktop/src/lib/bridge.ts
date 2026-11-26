@@ -29,5 +29,13 @@ export function bridge(base: string, imageUrl: Backend["imageUrl"]): Backend {
       save: async (defaultPath) => window.prompt("Save to", defaultPath),
     },
     imageUrl,
+    // The engine alone has no updater: it belongs to the app shell.
+    updater: {
+      status: async () => ({ state: "idle" }),
+      onStatus: async () => () => {},
+      check: () => Promise.reject("Updates only work in the OmniPanel app."),
+      download: async () => {},
+      install: async () => {},
+    },
   };
 }
