@@ -224,6 +224,10 @@ impl Mixer {
         for feed in self.feeds.iter_mut().flatten() {
             if flush || (shut && !feed.0.playing()) {
                 feed.0.flush();
+                // Shut: nothing starts, not even with what its capture writes this instant.
+                if shut {
+                    continue;
+                }
             }
             feed.0.begin(frames, block);
             any = true;

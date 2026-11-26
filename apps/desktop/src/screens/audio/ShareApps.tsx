@@ -17,7 +17,7 @@ const db = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(0)} dB`;
 /** macOS privacy pane for "Screen & System Audio Recording", which capturing an app needs. */
 const AUDIO_PERMISSION_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
-const STATE_TONES = { Off: "text-muted", Sharing: "text-success", "Needs setup": "text-warning", Stopped: "text-danger", "Not supported": "text-muted" };
+const STATE_TONES = { Off: "text-muted", Starting: "text-muted", Sharing: "text-success", "Needs setup": "text-warning", Stopped: "text-danger", "Not supported": "text-muted" };
 
 export function ShareAppsSection() {
   const { voice } = useSettings();
@@ -35,7 +35,7 @@ export function ShareAppsSection() {
   const needsSetup = voice.outputDevice === null && status.hint !== null;
   const state: keyof typeof STATE_TONES = status.shareUnsupported
     ? "Not supported"
-    : shared.length === 0 ? "Off" : needsSetup ? "Needs setup" : status.running && !status.shareError ? "Sharing" : "Stopped";
+    : shared.length === 0 ? "Off" : needsSetup ? "Needs setup" : status.shareError || (!status.running && status.error) ? "Stopped" : status.running ? "Sharing" : "Starting";
 
   return (
     <Section title="Share app sound" id="sound-share" actions={<span role="status" className={cx("text-xs", STATE_TONES[state])}>{state}</span>}>

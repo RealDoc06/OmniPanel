@@ -5,6 +5,8 @@
 //! `"wasapi:<endpoint id>"`, `"pulseaudio:<sink name>"`). Lookups also accept a
 //! plain device name, so hand-edited configs keep working.
 
+use std::sync::Arc;
+
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{DeviceType, InterfaceType};
 
@@ -41,10 +43,40 @@ impl Direction {
     }
 }
 
+/// cpal's default host. On Linux its PulseAudio host is a client connection that
+/// stays open after the host is dropped (the `pulseaudio` crate's client thread
+/// does not notice a client that goes quietly), so one is kept and shared instead
+/// of leaving one behind per lookup. One whose connection died (the sound server
+/// restarted) is replaced.
+pub(crate) fn host() -> Arc<cpal::Host> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::{Mutex, PoisonError};
+        static HOST: Mutex<Option<Arc<cpal::Host>>> = Mutex::new(None);
+        let mut kept = HOST.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(host) = kept.as_ref().filter(|host| host.output_devices().is_ok()) {
+            return host.clone();
+        }
+        let host = Arc::new(cpal::default_host());
+        // The fallback (ALSA, while the sound server is down) is not kept: the next
+        // lookup tries PulseAudio again.
+        *kept = (host.id() == cpal::HostId::PulseAudio).then(|| host.clone());
+        host
+    }
+    #[cfg(not(target_os = "linux"))]
+    Arc::new(cpal::default_host())
+}
+
+/// The host of the devices with ids of `id`.
+fn host_of(id: cpal::HostId) -> Option<Arc<cpal::Host>> {
+    let default = host();
+    if default.id() == id { Some(default) } else { cpal::host_from_id(id).ok().map(Arc::new) }
+}
+
 /// Devices that can't even be described (gone mid-enumeration, or bogus entries
 /// from cpal's macOS enumeration racing a device removal) are left out.
 pub(crate) fn list() -> Result<AudioDevices> {
-    let host = cpal::default_host();
+    let host = host();
     let infos = |dir: Direction| -> Result<Vec<AudioDeviceInfo>> {
         let default = dir.default_device(&host).map(|d| id(&d));
         Ok(dir
@@ -65,7 +97,7 @@ pub(crate) fn list() -> Result<AudioDevices> {
 pub(crate) fn find(id: Option<&str>, dir: Direction) -> Result<cpal::Device> {
     let Some(id) = id else {
         return dir
-            .default_device(&cpal::default_host())
+            .default_device(&host())
             .ok_or_else(|| VoiceError::DeviceNotFound(format!("default {}", dir.label())));
     };
     if let Some(device) = find_exact(id, dir)? {
@@ -84,18 +116,18 @@ pub(crate) fn find(id: Option<&str>, dir: Direction) -> Result<cpal::Device> {
 
 fn find_exact(id: &str, dir: Direction) -> Result<Option<cpal::Device>> {
     if let Ok(device_id) = id.parse::<cpal::DeviceId>()
-        && let Ok(host) = cpal::host_from_id(device_id.host())
+        && let Some(host) = host_of(device_id.host())
         && let Some(device) = host.device_by_id(&device_id)
         && dir.supports(&device)
     {
         return Ok(Some(device));
     }
-    Ok(dir.list(&cpal::default_host())?.into_iter().find(|d| name(d) == id))
+    Ok(dir.list(&host())?.into_iter().find(|d| name(d) == id))
 }
 
 /// The best virtual cable output (see [`cable_rank`]), if one is installed.
 pub(crate) fn best_cable_output() -> Result<Option<cpal::Device>> {
-    let outputs = Direction::Output.list(&cpal::default_host())?;
+    let outputs = Direction::Output.list(&host())?;
     Ok(outputs
         .into_iter()
         .filter_map(|d| cable_rank(&name(&d)).map(|rank| (rank, d)))

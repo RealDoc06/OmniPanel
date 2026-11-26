@@ -82,16 +82,25 @@ pub(crate) struct Shared {
     pub levels: Levels,
     /// Linear gain of the shared app sound (`f32` bits), read by the input callback.
     pub share_gain: AtomicU32,
-    /// The number of the latest change to the list of shared apps the host committed,
-    /// and of the one the capture was last lined up with ([`Shares::revision`]). App
-    /// sound is only mixed while they agree, see [`crate::VoiceEngine::commit_shares`].
+    /// The number of the latest change to the list of shared apps the host committed
+    /// ([`Shares::revision`]). A session only mixes app sound while its capture is
+    /// lined up with exactly that change ([`ShareGate`]), see
+    /// [`crate::VoiceEngine::commit_shares`].
     pub shares_committed: AtomicU64,
-    pub shares_applied: AtomicU64,
-    /// Counts the times an app stopped being shared: the input callback then
-    /// throws away what its mixer holds, so nothing captured of it is still heard.
-    pub shares_removed: AtomicU32,
     /// Whether a general-purpose virtual cable output exists, once known.
     pub has_cable: Mutex<Option<bool>>,
+}
+
+/// How far a session's capture is, for its own microphone callback. Per session:
+/// one that was left behind (its audio thread stuck in a backend call) must not
+/// open again because a newer session caught up.
+#[derive(Default)]
+pub(crate) struct ShareGate {
+    /// The [`Shares::revision`] the capture was last lined up with.
+    applied: AtomicU64,
+    /// Counts the times an app stopped being shared: the input callback then
+    /// throws away what its mixer holds, so nothing captured of it is still heard.
+    removed: AtomicU32,
 }
 
 impl Shared {
@@ -523,6 +532,7 @@ struct Session {
     /// Declared after the streams: the capture stops once nothing reads its feeds.
     mixer: MixerPort,
     capture: Option<AppCapture>,
+    gate: Arc<ShareGate>,
     /// The main output is a virtual device. Anything else is speakers: the app and
     /// the microphone must not be played there.
     output_virtual: bool,
@@ -581,6 +591,7 @@ impl Session {
         let (monitor_rings, monitor_in) = RingBuffer::new(2);
         let (retired_rings_tx, retired_rings) = RingBuffer::new(2);
         let (mixer, mixer_port) = share::mixer(rate);
+        let gate = Arc::<ShareGate>::default();
         let sample_rate = rate as f32;
         let processor = Processor::new(sample_rate, Chain::new(effects, sample_rate))
             .with_port(ChainPort { incoming, retired: retired_tx });
@@ -591,6 +602,7 @@ impl Session {
             monitor_rings: monitor_in,
             retired_rings: retired_rings_tx,
             mixer,
+            gate: gate.clone(),
             removed: 0,
             in_block: in_block.clone(),
             callbacks: callbacks.clone(),
@@ -618,6 +630,7 @@ impl Session {
             warning: None,
             mixer: mixer_port,
             capture: None,
+            gate,
             output_virtual: false,
             shares_changed: Arc::default(),
             shares_synced: Vec::new(),
@@ -658,10 +671,11 @@ impl Session {
             // The capture of an app that is no longer shared has ended above; what the
             // mixer still holds of it goes too, before the mix may open for the new list.
             if self.shares_synced.iter().any(|app| !apps.contains(app)) {
-                shared.shares_removed.fetch_add(1, Ordering::Relaxed);
+                self.gate.removed.fetch_add(1, Ordering::Relaxed);
             }
-            // From here on the feeds in the mixer belong to exactly this list.
-            shared.shares_applied.store(*revision, Ordering::Release);
+            // From here on the feeds in the mixer belong to exactly this list. (Not
+            // for a worker that was let go: its session stays shut.)
+            self.gate.applied.store(*revision, Ordering::Release);
         });
         self.shares_synced.clone_from(apps);
     }
@@ -830,9 +844,10 @@ pub(crate) struct InputSide {
     /// Monitor rings from the audio thread, and the replaced ones going back to be freed.
     monitor_rings: rtrb::Consumer<rtrb::Producer<f32>>,
     retired_rings: rtrb::Producer<rtrb::Producer<f32>>,
-    /// Shared app sound, added for the main output only, and the count of
-    /// [`Shared::shares_removed`] it is up to date with.
+    /// Shared app sound, added for the main output only; how far the session's
+    /// capture is, and the count of [`ShareGate::removed`] the mixer is up to date with.
     mixer: Mixer,
+    gate: Arc<ShareGate>,
     removed: u32,
     in_block: Arc<AtomicUsize>,
     callbacks: Arc<AtomicU32>,
@@ -865,8 +880,8 @@ impl InputSide {
         // Shut unless the capture is lined up with the list of apps shared right now.
         // The applied list is read first and written last: whoever sees it also
         // sees the removals that came with it.
-        let applied = self.shared.shares_applied.load(Ordering::Acquire);
-        let removed = self.shared.shares_removed.load(Ordering::Relaxed);
+        let applied = self.gate.applied.load(Ordering::Acquire);
+        let removed = self.gate.removed.load(Ordering::Relaxed);
         if std::mem::replace(&mut self.removed, removed) != removed {
             self.mixer.flush();
         }
@@ -1108,7 +1123,8 @@ mod tests {
         let shared = Arc::new(Shared::default());
         shared.share_gain.store(1.0f32.to_bits(), Ordering::Relaxed);
         shared.shares_committed.store(1, Ordering::Relaxed);
-        shared.shares_applied.store(1, Ordering::Relaxed);
+        let gate = Arc::<ShareGate>::default();
+        gate.applied.store(1, Ordering::Relaxed);
         let (output, mut output_rx) = ring(48_000);
         let (monitor, mut monitor_rx) = ring(48_000);
         let (_monitor_rings, monitor_in) = RingBuffer::new(2);
@@ -1121,6 +1137,7 @@ mod tests {
             monitor_rings: monitor_in,
             retired_rings,
             mixer,
+            gate,
             removed: 0,
             in_block: Arc::default(),
             callbacks: Arc::default(),
@@ -1163,7 +1180,7 @@ mod tests {
         let device = match std::env::var("OMNI_VOICE_TEST_OUTPUT") {
             Ok(id) => devices::find(Some(&id), Direction::Output).unwrap(),
             Err(_) => Direction::Output
-                .list(&cpal::default_host())
+                .list(&devices::host())
                 .unwrap()
                 .into_iter()
                 .find(devices::is_virtual)
