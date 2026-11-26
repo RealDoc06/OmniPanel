@@ -802,7 +802,11 @@ export const backend: Backend = {
       }
       setUpdateStatus({ state: "ready", version: MOCK_UPDATE });
     },
-    install: async () => setUpdateStatus({ state: "upToDate" }),
+    install: async () => {
+      setUpdateStatus({ state: "installing", version: MOCK_UPDATE });
+      await reply(null, 800);
+      setUpdateStatus({ state: "upToDate" });
+    },
   },
 };
 

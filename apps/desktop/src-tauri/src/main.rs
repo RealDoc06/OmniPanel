@@ -109,6 +109,7 @@ fn main() {
         RunEvent::Reopen { .. } => window::show(app),
         // tao 0.37 sends Dock Quit directly here, without an ExitRequested to defer.
         RunEvent::Exit => {
+            updater::wait_for_install(app);
             shutdown_engine(app);
             // Restarting into an update starts the new process while this one is
             // still alive (macOS waits for it to launch): it must find the folder free.
@@ -149,6 +150,7 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
         // Locking unsupported by the file system: run unguarded.
         Err(e) => tracing::warn!("can't lock {}: {e}", data_dir.display()),
     }
+    let show_after_update = updater::take_show_after_update(&data_dir);
     let version = app.package_info().version.to_string();
     let host = tauri::async_runtime::block_on(Host::start(HostOptions { data_dir, version }))?;
     app.manage(host.clone());
@@ -165,7 +167,8 @@ fn start(app: &AppHandle, launched_hidden: bool) -> anyhow::Result<()> {
     updater::start(app);
     #[cfg(unix)]
     quit_on_signal(app.clone());
-    if tray.is_ok() && (launched_hidden || host.config().settings.start_hidden) {
+    let hidden = launched_hidden || host.config().settings.start_hidden;
+    if tray.is_ok() && hidden && !show_after_update {
         window::set_dock_visible(app, false);
     } else {
         window::show(app);

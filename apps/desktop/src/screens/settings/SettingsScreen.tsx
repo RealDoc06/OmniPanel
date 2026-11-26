@@ -365,12 +365,14 @@ function UpdateSettings() {
   const settings = useSettings();
   const status = useUpdate((s) => s.status);
   const current = useApp((s) => s.info.version);
-  const [installing, setInstalling] = useState(false);
+  // From the click until the shell reports progress, and between its steps.
+  const [starting, setStarting] = useState(false);
   const install = async () => {
-    setInstalling(true);
+    setStarting(true);
     await run(installUpdate());
-    setInstalling(false);
+    setStarting(false);
   };
+  const busy = starting || status.state === "downloading" || status.state === "installing";
   // deb and rpm installs, which the package manager owns.
   const manual = status.state === "available" && !status.canInstall;
   return (
@@ -384,12 +386,13 @@ function UpdateSettings() {
                 Download
               </Button>
             ) : (
-              <Button size="sm" variant="primary" icon="download" disabled={installing || status.state === "downloading"} onClick={() => void install()}>
+              <Button size="sm" variant="primary" icon="download" disabled={busy} onClick={() => void install()}>
                 Install and restart
               </Button>
             )}
             <span role="status" className="text-muted">
               {status.state === "downloading" && `Downloading${status.percent === null ? "…" : ` ${status.percent}%`}`}
+              {status.state === "installing" && "Installing…"}
             </span>
           </div>
         </Field>

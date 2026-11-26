@@ -21,8 +21,8 @@ export type UpdateStatus =
   /** `canInstall` is false when this copy can't replace itself (deb, rpm): the user downloads the package. */
   | { state: "available"; version: string; canInstall: boolean }
   | { state: "downloading"; version: string; percent: number | null }
-  /** Downloaded and verified, waiting for `install`. */
-  | { state: "ready"; version: string };
+  /** `ready`: downloaded and verified, waiting for `install`. `installing`: a restart follows. */
+  | { state: "ready" | "installing"; version: string };
 
 /** The shell's updater. Failed calls reject with a message for the user. */
 export interface Updater {
@@ -30,7 +30,7 @@ export interface Updater {
   onStatus: (handler: (status: UpdateStatus) => void) => Promise<() => void>;
   check: () => Promise<void>;
   download: () => Promise<void>;
-  /** Replaces the app and restarts it. Save pending edits first. */
+  /** Replaces the app with the downloaded update and restarts it. Save pending edits first. */
   install: () => Promise<void>;
 }
 

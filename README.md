@@ -129,11 +129,14 @@ scripts/verify-release.sh                                    # install and launc
 
 macOS cannot be cross-built. Tagging `v*` runs the release workflow, which builds every platform into a draft prerelease.
 
-Publishing that draft is what sends the update to installed apps: the workflow copies the release's `latest.json` to
-the `updater` branch, which they read. Only workflow builds can be updates. They are signed with the
-`TAURI_SIGNING_PRIVATE_KEY` repository secret, whose public half is `plugins.updater.pubkey` in `tauri.conf.json`;
-`pnpm build` and `pnpm build:release` make plain installers. Keep a copy of that private key: installed apps accept
-nothing signed with another one.
+Publishing that draft is what sends the update to installed apps: the workflow checks every package once more
+(`scripts/check-update-manifest.sh`) and copies the release's `latest.json` to the `updater` branch, which they read.
+A failed "publish-update" job means the update did not go out. A published version is never rebuilt, so fix a bad
+release with a new version.
+
+Only workflow builds can be updates. They are signed with the `TAURI_SIGNING_PRIVATE_KEY` repository secret, whose
+public half is `plugins.updater.pubkey` in `tauri.conf.json`; `pnpm build` and `pnpm build:release` make plain
+installers. Keep a copy of that private key: installed apps accept nothing signed with another one.
 
 deb and rpm sort `0.1.0-alpha.N` above `0.1.0`, so the first stable release must be `0.2.0` or later.
 

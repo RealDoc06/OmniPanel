@@ -3,6 +3,8 @@
 //! The check runs here, not in the UI, because the webview is gone while
 //! OmniPanel sits in the tray. `apps/desktop/src/lib/updates.ts` is the UI side.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -20,6 +22,10 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const RECHECK_SOON: Duration = Duration::from_secs(60 * 60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Empty file in the data folder, written before an install: the next start
+/// shows the window even when it would start hidden, so the user sees the
+/// app come back.
+const SHOW_AFTER_UPDATE: &str = "show-after-update";
 
 /// Pushed to the UI as `update-status`; `UpdateStatus` in `lib/backend.ts` mirrors it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -40,19 +46,31 @@ pub enum Status {
         version: String,
         percent: Option<u8>,
     },
-    /// Downloaded and signature-checked, waiting for `install_update`.
+    /// Downloaded and signature-checked, waiting for `install_update`. Only
+    /// while the window is open: it is the window that finishes the install.
     Ready {
+        version: String,
+    },
+    /// The app's files are being replaced; a restart follows.
+    Installing {
         version: String,
     },
 }
 
 #[derive(Default)]
-pub struct Updates(Mutex<Inner>);
+pub struct Updates {
+    inner: Mutex<Inner>,
+    /// Held while the app's files are being replaced. `wait_for_install` takes
+    /// it, so quitting can't cut a half-written app short.
+    replacing: Mutex<()>,
+    /// Windows: the engine was shut down for an installer (see `updater`).
+    engine_stopped: AtomicBool,
+}
 
 #[derive(Default)]
 struct Inner {
     status: Status,
-    /// The release behind `Available`, `Downloading` and `Ready`.
+    /// The release behind every status that carries a version.
     update: Option<Update>,
     /// Its verified package, while `Ready`.
     package: Option<Vec<u8>>,
@@ -70,11 +88,30 @@ pub fn start(app: &AppHandle) {
     });
 }
 
+/// True once after an update was installed: this start must show the window.
+pub fn take_show_after_update(data_dir: &Path) -> bool {
+    std::fs::remove_file(data_dir.join(SHOW_AFTER_UPDATE)).is_ok()
+}
+
+/// Blocks until no install is replacing the app's files. Called before the process exits.
+pub fn wait_for_install(app: &AppHandle) {
+    drop(app.state::<Updates>().replacing.lock());
+}
+
+/// The window that would finish the install is gone: let go of the downloaded
+/// package (tens of MB) and offer the update again next time.
+pub fn on_window_closed(app: &AppHandle) {
+    let mut inner = state(app);
+    if let Status::Ready { version } = inner.status.clone() {
+        inner.package = None;
+        inner.status = Status::Available { version, can_install: true };
+    }
+}
+
 /// deb and rpm installs belong to the package manager (root, dependencies), and a
 /// dev build has no installed app to replace. Those are told about the update only.
 fn can_install() -> bool {
-    !tauri::is_dev()
-        && matches!(bundle_type(), Some(BundleType::AppImage | BundleType::Nsis | BundleType::Msi | BundleType::App))
+    !tauri::is_dev() && matches!(bundle_type(), Some(BundleType::AppImage | BundleType::Nsis | BundleType::App))
 }
 
 fn updater(app: &AppHandle) -> Result<Updater, Error> {
@@ -82,20 +119,22 @@ fn updater(app: &AppHandle) -> Result<Updater, Error> {
     app.updater_builder()
         .timeout(CHECK_TIMEOUT)
         // Windows starts the installer and exits inside `Update::install`,
-        // skipping `RunEvent::Exit`.
+        // skipping `RunEvent::Exit`. The plugin runs this just before it
+        // starts the installer, and that start can still fail.
         .on_before_exit(move || {
+            handle.state::<Updates>().engine_stopped.store(true, Ordering::Relaxed);
             crate::shutdown_engine(&handle);
             handle.cleanup_before_exit();
         })
         .build()
 }
 
-fn lock(app: &AppHandle) -> MutexGuard<'_, Inner> {
-    app.state::<Updates>().inner().0.lock().unwrap()
+fn state(app: &AppHandle) -> MutexGuard<'_, Inner> {
+    app.state::<Updates>().inner().inner.lock().unwrap()
 }
 
 fn set_status(app: &AppHandle, status: Status) {
-    lock(app).status = status.clone();
+    state(app).status = status.clone();
     publish(app, &status);
 }
 
@@ -108,7 +147,7 @@ fn publish(app: &AppHandle, status: &Status) {
 
 #[tauri::command]
 pub fn update_status(app: AppHandle) -> Status {
-    lock(&app).status.clone()
+    state(&app).status.clone()
 }
 
 /// Asks the update server once. On failure the status goes back to what it was
@@ -116,8 +155,8 @@ pub fn update_status(app: AppHandle) -> Status {
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
     let previous = {
-        let mut inner = lock(&app);
-        if matches!(inner.status, Status::Checking | Status::Downloading { .. } | Status::Ready { .. }) {
+        let mut inner = state(&app);
+        if !matches!(inner.status, Status::Idle | Status::UpToDate | Status::Available { .. }) {
             return Ok(());
         }
         // Claimed under the lock, so two checks can't both start.
@@ -125,23 +164,30 @@ pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
     };
     publish(&app, &Status::Checking);
     let found = async { updater(&app)?.check().await }.await;
-    let (status, result) = match found {
-        Ok(update) => {
-            let version = update.as_ref().map(|update| update.version.clone());
-            tray::set_update(&app, version.as_deref());
-            lock(&app).update = update;
-            let status = match version {
-                Some(version) => Status::Available { version, can_install: can_install() },
-                None => Status::UpToDate,
-            };
-            (status, Ok(()))
-        }
-        Err(e) => {
-            tracing::info!("update check failed: {e}");
-            (previous, Err(format!("Couldn't check for updates: {e}")))
-        }
+    let (status, result) = {
+        let mut inner = state(&app);
+        let result = match found {
+            Ok(update) => {
+                inner.status = match &update {
+                    Some(update) => Status::Available { version: update.version.clone(), can_install: can_install() },
+                    None => Status::UpToDate,
+                };
+                inner.update = update;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::info!("update check failed: {e}");
+                inner.status = previous;
+                Err(format!("Couldn't check for updates: {e}"))
+            }
+        };
+        (inner.status.clone(), result)
     };
-    set_status(&app, status);
+    if result.is_ok() {
+        let version = if let Status::Available { version, .. } = &status { Some(version.as_str()) } else { None };
+        tray::set_update(&app, version);
+    }
+    publish(&app, &status);
     result
 }
 
@@ -149,7 +195,7 @@ pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn download_update(app: AppHandle) -> Result<(), String> {
     let (mut update, version) = {
-        let mut inner = lock(&app);
+        let mut inner = state(&app);
         let (Status::Available { version, can_install: true }, Some(update)) =
             (inner.status.clone(), inner.update.clone())
         else {
@@ -170,24 +216,48 @@ pub async fn download_update(app: AppHandle) -> Result<(), String> {
             set_status(&app, Status::Downloading { version: version.clone(), percent });
         }
     };
-    match update.download(on_chunk, || {}).await {
-        Ok(package) => {
-            lock(&app).package = Some(package);
-            set_status(&app, Status::Ready { version });
-            Ok(())
-        }
-        Err(e) => {
-            set_status(&app, Status::Available { version, can_install: true });
-            let refused =
-                matches!(e, Error::Minisign(_) | Error::SignedVersionMismatch { .. } | Error::MissingSignedVersion);
-            let what = if refused {
-                "The update failed its signature check and was not installed"
-            } else {
-                "Couldn't download the update"
-            };
-            Err(format!("{what}: {e}"))
-        }
+    let downloaded = update.download(on_chunk, || {}).await;
+    let (status, result) = {
+        let mut inner = state(&app);
+        let result = match downloaded {
+            // Kept only for a window that is still there to finish the install (`on_window_closed`).
+            Ok(package) if app.get_webview_window(window::MAIN).is_some() => {
+                inner.package = Some(package);
+                inner.status = Status::Ready { version };
+                Ok(())
+            }
+            Ok(_) => {
+                inner.status = Status::Available { version, can_install: true };
+                Ok(())
+            }
+            // The offer may be what is wrong (a package replaced since the check):
+            // drop it, so the next "Check now" fetches a fresh one.
+            Err(e) => {
+                inner.status = Status::Idle;
+                inner.update = None;
+                let refused = matches!(
+                    e,
+                    Error::Minisign(_)
+                        | Error::Base64(_)
+                        | Error::SignatureUtf8(_)
+                        | Error::SignedVersionMismatch { .. }
+                        | Error::MissingSignedVersion
+                );
+                let what = if refused {
+                    "The update failed its signature check and was not installed"
+                } else {
+                    "Couldn't download the update"
+                };
+                Err(format!("{what}: {e}"))
+            }
+        };
+        (inner.status.clone(), result)
+    };
+    if status == Status::Idle {
+        tray::set_update(&app, None);
     }
+    publish(&app, &status);
+    result
 }
 
 /// Replaces the app with the downloaded package and restarts into it. The UI
@@ -196,27 +266,39 @@ pub async fn download_update(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let (update, package, version) = {
-        let mut inner = lock(&app);
-        let (Status::Ready { version }, Some(update)) = (inner.status.clone(), inner.update.clone()) else {
+        let mut inner = state(&app);
+        let (Status::Ready { version }, Some(update), Some(package)) =
+            (inner.status.clone(), inner.update.clone(), inner.package.take())
+        else {
             return Err("There is no update to install.".into());
         };
-        // Already installing.
-        let Some(package) = inner.package.take() else {
-            return Ok(());
-        };
+        inner.status = Status::Installing { version: version.clone() };
         (update, package, version)
     };
-    let installed = tauri::async_runtime::spawn_blocking(move || update.install(package)).await;
-    match installed.map_err(|e| e.to_string()).and_then(|result| result.map_err(|e| e.to_string())) {
-        Ok(()) => {
-            app.request_restart();
-            Ok(())
-        }
-        Err(e) => {
-            set_status(&app, Status::Available { version, can_install: true });
-            Err(format!("Couldn't install the update: {e}"))
-        }
+    publish(&app, &Status::Installing { version: version.clone() });
+    let marker = app.state::<Host>().data_dir().join(SHOW_AFTER_UPDATE);
+    let _ = std::fs::write(&marker, "");
+    let handle = app.clone();
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        let updates = handle.state::<Updates>();
+        let _replacing = updates.replacing.lock().unwrap();
+        update.install(package)
+    })
+    .await;
+    let Err(error) = installed.map_err(|e| e.to_string()).and_then(|result| result.map_err(|e| e.to_string())) else {
+        app.request_restart();
+        return Ok(());
+    };
+    if app.state::<Updates>().engine_stopped.load(Ordering::Relaxed) {
+        // Windows: the installer didn't start, after the engine was shut down for it.
+        // This version comes back whole by restarting (and shows its window).
+        tracing::error!("the update installer didn't start, restarting: {error}");
+        app.request_restart();
+    } else {
+        let _ = std::fs::remove_file(&marker);
+        set_status(&app, Status::Available { version, can_install: true });
     }
+    Err(format!("Couldn't install the update: {error}"))
 }
 
 #[cfg(test)]
@@ -238,6 +320,13 @@ mod tests {
             to_value(Status::Downloading { version: version.clone(), percent: None }).unwrap(),
             json!({"state": "downloading", "version": "1.2.3", "percent": null})
         );
-        assert_eq!(to_value(Status::Ready { version }).unwrap(), json!({"state": "ready", "version": "1.2.3"}));
+        assert_eq!(
+            to_value(Status::Ready { version: version.clone() }).unwrap(),
+            json!({"state": "ready", "version": "1.2.3"})
+        );
+        assert_eq!(
+            to_value(Status::Installing { version }).unwrap(),
+            json!({"state": "installing", "version": "1.2.3"})
+        );
     }
 }

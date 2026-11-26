@@ -48,7 +48,7 @@ Linux. Any device with a browser (old phones, tablets, laptops) becomes a deck.
   on Linux OmniPanel creates a PipeWire/PulseAudio virtual mic itself.
 - **Updates** live in the shell (`updater.rs`, `tauri-plugin-updater`), because the daily check has to run
   while the webview is gone. Apps read `latest.json` from the `updater` branch, which the release workflow
-  rewrites when a release is published (GitHub's "latest release" link skips prereleases). The user starts
+  rewrites when a release is published and its packages verify (GitHub's "latest release" link skips prereleases). The user starts
   every install from Settings; deb and rpm installs only get a link, the package manager owns those files.
 - **Flow-control actions** (`multi`, `toggle`, `delay`, `navigate`, `voice`)
   live in `omni-host`; all other actions are leaves run by `omni-actions`.

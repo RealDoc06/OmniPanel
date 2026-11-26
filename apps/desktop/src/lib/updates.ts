@@ -2,7 +2,6 @@
 // background and pushes its status; Settings shows it and starts the install.
 import { create } from "zustand";
 import { updater, type UpdateStatus } from "./backend";
-import { quitAfterFlush } from "./saver";
 import { flushAll } from "./store";
 
 export const useUpdate = create<{ status: UpdateStatus }>()(() => ({ status: { state: "idle" } }));
@@ -19,8 +18,13 @@ if (!pushed) useUpdate.setState({ status: initial });
 /** A newer version is known and not installed yet. */
 export const useUpdateVersion = () => useUpdate(({ status }) => ("version" in status ? status.version : null));
 
-/** Downloads the update unless that is done, saves pending edits, then installs it and restarts. */
+/**
+ * Downloads the update unless that is done, saves pending edits, then installs it and restarts.
+ * Unlike Quit, an update can wait: when a save fails this stops, and the download stays ready
+ * for the next try.
+ */
 export async function installUpdate() {
   if (useUpdate.getState().status.state !== "ready") await updater.download();
-  await quitAfterFlush(flushAll, updater.install);
+  await flushAll();
+  await updater.install();
 }

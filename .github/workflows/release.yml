@@ -4,7 +4,7 @@ name: Release
 # tauri.conf.json, with signed update packages and `latest.json`, the update manifest.
 # Review the draft and its assets, then publish it by hand. Publishing copies its
 # `latest.json` to the `updater` branch, where installed apps look: that is the moment
-# the update goes out.
+# the update goes out. A published release is never rebuilt: apps download its packages.
 on:
   push:
     tags: ["v*"]
@@ -33,6 +33,17 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
+      # New packages would no longer match the signatures in the published manifest.
+      - name: Refuse to rebuild a published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          if [ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" = false ]; then
+            echo "::error::$tag is already published. Bump the version to release again."
+            exit 1
+          fi
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -79,20 +90,14 @@ jobs:
       contents: write # drafts are only visible with write access
     steps:
       - uses: actions/checkout@v7
-      - name: Verify the update manifest
+      - name: Verify the draft's update manifest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update && sudo apt-get install -y minisign
-          conf=apps/desktop/src-tauri/tauri.conf.json
-          gh release download "v$(jq -r .version $conf)" --pattern latest.json
-          pubkey="$(jq -r .plugins.updater.pubkey $conf | base64 -d | tail -n 1)"
-          for target in linux-x86_64 linux-aarch64 windows-x86_64 darwin-aarch64 darwin-x86_64; do
-            jq -er --arg t "$target" '.platforms[$t].signature' latest.json | base64 -d > "$target.minisig"
-            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
-              -o "$target.package" "$(jq -er --arg t "$target" '.platforms[$t].url' latest.json)"
-            minisign -V -P "$pubkey" -m "$target.package" -x "$target.minisig"
-          done
+          version="$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          gh release download "v$version" --pattern latest.json
+          scripts/check-update-manifest.sh latest.json "$version"
 
   # Installed apps read https://raw.githubusercontent.com/<repo>/updater/latest.json.
   # GitHub's /releases/latest/download/ link can't serve it: it skips prereleases, and
@@ -100,15 +105,36 @@ jobs:
   publish-update:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    # One at a time: the newest release must be the last one to write the branch.
+    concurrency: publish-update
     permissions:
       contents: write
     steps:
+      # The release's tag: its copy of the check script and of the public key.
+      - uses: actions/checkout@v7
       - name: Point the updater branch at this release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json
+          releases="repos/$GITHUB_REPOSITORY/releases"
+          # A rerun, or a job that was queued behind a newer release, must not put an older manifest back.
+          newest="$(gh api "$releases?per_page=100" --jq '[.[] | select(.draft | not)] | max_by(.published_at) | .tag_name')"
+          if [ "$newest" != "$TAG" ]; then
+            echo "::notice::$newest was published after $TAG, so the update manifest stays as it is."
+            exit 0
+          fi
+          mkdir manifest
+          # tauri-action links packages by API asset id. Swap in the release's own download
+          # links: no API rate limit for the apps, and nothing tied to an id.
+          gh release download "$TAG" --pattern latest.json --output draft.json
+          gh api "$releases/tags/$TAG" --jq '[.assets[] | {key: .url, value: .browser_download_url}] | from_entries' > links.json
+          jq --slurpfile links links.json \
+            '.platforms |= map_values(.url = ($links[0][.url] // error("no release asset for " + .url)))' draft.json > manifest/latest.json
+          # Same check as on the draft, now without a token: exactly what the apps will download.
+          sudo apt-get update && sudo apt-get install -y minisign
+          env -u GH_TOKEN scripts/check-update-manifest.sh manifest/latest.json "${TAG#v}"
+          cd manifest
           git init -q -b updater
           git add latest.json
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
