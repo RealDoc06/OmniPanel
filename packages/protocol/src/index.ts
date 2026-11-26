@@ -9,6 +9,7 @@ export type { AiSettingsPatch } from "./generated/AiSettingsPatch";
 export type { AppAudio } from "./generated/AppAudio";
 export type { AppInfo } from "./generated/AppInfo";
 export type { AppLevel } from "./generated/AppLevel";
+export type { AppRoute } from "./generated/AppRoute";
 export type { AppState } from "./generated/AppState";
 export type { AudioCapabilities } from "./generated/AudioCapabilities";
 export type { AudioDeviceInfo } from "./generated/AudioDeviceInfo";

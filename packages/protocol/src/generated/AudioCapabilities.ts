@@ -10,10 +10,14 @@ note: string | null,
  */
 perAppOutput: boolean, 
 /**
+ * Why they cannot, or a permission hint.
+ */
+outputNote: string | null, 
+/**
  * Apps can be given a microphone of their own.
  */
 perAppInput: boolean, 
 /**
- * Why choosing a device per app is limited/unavailable.
+ * Why they cannot.
  */
-deviceNote: string | null, };
+inputNote: string | null, };

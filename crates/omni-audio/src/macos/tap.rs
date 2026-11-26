@@ -6,8 +6,8 @@
 //! A tap takes only the audio headed to one stream of the device it listens to (the
 //! default output): what an app sends to another device by itself is not tapped (and
 //! not muted). Played back on that same device it lands on the same channels, so
-//! only the level changes. Played back on another device it moves there, onto that
-//! device's stereo channels.
+//! only the level changes. Played back on another device, the stereo pair of the
+//! tapped device moves onto the stereo pair of that one.
 //!
 //! Same structure as AudioCap / FineTune. Taps use `mutedWhenTapped`, so a source is
 //! silenced only while our IOProc reads it: when we stop (or our process dies, taking
@@ -130,11 +130,35 @@ pub enum Source {
 struct Layout {
     /// Index of the tap's first buffer in the IOProc input list.
     tap_buffer: u32,
-    /// Output channel of the tap's first channel (0-based, counted across buffers):
-    /// the first channel of the playback device's stereo stream.
-    offset: u32,
+    mapping: Mapping,
     /// Per-frame smoothing coefficient.
     coeff: f32,
+}
+
+/// Which tap channel plays on which output channel (both 0-based; output channels
+/// are counted across buffers).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mapping {
+    /// Played on the tapped device: every channel of the tapped stream, back onto the
+    /// channel it was headed to. `offset` is the stream's first channel.
+    Straight { offset: u32 },
+    /// Played on another device: the tapped device's stereo pair (as tap channels) onto
+    /// that device's stereo pair. Anything else the app plays there is dropped.
+    Stereo { from: [u32; 2], to: [u32; 2] },
+}
+
+impl Mapping {
+    /// The `index`-th (tap channel, output channel) to play, until `None`.
+    fn pair(self, index: u32) -> Option<(u32, u32)> {
+        match self {
+            Mapping::Straight { offset } => Some((index, offset + index)),
+            // A mono output gets the left channel once, not both on top of each other.
+            Mapping::Stereo { from, to } => {
+                let once = index == 0 || (index == 1 && to[1] != to[0]);
+                once.then(|| (from[index as usize], to[index as usize]))
+            }
+        }
+    }
 }
 
 /// A running tap; dropping it restores the app's native output.
@@ -147,6 +171,7 @@ pub struct Tap {
     shared: Box<Shared>,
     label: String,
     from_uid: String,
+    device_uid: String,
     /// Index of the output stream of `from` the tap listens to.
     stream: u32,
     /// IO cycle count at the last health check, and when it last moved.
@@ -159,7 +184,6 @@ pub struct Tap {
     pub from: ObjectId,
     /// Output device the aggregate plays to: `from`, or the device an app is sent to.
     pub device: ObjectId,
-    pub device_uid: String,
 }
 
 impl Tap {
@@ -170,7 +194,7 @@ impl Tap {
     /// the permission first.
     pub fn new(label: &str, source: Source, from: ObjectId, device: ObjectId, gain: f32) -> Result<Self> {
         let api = api().ok_or_else(|| AudioError::Unsupported("per-app volume needs macOS 14.2 or later".into()))?;
-        if device::transport(device) == kAudioDeviceTransportTypeAggregate {
+        if [from, device].iter().any(|&d| device::transport(d) == kAudioDeviceTransportTypeAggregate) {
             // Aggregates cannot nest; flattening multi-output devices is not supported yet.
             return Err(AudioError::Unsupported(
                 "per-app volume does not work with aggregate or multi-output devices".into(),
@@ -190,11 +214,11 @@ impl Tap {
                 peak_out: AtomicU32::new(0),
                 peak_step: AtomicU32::new(0),
                 last_sample: AtomicU32::new(0),
-                layout: Layout { tap_buffer: 0, offset: 0, coeff: 1.0 },
+                layout: Layout { tap_buffer: 0, mapping: Mapping::Straight { offset: 0 }, coeff: 1.0 },
             }),
             label: label.to_string(),
             from_uid: device::uid(from)?,
-            stream: output_stream(from).0,
+            stream: 0,
             seen_cycles: 0,
             seen_at: Instant::now(),
             rates: (sample_rate(device), sample_rate(from)),
@@ -202,6 +226,17 @@ impl Tap {
             from,
             device,
             device_uid: device::uid(device)?,
+        };
+        // The tap listens to the stream holding the tapped device's left channel.
+        let tapped = stereo_channels(from);
+        let (stream, first) = output_stream(from, tapped[0]);
+        tap.stream = stream;
+        let mapping = if from == device {
+            Mapping::Straight { offset: first }
+        } else {
+            // A right channel outside that stream (or a mono one) repeats the left.
+            let right = tapped[1].checked_sub(first).unwrap_or(tapped[0] - first);
+            Mapping::Stereo { from: [tapped[0] - first, right], to: stereo_channels(device) }
         };
         // On any error below, `Drop` releases whatever was created so far.
         let description = tap.description(None);
@@ -220,7 +255,7 @@ impl Tap {
         if !wait_until_ready(tap.aggregate, tap_buffer + 1) {
             return Err(AudioError::Backend("the process tap did not attach to the output device".into()));
         }
-        tap.shared.layout = layout(tap.aggregate, tap_buffer, output_stream(device).1)?;
+        tap.shared.layout = layout(tap.aggregate, tap_buffer, mapping)?;
         ca::check(unsafe {
             AudioDeviceCreateIOProcID(
                 tap.aggregate,
@@ -411,18 +446,23 @@ fn wait_until_ready(aggregate: ObjectId, inputs: u32) -> bool {
     true
 }
 
-/// The output stream holding the device's preferred left channel: its index and
-/// first channel (0-based).
-fn output_stream(device: ObjectId) -> (u32, u32) {
+/// The device's preferred left and right output channels (0-based, counted across
+/// its streams).
+fn stereo_channels(device: ObjectId) -> [u32; 2] {
+    let address = ca::prop(kAudioDevicePropertyPreferredChannelsForStereo, device::scope(Endpoint::Output), MAIN);
+    ca::get::<[u32; 2]>(device, address).unwrap_or([1, 2]).map(|channel| channel.saturating_sub(1))
+}
+
+/// The output stream holding the device's channel `channel` (0-based): its index
+/// and first channel.
+fn output_stream(device: ObjectId, channel: u32) -> (u32, u32) {
     let output = device::scope(Endpoint::Output);
-    let [left, _] = ca::get::<[u32; 2]>(device, ca::prop(kAudioDevicePropertyPreferredChannelsForStereo, output, MAIN))
-        .unwrap_or([1, 2]);
     let streams = ca::get_list::<u32>(device, ca::prop(kAudioDevicePropertyStreams, output, MAIN)).unwrap_or_default();
     let mut first = 0;
     for (index, &stream) in streams.iter().enumerate() {
         let channels = ca::get::<AudioStreamBasicDescription>(stream, ca::global(kAudioStreamPropertyVirtualFormat))
             .map_or(0, |f| f.mChannelsPerFrame);
-        if left.saturating_sub(1) < first + channels {
+        if channel < first + channels {
             return (index as u32, first);
         }
         first += channels;
@@ -431,7 +471,7 @@ fn output_stream(device: ObjectId) -> (u32, u32) {
 }
 
 /// Checks the output format and fixes how the IOProc maps the tap.
-fn layout(aggregate: ObjectId, tap_buffer: u32, offset: u32) -> Result<Layout> {
+fn layout(aggregate: ObjectId, tap_buffer: u32, mapping: Mapping) -> Result<Layout> {
     let output = device::scope(Endpoint::Output);
     let streams = ca::get_list::<u32>(aggregate, ca::prop(kAudioDevicePropertyStreams, output, MAIN))?;
     if streams.is_empty() {
@@ -447,7 +487,7 @@ fn layout(aggregate: ObjectId, tap_buffer: u32, offset: u32) -> Result<Layout> {
         }
     }
     let rate = sample_rate(aggregate).max(1.0);
-    Ok(Layout { tap_buffer, offset, coeff: (1.0 - (-1.0 / (SMOOTHING_SECS * rate)).exp()) as f32 })
+    Ok(Layout { tap_buffer, mapping, coeff: (1.0 - (-1.0 / (SMOOTHING_SECS * rate)).exp()) as f32 })
 }
 
 /// Private aggregate: `device` is the main (clock) sub-device, the tap its input.
@@ -529,8 +569,8 @@ unsafe fn channel(list: *const AudioBufferList, first_buffer: u32, index: u32) -
     None
 }
 
-/// Real-time callback: adds the tap's channels onto the output channels they were
-/// headed to, with a smoothed gain. Must not allocate, lock, or panic.
+/// Real-time callback: adds the tap's channels onto the output channels `Mapping`
+/// gives them, with a smoothed gain. Must not allocate, lock, or panic.
 unsafe extern "C-unwind" fn io_proc(
     _device: AudioObjectID,
     _now: NonNull<AudioTimeStamp>,
@@ -564,8 +604,9 @@ unsafe extern "C-unwind" fn io_proc(
     // Channel by channel, each replaying the same gain ramp: any channel count works
     // without per-channel state.
     let mut index = 0;
-    while let (Some(from), Some(to)) =
-        unsafe { (channel(input, layout.tap_buffer, index), channel(output, 0, layout.offset + index)) }
+    while let Some((tapped, played)) = layout.mapping.pair(index)
+        && let (Some(from), Some(to)) =
+            unsafe { (channel(input, layout.tap_buffer, tapped), channel(output, 0, played)) }
     {
         gain = start;
         for i in 0..from.frames.min(to.frames) {
@@ -660,7 +701,7 @@ mod tests {
         };
         let mut output = List { count: 1, buffers: [buffer(4, &mut out)] };
 
-        let instant = Layout { tap_buffer: 1, offset: 2, coeff: 1.0 };
+        let instant = Layout { tap_buffer: 1, mapping: Mapping::Straight { offset: 2 }, coeff: 1.0 };
         run(&shared(0.5, instant), &mut input, &mut output);
         for frame in out.chunks(4) {
             assert_eq!(frame, [0.0, 0.0, 0.25, -0.125]);
@@ -685,8 +726,31 @@ mod tests {
         let mut out = vec![9.0f32; 4 * CHANNELS as usize];
         let mut input = List { count: 1, buffers: [buffer(CHANNELS, &mut tap)] };
         let mut output = List { count: 1, buffers: [buffer(CHANNELS, &mut out)] };
-        run(&shared(0.5, Layout { tap_buffer: 0, offset: 0, coeff: 1.0 }), &mut input, &mut output);
+        let straight = Layout { tap_buffer: 0, mapping: Mapping::Straight { offset: 0 }, coeff: 1.0 };
+        run(&shared(0.5, straight), &mut input, &mut output);
         assert!(out.iter().all(|&s| s == 0.25), "{out:?}");
+    }
+
+    /// Sent to another device, the tapped device's stereo pair lands on that device's
+    /// stereo pair, wherever either sits: here channels 3+4 of a 4-channel interface
+    /// onto channels 5+6 of a 6-channel one. A mono output gets the left channel once.
+    #[test]
+    fn io_proc_moves_the_stereo_pair_to_another_device() {
+        let mut tap: Vec<f32> = (0..4).flat_map(|_| [0.9, 0.9, 0.5, -0.25]).collect(); // 4 frames, 4 channels
+        let mut out = vec![9.0f32; 4 * 6];
+        let mut input = List { count: 1, buffers: [buffer(4, &mut tap)] };
+        let mut output = List { count: 1, buffers: [buffer(6, &mut out)] };
+        let mapping = Mapping::Stereo { from: [2, 3], to: [4, 5] };
+        run(&shared(1.0, Layout { tap_buffer: 0, mapping, coeff: 1.0 }), &mut input, &mut output);
+        for frame in out.chunks(6) {
+            assert_eq!(frame, [0.0, 0.0, 0.0, 0.0, 0.5, -0.25]);
+        }
+
+        let mut mono = vec![9.0f32; 4];
+        let mut output = List { count: 1, buffers: [buffer(1, &mut mono)] };
+        let mapping = Mapping::Stereo { from: [2, 3], to: [0, 0] };
+        run(&shared(1.0, Layout { tap_buffer: 0, mapping, coeff: 1.0 }), &mut input, &mut output);
+        assert_eq!(mono, [0.5; 4]);
     }
 
     /// Taps `afplay` and checks the output follows the gain, on real hardware.

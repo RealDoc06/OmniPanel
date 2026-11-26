@@ -448,6 +448,7 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
   const capabilities = mixer.data?.capabilities;
   const output = action.direction === "output";
   const supported = !capabilities || (output ? capabilities.perAppOutput : capabilities.perAppInput);
+  const note = output ? capabilities?.outputNote : capabilities?.inputNote;
   const devices = (output ? mixer.data?.devices.outputs : mixer.data?.devices.inputs) ?? [];
   return (
     <>
@@ -466,12 +467,11 @@ function AppDeviceForm({ action, onChange }: FormProps<"appDevice">) {
         <DeviceSelect
           ariaLabel={output ? "Play on" : "Record from"}
           devices={devices}
-          value={action.device}
-          withDefault
+          value={action.device === null ? { type: "default" } : { type: "device", id: action.device }}
           onChange={(device) => onChange({ ...action, device })}
         />
       </Field>
-      {!supported && <Notice tone="warn">{capabilities.deviceNote ?? "This computer cannot do that."}</Notice>}
+      {!supported && <Notice tone="warn">{note ?? "This computer cannot do that."}</Notice>}
     </>
   );
 }

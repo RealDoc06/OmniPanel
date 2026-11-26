@@ -5,7 +5,7 @@ import { ACTION_TYPES, describeAction, liveStateTitle } from "./actions.ts";
 import { emptyStyle } from "./controls.ts";
 import { RECIPES, applyAutoLabel, applyPick, dynamicRecipes, isAutoLabel, searchRecipes } from "./recipes.ts";
 
-const spotify: AppAudio = { id: "com.spotify.client", name: "Spotify", pid: 1, volume: 1, muted: false, playing: true, output: "speakers", input: null };
+const spotify: AppAudio = { id: "com.spotify.client", name: "Spotify", pid: 1, volume: 1, muted: false, playing: true, output: { type: "default" }, input: null };
 const dynamic = dynamicRecipes([{ name: "Spotify", launch: "Spotify" }], [spotify]);
 const first = (query: string) => searchRecipes(query, dynamic)[0]?.id;
 
@@ -91,4 +91,9 @@ test("app device actions read as plain sentences and light up only for a device"
   assert.equal(describeAction(to("input", "Shure MV7"), names), "Use Shure MV7 for Spotify");
   assert.equal(liveStateTitle(button(to("output", "bluez_output.1"))), "While it plays there");
   assert.equal(liveStateTitle(button(to("output", null))), null);
+});
+
+test("an app that only records gets no mute or volume entries", () => {
+  const obs: AppAudio = { ...spotify, id: "obs", name: "OBS", playing: false, output: null, input: { type: "default" } };
+  assert.deepEqual(dynamicRecipes([], [spotify, obs]).map((r) => r.id), ["mute:Spotify", "slider:Spotify"]);
 });

@@ -201,12 +201,14 @@ impl Backend for Platform {
     }
 
     fn capabilities(&self) -> AudioCapabilities {
+        let note = "Choosing a device per app is not available on Windows yet.";
         AudioCapabilities {
             per_app_volume: true,
             note: None,
             per_app_output: false,
+            output_note: Some(note.into()),
             per_app_input: false,
-            device_note: Some("Choosing a device per app is not available on Windows yet.".into()),
+            input_note: Some(note.into()),
         }
     }
 

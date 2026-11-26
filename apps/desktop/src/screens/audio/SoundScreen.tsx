@@ -1,10 +1,11 @@
 // Sound screen: the mixer (computer sound, microphone, per-app volume and devices)
 // followed by the voice changer section (`sound-voice` anchor).
-import type { AppAudio, AudioDirection, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
+import type { AppAudio, AppRoute, AudioDirection, MixerState, VolumeState, VolumeTarget } from "@omni/protocol";
 import { useRef, useState, type ReactNode } from "react";
 import { DeviceSelect } from "../../components/DeviceSelect";
 import { I } from "../../components/Icon";
 import { Button, IconButton, Notice, ScreenHeader, Section } from "../../components/ui";
+import { recordsOnly } from "../../lib/actions";
 import type { IconName } from "../../lib/icons";
 import { api } from "../../lib/backend";
 import { usePolling, useThrottled } from "../../lib/hooks";
@@ -66,12 +67,16 @@ function Mixer() {
   const mac = useIsMac();
   const capabilities = mixer?.capabilities;
   const columns = COLUMNS[Number(capabilities?.perAppOutput ?? false) + Number(capabilities?.perAppInput ?? false)] ?? COLUMNS[0];
-  // Why a device cannot be chosen here, or when a microphone select shows up.
-  const deviceNote = capabilities?.deviceNote ?? (capabilities?.perAppInput ? "An app's microphone can be chosen while it is recording." : null);
   const note = capabilities?.note ?? (capabilities && !capabilities.perAppVolume ? "App volume controls are unavailable." : null);
   // Match omni-audio's macOS PERMISSION_HINT, not unsupported-OS or tap failures.
   const needsPermission = mac && capabilities?.perAppVolume === false &&
-    capabilities.note?.startsWith("Per-app volume: allow OmniPanel under System Settings > Privacy & Security > Screen & System Audio Recording");
+    capabilities.note?.startsWith("Per-app volume and speakers: allow OmniPanel under System Settings > Privacy & Security > Screen & System Audio Recording");
+  // Why a speaker or microphone cannot be chosen here (once, and not what the notice
+  // above already says), or when a microphone select shows up.
+  const deviceNotes = capabilities
+    ? [...new Set([capabilities.outputNote, capabilities.inputNote])].filter((n) => n !== null && n !== capabilities.note)
+    : [];
+  if (capabilities?.perAppInput) deviceNotes.push("An app's microphone can be chosen while it is recording.");
 
   usePolling(async () => {
     try {
@@ -101,16 +106,18 @@ function Mixer() {
 
   /** Sends an app to a device. A failure is toasted and the next poll shows where the app really is. */
   const setDevice = (app: AppAudio, direction: AudioDirection, device: string | null) => {
+    const route: AppRoute = device === null ? { type: "default" } : { type: "device", id: device };
     touchedAt.current = Date.now();
-    setMixer((m) => m && { ...m, apps: m.apps.map((a) => (a.id === app.id ? { ...a, [direction]: device } : a)) });
+    setMixer((m) => m && { ...m, apps: m.apps.map((a) => (a.id === app.id ? { ...a, [direction]: route } : a)) });
     api.runAction({ type: "appDevice", app: app.id, direction, device }).catch(toastError);
   };
 
   // One select per direction this computer can change, shown while the app has such a stream.
   const deviceSelects = (app: AppAudio) =>
     mixer &&
-    DIRECTIONS.filter(({ direction }) => mixer.capabilities[CAPABILITY[direction]]).map(({ direction, label, icon }) =>
-      app[direction] === null ? (
+    DIRECTIONS.filter(({ direction }) => mixer.capabilities[CAPABILITY[direction]]).map(({ direction, label, icon }) => {
+      const route = app[direction];
+      return route === null ? (
         <span key={direction} />
       ) : (
         <span key={direction} className="flex min-w-0 items-center gap-1.5" title={`${app.name} ${label}`}>
@@ -119,12 +126,12 @@ function Mixer() {
             ariaLabel={`${app.name} ${label}`}
             className="min-w-0"
             devices={direction === "output" ? mixer.devices.outputs : mixer.devices.inputs}
-            value={app[direction]}
+            value={route}
             onChange={(device) => setDevice(app, direction, device)}
           />
         </span>
-      ),
-    );
+      );
+    });
 
   const row = (target: VolumeTarget, name: string, icon: IconName, state: VolumeState, app?: AppAudio) => (
     <MixerRow
@@ -134,7 +141,7 @@ function Mixer() {
       state={state}
       playing={app?.playing}
       disabled={target.type === "app" && !mixer?.capabilities.perAppVolume}
-      silent={app !== undefined && app.output === null && app.input !== null}
+      silent={app !== undefined && recordsOnly(app)}
       columns={columns}
       onVolume={(v) => setVolume(target, v)}
       onMute={(m) => setMuted(target, m)}
@@ -166,7 +173,11 @@ function Mixer() {
           ) : (
             mixer.apps.map((app) => row({ type: "app", app: app.id }, app.name, "app-window", app, app))
           )}
-          {deviceNote && <p className="mt-2 text-xs text-muted">{deviceNote}</p>}
+          {deviceNotes.map((text) => (
+            <p key={text} className="mt-2 text-xs text-muted">
+              {text}
+            </p>
+          ))}
         </div>
       )}
     </>

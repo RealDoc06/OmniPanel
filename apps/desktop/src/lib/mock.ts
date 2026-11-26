@@ -4,6 +4,7 @@
 import type {
   Action,
   AppAudio,
+  AppRoute,
   AppState,
   AudioDeviceInfo,
   Config,
@@ -279,16 +280,19 @@ let pairing: PairingInfo | null = null;
 let pairTimer: ReturnType<typeof setTimeout> | undefined;
 const images = new Map<string, string>();
 
+const FOLLOWS: AppRoute = { type: "default" };
+const on = (id: string): AppRoute => ({ type: "device", id });
+
 const mixer: { master: VolumeState; mic: VolumeState; apps: AppAudio[] } = {
   master: { volume: 0.62, muted: false },
   mic: { volume: 0.8, muted: false },
   apps: [
-    { id: "com.spotify.client", name: "Spotify", pid: 812, volume: 0.7, muted: false, playing: true, output: "airpods", input: null },
-    { id: "com.hnc.Discord", name: "Discord", pid: 944, volume: 0.55, muted: false, playing: false, output: "builtin-speakers", input: "mv7" },
-    { id: "com.google.Chrome", name: "Google Chrome", pid: 1201, volume: 1, muted: false, playing: true, output: "builtin-speakers", input: null },
-    { id: "us.zoom.xos", name: "zoom.us", pid: 1550, volume: 0.9, muted: true, playing: false, output: "builtin-speakers", input: "builtin-mic" },
+    { id: "com.spotify.client", name: "Spotify", pid: 812, volume: 0.7, muted: false, playing: true, output: on("airpods"), input: null },
+    { id: "com.hnc.Discord", name: "Discord", pid: 944, volume: 0.55, muted: false, playing: false, output: FOLLOWS, input: on("mv7") },
+    { id: "com.google.Chrome", name: "Google Chrome", pid: 1201, volume: 1, muted: false, playing: true, output: FOLLOWS, input: null },
+    { id: "us.zoom.xos", name: "zoom.us", pid: 1550, volume: 0.9, muted: true, playing: false, output: FOLLOWS, input: FOLLOWS },
     // Only records: it has a microphone but no volume.
-    { id: "com.obsproject.obs-studio", name: "OBS", pid: 1702, volume: 1, muted: false, playing: false, output: null, input: "builtin-mic" },
+    { id: "com.obsproject.obs-studio", name: "OBS", pid: 1702, volume: 1, muted: false, playing: false, output: null, input: FOLLOWS },
   ],
 };
 
@@ -304,6 +308,8 @@ const audioDevices: { inputs: AudioDeviceInfo[]; outputs: AudioDeviceInfo[] } = 
     { id: "blackhole-out", name: "BlackHole 2ch", isDefault: false, isVirtual: true },
   ],
 };
+
+const NO_WINDOWS_DEVICES = "Choosing a device per app is not available on Windows yet.";
 
 const os = /mac/i.test(navigator.platform) ? "macos" : /win/i.test(navigator.platform) ? "windows" : "linux";
 
@@ -359,10 +365,11 @@ function runtime(): RuntimeState {
       note: os === "macos" ? "Per-app volume needs System Settings > Privacy & Security > Screen & System Audio Recording." : null,
       // As the real backends: Linux moves both, macOS only what an app plays, Windows neither yet.
       perAppOutput: os !== "windows",
+      outputNote: os === "windows" ? NO_WINDOWS_DEVICES : null,
       perAppInput: os === "linux",
-      deviceNote:
+      inputNote:
         os === "macos" ? "macOS has no way to change another app's microphone. Pick it in the app's own settings."
-        : os === "windows" ? "Choosing a device per app is not available on Windows yet."
+        : os === "windows" ? NO_WINDOWS_DEVICES
         : null,
     },
   };
@@ -651,14 +658,14 @@ const api: Api = {
       case "appDevice": {
         const { audio } = runtime();
         const output = action.direction === "output";
-        if (!(output ? audio.perAppOutput : audio.perAppInput)) throw `not supported on this platform: ${audio.deviceNote}`;
+        if (!(output ? audio.perAppOutput : audio.perAppInput)) throw `not supported on this platform: ${output ? audio.outputNote : audio.inputNote}`;
         const app = mixer.apps.find((a) => a.id === action.app || a.name.toLowerCase() === action.app.toLowerCase());
         if (!app) throw `no audio app matches "${action.app}"`;
         const devices = output ? audioDevices.outputs : audioDevices.inputs;
-        const device = devices.find((d) => (action.device === null ? d.isDefault : d.id === action.device || d.name === action.device));
-        if (!device) throw `no audio device matches "${action.device}"`;
+        const device = devices.find((d) => d.id === action.device || d.name === action.device);
+        if (action.device !== null && !device) throw `no audio device matches "${action.device}"`;
         if (app[action.direction] === null) throw `${app.name} is not ${output ? "playing" : "recording"} anything`;
-        app[action.direction] = device.id;
+        app[action.direction] = device ? on(device.id) : FOLLOWS;
         break;
       }
       default:

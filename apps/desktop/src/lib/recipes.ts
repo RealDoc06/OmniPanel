@@ -2,7 +2,7 @@
 // Each one makes a control kind plus the button face it starts with. Static recipes
 // cover every action type; dynamic ones come from installed apps and the mixer.
 import type { AppAudio, Control, Icon, InstalledApp, Style } from "@omni/protocol";
-import { defaultAction, describeAction, type ActionGroup, type NameLookup } from "./actions.ts";
+import { defaultAction, describeAction, recordsOnly, type ActionGroup, type NameLookup } from "./actions.ts";
 import type { IconName } from "./icons";
 
 /** What picking an entry produces: the new kind and the button face to apply. */
@@ -478,7 +478,8 @@ const appIcon = (name: string): IconName =>
     .find((icon) => icon !== undefined) ?? "app-window";
 
 /** Picker entries for installed apps ("Open Spotify") and apps playing sound ("Mute / unmute Spotify"). */
-export function dynamicRecipes(installed: readonly InstalledApp[], playing: readonly AppAudio[]): Recipe[] {
+export function dynamicRecipes(installed: readonly InstalledApp[], apps: readonly AppAudio[]): Recipe[] {
+  const playing = apps.filter((app) => !recordsOnly(app));
   const opens = installed.map(
     (app): Recipe => ({
       id: `open:${app.name}`,

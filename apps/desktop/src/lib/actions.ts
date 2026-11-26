@@ -2,6 +2,7 @@
 // Labels follow the plain-words vocabulary of the desktop UI (no "hotkey", "deck" or "profile").
 import type {
   Action,
+  AppAudio,
   AudioDirection,
   Control,
   Effect,
@@ -240,6 +241,9 @@ export interface NameLookup {
   /** Audio device (speaker or microphone) by id. */
   device?: (id: string) => string | undefined;
 }
+
+/** An app that records without playing anything: it has a microphone but no volume or speaker. */
+export const recordsOnly = (app: AppAudio): boolean => app.output === null && app.input !== null;
 
 /** Whether the action, or one nested in it, chooses an app's device. */
 export function usesAppDevice(action: Action | null): boolean {

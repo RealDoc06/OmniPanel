@@ -156,10 +156,12 @@ pub struct AudioCapabilities {
     pub note: Option<String>,
     /// Apps can be sent to an output device of their own.
     pub per_app_output: bool,
+    /// Why they cannot, or a permission hint.
+    pub output_note: Option<String>,
     /// Apps can be given a microphone of their own.
     pub per_app_input: bool,
-    /// Why choosing a device per app is limited/unavailable.
-    pub device_note: Option<String>,
+    /// Why they cannot.
+    pub input_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
@@ -185,12 +187,26 @@ pub struct AppAudio {
     pub muted: bool,
     /// Currently producing sound.
     pub playing: bool,
-    /// Output device the app plays on (`AudioDeviceInfo::id`). `None` for an app that
-    /// only records, and where `AudioCapabilities::per_app_output` is false.
-    pub output: Option<String>,
-    /// Microphone the app records from, while it records. Always `None` where
+    /// Where the app plays. `None` for an app that only records, and where
+    /// `AudioCapabilities::per_app_output` is false.
+    pub output: Option<AppRoute>,
+    /// What the app records from, while it records. Always `None` where
     /// `AudioCapabilities::per_app_input` is false.
-    pub input: Option<String>,
+    pub input: Option<AppRoute>,
+}
+
+/// The device one side of an app's audio is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export)]
+pub enum AppRoute {
+    /// It follows the system default device.
+    Default,
+    /// One device, by `AudioDeviceInfo::id`. Where OmniPanel keeps the choice itself
+    /// (macOS) the device may not be connected right now.
+    Device { id: String },
+    /// Its streams are on different devices.
+    Several,
 }
 
 /// A per-app level and output device the user set, persisted so they survive

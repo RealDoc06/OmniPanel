@@ -5,8 +5,8 @@
 //!
 //! An app's device is where its streams are connected: playback streams (sink inputs)
 //! are moved between sinks, recording streams (source outputs) between sources. The
-//! sound server remembers the choice per app. Moving a stream to the default device
-//! makes it follow the default again.
+//! sound server remembers the choice per app. Both servers take a move to the default
+//! device, by name or as `@DEFAULT_SINK@`, as following the default again.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::collections::HashMap;
@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::{
-    AppAudio, AudioCapabilities, AudioDeviceInfo, AudioDevices, AudioError, Backend, Endpoint, Result, VolumeState,
-    best_match, find_device,
+    AppAudio, AppRoute, AudioCapabilities, AudioDeviceInfo, AudioDevices, AudioError, Backend, Endpoint, Result,
+    VolumeState, best_match, find_device,
 };
 
 const NORM: f32 = 65536.0;
@@ -185,23 +185,32 @@ struct Listing {
     devices: AudioDevices,
 }
 
-/// Groups the streams of `pactl -f json list` by binary into apps. An app is on the
-/// device of its first stream. Recording from a monitor (desktop capture) is not a
-/// microphone choice and is left alone.
+/// The route of an app with one more stream on `device`: that device while all its
+/// streams share it. pactl does not say which streams follow the default, so an app
+/// is never reported as `AppRoute::Default` here.
+fn joined(route: Option<AppRoute>, device: Option<&str>) -> AppRoute {
+    match (route, device) {
+        (None, Some(device)) => AppRoute::Device { id: device.into() },
+        (Some(AppRoute::Device { id }), Some(device)) if id == device => AppRoute::Device { id },
+        _ => AppRoute::Several,
+    }
+}
+
+/// Groups the streams of `pactl -f json list` by binary into apps. Recording from a
+/// monitor (desktop capture) is not a microphone choice and is left alone.
 fn parse_listing(json: &str) -> Result<Listing> {
     let raw: Raw =
         serde_json::from_str(json).map_err(|e| AudioError::Backend(format!("unexpected pactl output: {e}")))?;
-    let name_of = |devices: &[Device], index: Option<u32>| {
-        devices.iter().find(|d| Some(d.index) == index).map(|d| d.name.clone())
-    };
     let mut apps: Vec<App> = Vec::new();
     for stream in &raw.sink_inputs {
         let id = stream.app_id().map_or_else(|| format!("sink-input-{}", stream.index), str::to_string);
+        let sink = raw.sinks.iter().find(|d| Some(d.index) == stream.device).map(|d| d.name.as_str());
         if let Some(app) = apps.iter_mut().find(|a| a.audio.id == id) {
             app.playback.push(stream.index);
             app.audio.volume = app.audio.volume.max(stream.volume());
             app.audio.muted &= stream.mute;
             app.audio.playing |= !stream.corked;
+            app.audio.output = Some(joined(app.audio.output.take(), sink));
             continue;
         }
         let audio = AppAudio {
@@ -211,7 +220,7 @@ fn parse_listing(json: &str) -> Result<Listing> {
             volume: stream.volume(),
             muted: stream.mute,
             playing: !stream.corked,
-            output: name_of(&raw.sinks, stream.device),
+            output: Some(joined(None, sink)),
             input: None,
         };
         apps.push(App { audio, playback: vec![stream.index], recording: Vec::new() });
@@ -239,7 +248,7 @@ fn parse_listing(json: &str) -> Result<Listing> {
             }
         };
         app.recording.push(stream.index);
-        app.audio.input.get_or_insert_with(|| source.name.clone());
+        app.audio.input = Some(joined(app.audio.input.take(), Some(&source.name)));
     }
     apps.sort_by_cached_key(|a| a.audio.name.to_lowercase());
     let devices = AudioDevices {
@@ -297,8 +306,9 @@ impl Backend for Platform {
             per_app_volume: self.installed,
             note: note.clone(),
             per_app_output: self.installed,
+            output_note: note.clone(),
             per_app_input: self.installed,
-            device_note: note,
+            input_note: note,
         }
     }
 
@@ -374,6 +384,8 @@ impl Backend for Platform {
             Some(query) => find_device(devices, query)?.id.as_str(),
             None => target(direction).1,
         };
+        // One call per stream: when one fails (its stream just ended), the ones before it
+        // have moved, and the next listing shows the app as it is.
         for index in streams {
             pactl(&[verb, &index.to_string(), device])?;
         }
@@ -439,20 +451,24 @@ mod tests {
             ["alsa_input.pci-0000_00_1f.3.analog-stereo", "alsa_input.usb-046d_C922-02.analog-stereo"]
         );
 
+        let on = |id: &str| Some(AppRoute::Device { id: id.into() });
         let firefox = &apps[0];
-        assert_eq!(firefox.audio.output.as_deref(), Some("alsa_output.pci-0000_00_1f.3.analog-stereo"));
-        assert_eq!(firefox.audio.input.as_deref(), Some("alsa_input.pci-0000_00_1f.3.analog-stereo"));
+        assert_eq!(firefox.audio.output, on("alsa_output.pci-0000_00_1f.3.analog-stereo")); // both tabs
+        assert_eq!(firefox.audio.input, on("alsa_input.pci-0000_00_1f.3.analog-stereo"));
         assert_eq!(firefox.recording, [104]);
+        // A third tab on the headphones: the app is on no single device any more.
+        assert_eq!(joined(firefox.audio.output.clone(), Some("headphones")), AppRoute::Several);
+        assert_eq!(joined(Some(AppRoute::Several), Some("headphones")), AppRoute::Several);
 
         let spotify = &apps[1];
-        assert_eq!((spotify.audio.input.as_deref(), spotify.recording.len()), (None, 0));
+        assert_eq!((&spotify.audio.input, spotify.recording.len()), (&None, 0));
 
         // Only records: no playback to move or turn down. OBS (desktop capture from a
         // monitor) and the sound server's own loopback are not listed at all.
         let discord = &apps[2];
         assert_eq!((discord.audio.id.as_str(), discord.audio.pid), ("Discord", Some(7001)));
-        assert_eq!((discord.audio.output.as_deref(), discord.audio.playing), (None, false));
-        assert_eq!(discord.audio.input.as_deref(), Some("alsa_input.usb-046d_C922-02.analog-stereo"));
+        assert_eq!((&discord.audio.output, discord.audio.playing), (&None, false));
+        assert_eq!(discord.audio.input, on("alsa_input.usb-046d_C922-02.analog-stereo"));
         assert_eq!((discord.playback.len(), discord.recording.as_slice()), (0, [100].as_slice()));
     }
 
@@ -528,8 +544,9 @@ mod tests {
         let on = |output: &str, input: &str| {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
+                let device = |id: &str| Some(AppRoute::Device { id: id.into() });
                 let devices = pacat().map(|a| (a.output, a.input));
-                if devices == Some((Some(output.into()), Some(input.into()))) {
+                if devices == Some((device(output), device(input))) {
                     return;
                 }
                 assert!(std::time::Instant::now() < deadline, "pacat is on {devices:?}, not on {output} / {input}");

@@ -11,7 +11,8 @@
 //! All methods are blocking but fast; call them from `spawn_blocking` in async code.
 
 pub use omni_core::{
-    AppAudio, AppLevel, AudioCapabilities, AudioDeviceInfo, AudioDevices, AudioDirection, MixerState, VolumeState,
+    AppAudio, AppLevel, AppRoute, AudioCapabilities, AudioDeviceInfo, AudioDevices, AudioDirection, MixerState,
+    VolumeState,
 };
 
 #[cfg(target_os = "macos")]
@@ -83,9 +84,14 @@ pub(crate) trait Backend: Send + Sync + Sized {
     /// Sends what the app plays to an output device, or gives it a microphone.
     /// `device` matches like [`find_device`]; `None` is the system default. Takes the
     /// app query instead of a found app: a platform that cannot do this says so
-    /// (with `capabilities().device_note`) whether or not the app is running.
-    fn set_app_device(&self, _app: &str, _direction: Endpoint, _device: Option<&str>) -> Result<()> {
-        Err(AudioError::Unsupported(self.capabilities().device_note.unwrap_or_default()))
+    /// (with the note of its `capabilities()`) whether or not the app is running.
+    fn set_app_device(&self, _app: &str, direction: Endpoint, _device: Option<&str>) -> Result<()> {
+        let capabilities = self.capabilities();
+        let note = match direction {
+            Endpoint::Output => capabilities.output_note,
+            Endpoint::Input => capabilities.input_note,
+        };
+        Err(AudioError::Unsupported(note.unwrap_or_default()))
     }
 }
 
@@ -225,13 +231,13 @@ fn best_match<'a, T>(items: &'a [T], query: &str, id: impl Fn(&T) -> &str, name:
         .or_else(|| items.iter().find(|i| name(i).to_lowercase().contains(&needle)))
 }
 
-fn find_app<'a>(apps: &'a [AppAudio], query: &str) -> Option<&'a AppAudio> {
+/// The app an action's `app` refers to, among `apps`.
+pub fn find_app<'a>(apps: &'a [AppAudio], query: &str) -> Option<&'a AppAudio> {
     best_match(apps, query, |a| &a.id, |a| &a.name)
 }
 
-// Backends without per-app devices never look one up.
-#[cfg_attr(windows, allow(dead_code))]
-fn find_device<'a>(devices: &'a [AudioDeviceInfo], query: &str) -> Result<&'a AudioDeviceInfo> {
+/// The device an action's `device` refers to, among `devices`.
+pub fn find_device<'a>(devices: &'a [AudioDeviceInfo], query: &str) -> Result<&'a AudioDeviceInfo> {
     best_match(devices, query, |d| &d.id, |d| &d.name).ok_or_else(|| AudioError::DeviceNotFound(query.into()))
 }
 
