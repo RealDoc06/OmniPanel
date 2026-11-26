@@ -33,7 +33,7 @@ Android). Old devices are first-class: the deck works on Android 4.4 and iOS 9 b
 
 ## Install
 
-> **Alpha.** Expect rough edges and back up your config between versions. Builds are unsigned.
+> **Alpha.** Expect rough edges and back up your config between versions. The macOS build is signed and notarized; Windows and Linux builds are unsigned.
 
 Download the installer for your OS from the [releases page](https://github.com/RealDoc06/OmniPanel/releases) and run it.
 
@@ -59,8 +59,8 @@ the app says so.
 **Unsigned builds**
 
 - **Windows:** SmartScreen may warn "Windows protected your PC". Click **More info**, then **Run anyway**.
-- **macOS:** Gatekeeper blocks the first launch. Right-click the app and choose **Open**. If macOS says it is damaged, run
-  `xattr -cr /Applications/OmniPanel.app`.
+- **macOS:** builds from 0.1.0-alpha.3 on are signed and open normally. Older ones are blocked by Gatekeeper on first
+  launch: run `xattr -cr /Applications/OmniPanel.app`, or use **Open Anyway** in System Settings → Privacy & Security.
 - Verify downloads against `SHA256SUMS` when the release includes it.
 
 **Linux notes**
