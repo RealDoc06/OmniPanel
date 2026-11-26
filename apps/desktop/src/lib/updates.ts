@@ -4,10 +4,12 @@ import { create } from "zustand";
 import { updater, type UpdateStatus } from "./backend";
 import { flushAll } from "./store";
 
-export const useUpdate = create<{ status: UpdateStatus; installing: boolean }>()(() => ({
+export const useUpdate = create<{ status: UpdateStatus; installing: boolean; locked: boolean }>()(() => ({
   status: { state: "idle" },
   /** `installUpdate` is running: from the click until the shell reports progress, and between its steps. */
   installing: false,
+  /** The app takes no input (App.tsx): from the last save before an install until that install ends. */
+  locked: false,
 }));
 
 // A status pushed while the first one is being fetched is the newer of the two.
@@ -32,9 +34,11 @@ export async function installUpdate() {
   useUpdate.setState({ installing: true });
   try {
     if (useUpdate.getState().status.state !== "ready") await updater.download();
+    // No edit may come after this save: the app can exit the moment the install starts.
+    useUpdate.setState({ locked: true });
     await flushAll();
     await updater.install();
   } finally {
-    useUpdate.setState({ installing: false });
+    useUpdate.setState({ installing: false, locked: false });
   }
 }

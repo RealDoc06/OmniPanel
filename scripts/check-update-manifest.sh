@@ -19,7 +19,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 fail() {
-  echo "::error::$*"
+  echo "::error::$*" >&2
   exit 1
 }
 
@@ -58,9 +58,10 @@ for target in linux-{x86_64,aarch64}{,-appimage,-deb,-rpm} windows-x86_64{,-nsis
     minisign -VQ -P "$pubkey" -m "$work/package" -x "$work/package.minisig" >"$checked" || fail "$target is not signed with OmniPanel's key"
   fi
   signed=$'\t'"$(cat "$checked")"$'\t'
+  package="$(package_for "$target")"
   # Apps set requireSignedVersion: they refuse a signature made for another version.
   [[ "$signed" == *$'\t'"version:$version"$'\t'* ]] || fail "$target is signed for another version:$signed"
-  [[ "$signed" == *$'\t'"file:"$(package_for "$target")$'\t'* ]] || fail "$target points at the wrong package:$signed"
+  [[ "$signed" == *$'\t'"file:"$package$'\t'* ]] || fail "$target points at the wrong package:$signed"
 done
 
 echo "latest.json $version: every platform is present and verified"

@@ -197,8 +197,8 @@ pub async fn check_for_update(app: AppHandle) -> Result<(), String> {
     check(&app).await.map(drop)
 }
 
-/// Asks the update server once. `Ok(false)` when it didn't, because a check, a
-/// download or an install is under way. On failure the status goes back to what
+/// Asks the update server once. `Ok(false)` when the answer wasn't used: a check,
+/// a download or an install was under way, or the user started on the offer meanwhile. On failure the status goes back to what
 /// it was and the error is a message for the user.
 async fn check(app: &AppHandle) -> Result<bool, String> {
     let previous = {
@@ -233,7 +233,8 @@ async fn check(app: &AppHandle) -> Result<bool, String> {
                 inner.update = update;
                 (Some(inner.status.clone()), Ok(true))
             }
-            Ok(_) => (None, Ok(true)),
+            // Thrown away, so nothing was learned: the next tick asks again.
+            Ok(_) => (None, Ok(false)),
             Err(e) => {
                 tracing::info!("update check failed: {e}");
                 let restored = (inner.status == Status::Checking).then(|| previous.clone());
@@ -246,8 +247,13 @@ async fn check(app: &AppHandle) -> Result<bool, String> {
     };
     if let Some(status) = &changed {
         if result.is_ok() {
-            let version = if let Status::Available { version, .. } = status { Some(version.as_str()) } else { None };
-            tray::set_update(app, version);
+            tray::set_update(
+                app,
+                match status {
+                    Status::Available { version, .. } => Some(version.as_str()),
+                    _ => None,
+                },
+            );
         }
         publish(app, status);
     }

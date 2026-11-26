@@ -113,6 +113,8 @@ fn main() {
         RunEvent::Reopen { .. } => window::show(app),
         // tao 0.37 sends Dock Quit directly here, without an ExitRequested to defer.
         RunEvent::Exit => {
+            // This exit is a quit: an install that ends during the wait must not restart.
+            app.state::<QuitState>().requested.store(true, Ordering::SeqCst);
             updater::wait_for_install(app);
             shutdown_engine(app);
             // Restarting into an update starts the new process while this one is

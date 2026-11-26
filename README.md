@@ -131,7 +131,7 @@ macOS cannot be cross-built. Tagging `v*` runs the release workflow, which build
 
 Publishing that draft is what sends the update to installed apps: the workflow checks every package once more
 (`scripts/check-update-manifest.sh`) and copies the release's `latest.json` to the `updater` branch, which they read.
-A failed "publish-update" job means the update did not go out. A published version is never rebuilt, so fix a bad
+A failed or cancelled "publish-update" job means the update did not go out: rerun it. A published version is never rebuilt, so fix a bad
 release with a new version.
 
 Only workflow builds can be updates. They are signed with the `TAURI_SIGNING_PRIVATE_KEY` repository secret, whose

@@ -12,10 +12,6 @@ on:
   release:
     types: [published]
 
-# One run at a time, builds and publishing alike. If a release is published while a
-# build of it is still uploading, publishing waits and then verifies the final packages.
-concurrency: release
-
 jobs:
   build:
     if: github.event_name != 'release'
@@ -116,11 +112,25 @@ jobs:
   publish-update:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # One at a time. A run that is replaced while it waits loses nothing: the run that
+    # replaced it promotes the newest release too.
+    concurrency: publish-update
     permissions:
       contents: write
+      actions: read
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # A build still uploading to a release would change its packages after the check
+      # below, so every build of this workflow ends first. One that starts later refuses
+      # a published release.
+      - name: Wait for builds that are still running
+        run: |
+          while gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --limit 50 --json status,event \
+            --jq '.[] | select(.event != "release" and .status != "completed") | .status' | grep -q .; do
+            sleep 30
+          done
       # Whichever release started this run, apps should get the one published last. A
       # rerun or a late run for an older release then can't put an old manifest back.
       # (Publish in version order: a backport published later would become "newest".)
@@ -143,7 +153,8 @@ jobs:
           # tauri-action links packages by API asset id. Swap in the release's own download
           # links: no API rate limit for the apps, and nothing tied to an id.
           gh release download "$TAG" --pattern latest.json --output draft.json
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '[.assets[] | {key: .url, value: .browser_download_url}] | from_entries' > links.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq '[.assets[] | {key: (.url, .browser_download_url), value: .browser_download_url}] | from_entries' > links.json
           jq --slurpfile links links.json \
             '.platforms |= map_values(.url = ($links[0][.url] // error("no release asset for " + .url)))' draft.json > manifest/latest.json
           # Same check as on the draft, now without a token: exactly what the apps will download.
